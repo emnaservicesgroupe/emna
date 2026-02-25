@@ -11,6 +11,9 @@ const { startAlertScheduler } = require("./jobs/alertScheduler");
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.get("/", (req, res) => {
+  res.send("EMNA CRM Backend Running 🚀");
+});
 
 app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
