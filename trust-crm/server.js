@@ -9,8 +9,11 @@ const notificationRoutes = require("./routes/notifications");
 const { startAlertScheduler } = require("./jobs/alertScheduler");
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
+
+// ⭐️ ROOT ROUTE
 app.get("/", (req, res) => {
   res.send("EMNA CRM Backend Running 🚀");
 });
