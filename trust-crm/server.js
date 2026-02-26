@@ -35,7 +35,7 @@ try {
 } catch (err) {
   console.log("Scheduler skipped:", err.message);
 }
-
+startAlertScheduler();
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
