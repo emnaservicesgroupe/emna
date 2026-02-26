@@ -22,7 +22,9 @@ app.get("/status", (req, res) => {
     owner: "Mohamed Aloui"
   });
 });
-
+app.get("/", (req, res) => {
+  res.send("EMNA CRM Backend Running 🚀");
+});
 app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
 app.use("/auth", authRoutes);
