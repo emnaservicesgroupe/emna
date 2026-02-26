@@ -23,8 +23,14 @@ app.use("/alerts", alertRoutes);
 app.use("/auth", authRoutes);
 app.use("/notifications", notificationRoutes);
 
-startAlertScheduler();
+try {
+  startAlertScheduler();
+} catch (err) {
+  console.log("Scheduler skipped:", err.message);
+}
 
-app.listen(process.env.PORT, () => {
-  console.log("🚀 CRM Running on port " + process.env.PORT);
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
