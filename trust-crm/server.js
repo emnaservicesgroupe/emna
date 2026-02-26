@@ -13,8 +13,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ⭐️ ROOT ROUTE
-app.get("/status", (req, res) => {
+// ✅ ROOT ROUTE (باش ما عادش يظهر Cannot GET /)
+app.get("/", (req, res) => {
   res.json({
     system: "EMNA CRM",
     status: "Running",
@@ -22,22 +22,23 @@ app.get("/status", (req, res) => {
     owner: "Mohamed Aloui"
   });
 });
-app.get("/", (req, res) => {
-  res.send("EMNA CRM Backend Running 🚀");
-});
+
+// ✅ ROUTES
 app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
 app.use("/auth", authRoutes);
 app.use("/notifications", notificationRoutes);
 
+// ✅ START SCHEDULER
 try {
   startAlertScheduler();
 } catch (err) {
-  console.log("Scheduler skipped:", err.message);
+  console.log("Scheduler not started:", err.message);
 }
-startAlertScheduler();
-const PORT = process.env.PORT || 10000;
+
+// ✅ PORT (مهم جدا ل Render)
+const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 EMNA CRM running on port ${PORT}`);
 });
