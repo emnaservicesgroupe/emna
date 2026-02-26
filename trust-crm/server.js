@@ -14,8 +14,13 @@ app.use(cors());
 app.use(express.json());
 
 // ⭐️ ROOT ROUTE
-app.get("/", (req, res) => {
-  res.send("EMNA CRM Backend Running 🚀");
+app.get("/status", (req, res) => {
+  res.json({
+    system: "EMNA CRM",
+    status: "Running",
+    company: "Emna Visa Services",
+    owner: "Mohamed Aloui"
+  });
 });
 
 app.use("/candidates", candidateRoutes);
