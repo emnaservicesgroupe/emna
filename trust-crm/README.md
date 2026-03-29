@@ -1,17 +1,26 @@
-# trust-crm
+# EMNA Services CRM API
 
-Backend API for candidate onboarding, role-based access, and expiry notifications.
+Production backend API for visa/recruitment CRM operations.
 
-## Setup
+## Features
+
+- Role-based access control (permissions)
+- Candidate lifecycle with visa stage tracking
+- Document metadata management (upload/replace/delete metadata)
+- Finance workflows (invoices, payments, in/out dashboard totals)
+- Notifications and expiry alerts scheduler
+- Audit logging for critical write actions
+- Transaction-safe database writes for critical flows
+
+## 1) Setup
 
 ```bash
 npm install
+cp .env.example .env
 npm start
 ```
 
-## Environment
-
-Create `.env`:
+## 2) Environment variables
 
 ```env
 PORT=5000
@@ -20,56 +29,96 @@ DB_USER=postgres
 DB_PASSWORD=yourpassword
 DB_NAME=trustcrm
 DB_PORT=5432
-JWT_SECRET=trustcrmsecretkey
+JWT_SECRET=change_this_to_long_random_secret
 ```
 
-## Database
+## 3) Database
 
-```sql
-CREATE TABLE IF NOT EXISTS candidates (
-  id SERIAL PRIMARY KEY,
-  full_name TEXT,
-  nationality TEXT,
-  date_of_birth DATE,
-  passport_number TEXT,
-  passport_expiry DATE,
-  b3_expiry DATE,
-  embassy_date DATE,
-  visa_status TEXT,
-  work_company TEXT,
-  partner_company TEXT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+Run SQL in order:
 
-CREATE TABLE IF NOT EXISTS users (
-  id SERIAL PRIMARY KEY,
-  full_name TEXT,
-  email TEXT UNIQUE,
-  password TEXT,
-  role TEXT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS notifications (
-  id SERIAL PRIMARY KEY,
-  candidate_id INT REFERENCES candidates(id) ON DELETE CASCADE,
-  type TEXT NOT NULL,
-  message TEXT NOT NULL,
-  due_date DATE,
-  is_read BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_notif
-ON notifications(candidate_id, type, due_date);
+```bash
+psql -d trustcrm -f sql/schema.sql
+# Optional for Supabase/Postgres JWT-claim authorization
+psql -d trustcrm -f sql/rls_policies.sql
 ```
 
-## Main routes
+## 4) Authentication flow
 
-- `POST /auth/register`
-- `POST /auth/login`
-- `POST /candidates/add` (token + role: Admin/Manager/Receptionist)
-- `GET /candidates/all` (token + role: Admin/Manager/Receptionist/Accountant/HR)
+### Step A: Bootstrap first super admin (only once)
+
+```http
+POST /auth/bootstrap-super-admin
+Content-Type: application/json
+
+{
+  "full_name": "Super Admin",
+  "email": "admin@example.com",
+  "password": "StrongPassword123!"
+}
+```
+
+### Step B: Login
+
+```http
+POST /auth/login
+```
+
+### Step C: Create users (requires `users:write` permission)
+
+```http
+POST /auth/register
+Authorization: Bearer <token>
+```
+
+## 5) Main modules and endpoints
+
+### Candidates
+- `POST /candidates/add`
+- `GET /candidates/all?search=`
+- `GET /candidates/:id`
+- `PUT /candidates/:id`
+- `DELETE /candidates/:id` (soft delete)
+- `POST /candidates/:id/stage`
+
+### Documents
+- `POST /documents`
+- `PUT /documents/:id`
+- `DELETE /documents/:id`
+
+### Finance
+- `GET /finance/dashboard`
+- `POST /finance/invoices`
+- `POST /finance/payments` (transactional payment + invoice update)
+
+### Notifications / Alerts
 - `GET /alerts/expiring`
-- `GET /notifications/latest` (token + role: Admin/Manager/Receptionist/Accountant/HR)
-- `POST /notifications/read/:id` (token + role: Admin/Manager/Receptionist/Accountant/HR)
+- `GET /notifications/latest`
+- `POST /notifications/read/:id`
+
+### Audit
+- `GET /audit-logs?limit=100`
+
+## 6) Security notes
+
+- Passwords are hashed with bcrypt.
+- Protected routes require JWT authentication.
+- Permissions are enforced with middleware.
+- Critical write actions are logged to `audit_logs`.
+- Soft-delete is used for sensitive entities.
+- Optional RLS policies are provided for Supabase deployments.
+
+## 7) Production recommendations
+
+- Run behind HTTPS reverse proxy.
+- Rotate JWT secret and DB credentials.
+- Use private storage + signed URLs for real document delivery.
+- Enable daily backups and restore checks.
+- Add API rate limiting/WAF at gateway level.
+
+## 8) Tests
+
+```bash
+make test
+```
+
+This runs `npm test` in `trust-crm` and executes all Node.js tests in `tests/*.test.js`.
