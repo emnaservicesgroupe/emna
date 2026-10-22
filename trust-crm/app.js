@@ -8,6 +8,7 @@ const notificationRoutes = require("./routes/notifications");
 const financeRoutes = require("./routes/finance");
 const documentRoutes = require("./routes/documents");
 const auditRoutes = require("./routes/audit");
+const jobsearchAuthRoutes = require("./routes/jobsearchAuth");
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.use("/notifications", notificationRoutes);
 app.use("/finance", financeRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
+app.use("/jobsearch", jobsearchAuthRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);

@@ -10,12 +10,18 @@ const PERMISSIONS = {
     "notifications:read",
     "users:write",
     "audit:read",
+    "jobsearch:read",
+    "jobsearch:write",
+    "jobsearch:approve",
+    "jobsearch:admin",
   ],
-  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read"],
-  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read"],
+  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read", "jobsearch:read", "jobsearch:write", "jobsearch:approve"],
+  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read", "jobsearch:read", "jobsearch:write"],
   Accountant: ["finance:read", "finance:write", "notifications:read", "candidates:read"],
   HR: ["candidates:read", "users:read", "notifications:read"],
-  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write"],
+  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write", "jobsearch:read", "jobsearch:write"],
+  // Candidates are authorised by ownership checks (modules/jobsearch/scope.js), not permissions.
+  Candidate: [],
 };
 
 exports.checkRole = (...roles) => {
