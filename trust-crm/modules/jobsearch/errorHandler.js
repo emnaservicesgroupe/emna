@@ -17,4 +17,30 @@ function jobsearchErrorHandler(err, _req, res, _next) {
   return res.status(500).json({ error: "Internal server error" });
 }
 
-module.exports = { asyncHandler, jobsearchErrorHandler };
+// body-parser error types -> status. Anything else from the parser becomes 400.
+const BODY_ERROR_STATUS = {
+  "entity.parse.failed": 400,
+  "entity.too.large": 413,
+  "entity.verify.failed": 403,
+  "encoding.unsupported": 415,
+  "charset.unsupported": 415,
+  "parameters.too.many": 413,
+  "request.aborted": 400,
+  "request.size.invalid": 400,
+  "stream.encoding.set": 500,
+  "stream.not.readable": 500,
+};
+
+/**
+ * Handles body-parser failures for /jobsearch requests. Parser errors carry the raw
+ * body (which may contain an OTP), so neither the error nor the body is logged.
+ */
+// eslint-disable-next-line no-unused-vars
+function jobsearchBodyErrorHandler(err, _req, res, next) {
+  if (!err || typeof err.type !== "string" || !(err.type in BODY_ERROR_STATUS)) return next(err);
+  const status = BODY_ERROR_STATUS[err.type];
+  const message = status === 413 ? "Request body too large" : status === 415 ? "Unsupported request encoding" : "Invalid request body";
+  return res.status(status).json({ error: status >= 500 ? "Internal server error" : message });
+}
+
+module.exports = { asyncHandler, jobsearchErrorHandler, jobsearchBodyErrorHandler };

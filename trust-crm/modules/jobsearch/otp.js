@@ -12,6 +12,8 @@
 //   store; the per-code attempt cap and DB cooldown remain in the DB regardless.
 // - Unknown / inactive / non-Candidate / unlinked emails: identical response, no row,
 //   no mail, comparable bcrypt work to avoid gross timing differences.
+// - Issuance + mail delivery run after the response (no timing difference on the
+//   request path); tests await them with _testing.flush().
 // - The code is never logged and never returned.
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
@@ -187,13 +189,24 @@ async function issue(email) {
   }
 }
 
-/** Always resolves; behaves identically whether or not the account exists. */
+// Issuance (lookup, hashing, DB transaction, mail delivery) runs in the background
+// after the caller has answered, so known and unknown emails take the same time on
+// the request path. Errors are caught and logged without the code or email.
+const pending = new Set();
+
+/**
+ * Always resolves immediately; behaves identically whether or not the account exists.
+ * The code is issued and mailed asynchronously (see _testing.flush()).
+ */
 async function requestOtp(email) {
-  try {
-    await issue(normalizeEmail(email));
-  } catch (err) {
-    console.error("OTP request failed:", errTag(err));
-  }
+  const normalized = normalizeEmail(email);
+  const job = new Promise((resolve) => setImmediate(resolve))
+    .then(() => issue(normalized))
+    .catch((err) => {
+      console.error("OTP request failed:", errTag(err));
+    })
+    .finally(() => pending.delete(job));
+  pending.add(job);
 }
 
 // ---------------------------------------------------------------- verify
@@ -250,6 +263,10 @@ module.exports = {
     limits,
     reset() {
       hits.clear();
+    },
+    /** Resolves once all background OTP issuance has finished. */
+    async flush() {
+      while (pending.size) await Promise.allSettled([...pending]);
     },
     setNow(fn) {
       nowFn = fn || (() => Date.now());

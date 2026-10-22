@@ -9,10 +9,15 @@ const financeRoutes = require("./routes/finance");
 const documentRoutes = require("./routes/documents");
 const auditRoutes = require("./routes/audit");
 const jobsearchAuthRoutes = require("./routes/jobsearchAuth");
+const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 
 const app = express();
 
 app.use(cors());
+// /jobsearch parses its own JSON first so parser errors (which carry the raw body,
+// possibly an OTP) are answered without logging; the global parser then skips
+// already-parsed requests. Non-jobsearch routes are unaffected.
+app.use("/jobsearch", express.json({ limit: "10mb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/", (_req, res) => {

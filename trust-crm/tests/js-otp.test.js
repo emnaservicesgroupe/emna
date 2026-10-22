@@ -19,11 +19,14 @@ async function withApp(fn) {
   otp()._testing.reset();
   const server = app.listen(0);
   const base = `http://127.0.0.1:${server.address().port}`;
-  const call = async (method, path, { body, token } = {}) => {
+  const call = async (method, path, { body, token, raw, noFlush } = {}) => {
     const headers = { "content-type": "application/json" };
     if (token) headers.authorization = `Bearer ${token}`;
-    const r = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const payload = raw !== undefined ? raw : body === undefined ? undefined : JSON.stringify(body);
+    const r = await fetch(base + path, { method, headers, body: payload });
     const text = await r.text();
+    // OTP issuance runs after the response; wait for it so tests stay deterministic.
+    if (!noFlush) await otp()._testing.flush();
     let json = null;
     try {
       json = JSON.parse(text);
@@ -57,9 +60,39 @@ async function withApp(fn) {
     };
     await fn({ pool, call, adminToken, agentToken, admin, newCandidate });
   } finally {
+    await otp()._testing.flush();
     await new Promise((resolve) => server.close(resolve));
     await cleanup();
   }
+}
+
+function captureOutput() {
+  const captured = [];
+  const methods = ["log", "info", "warn", "error", "debug", "trace"];
+  const orig = {};
+  for (const m of methods) {
+    orig[m] = console[m];
+    console[m] = (...args) =>
+      captured.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a, Object.getOwnPropertyNames(a || {})))).join(" "));
+  }
+  const origOut = process.stdout.write;
+  const origErr = process.stderr.write;
+  process.stdout.write = function (chunk, ...rest) {
+    captured.push(String(chunk));
+    return origOut.call(process.stdout, chunk, ...rest);
+  };
+  process.stderr.write = function (chunk, ...rest) {
+    captured.push(String(chunk));
+    return origErr.call(process.stderr, chunk, ...rest);
+  };
+  return {
+    captured,
+    restore() {
+      for (const m of methods) console[m] = orig[m];
+      process.stdout.write = origOut;
+      process.stderr.write = origErr;
+    },
+  };
 }
 
 async function latestCode(email) {
@@ -289,6 +322,7 @@ test("unknown, inactive, suspended-link and non-Candidate emails get the identic
     await otp().requestOtp(undefined);
     await otp().requestOtp("not-an-email");
     await otp().requestOtp("nobody2@test.invalid");
+    await otp()._testing.flush();
   }));
 
 test("deactivated user cannot verify an already-issued code", () =>
@@ -350,6 +384,7 @@ test("the OTP code never appears in console output or response bodies", () =>
       process.env.MAIL_SANDBOX_ALLOWLIST = "*@elsewhere.test.invalid";
       otp()._testing.reset();
       await otp().requestOtp(c.email);
+      await otp()._testing.flush();
     } finally {
       delete process.env.MAIL_SANDBOX_ALLOWLIST;
       for (const m of methods) console[m] = orig[m];
@@ -445,4 +480,111 @@ test("request rate limit per IP and per email", () =>
       otp()._testing.setNow(null);
       otp()._testing.reset();
     }
+  }));
+
+test("malformed JSON bodies on /jobsearch give JSON 400/413 and never log the body", () =>
+  withApp(async ({ call }) => {
+    const code = "482913";
+    const out = captureOutput();
+    let bad;
+    let bad2;
+    let big;
+    try {
+      bad = await call("POST", "/jobsearch/auth/otp/verify", { raw: `{"email":"x@test.invalid","code":"${code}",}` });
+      bad2 = await call("POST", "/jobsearch/auth/otp/request", { raw: `{"email":"${code}@test.invalid"` });
+      big = await call("POST", "/jobsearch/auth/otp/verify", {
+        raw: JSON.stringify({ email: "x@test.invalid", code, pad: "a".repeat(11 * 1024 * 1024) }),
+      });
+    } finally {
+      out.restore();
+    }
+    assert.equal(bad.status, 400);
+    assert.deepEqual(Object.keys(bad.body), ["error"]);
+    assert.equal(bad2.status, 400);
+    assert.equal(big.status, 413);
+    assert.deepEqual(Object.keys(big.body), ["error"]);
+    for (const line of out.captured) assert.ok(!line.includes(code), `code leaked into logs: ${line.slice(0, 200)}`);
+    for (const r of [bad, bad2, big]) assert.ok(!r.text.includes(code), "code echoed in response");
+  }));
+
+test("non-jobsearch routes keep the original body-parser behaviour", () =>
+  withApp(async ({ call }) => {
+    const out = captureOutput();
+    let r;
+    try {
+      r = await call("POST", "/auth/login", { raw: "{bad json" });
+    } finally {
+      out.restore();
+    }
+    assert.equal(r.status, 500);
+    assert.deepEqual(r.body, { error: "Internal server error" });
+  }));
+
+test("request responds before issuance/mail delivery; known and unknown responses identical", () =>
+  withApp(async ({ call, newCandidate }) => {
+    const c = await newCandidate("slow@test.invalid");
+    const m = mail();
+    const originalSend = m.send;
+    let release;
+    let sendStarted = false;
+    let sendResolved = false;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    m.send = async (msg) => {
+      sendStarted = true;
+      await gate;
+      const r = await originalSend(msg);
+      sendResolved = true;
+      return r;
+    };
+    try {
+      const known = await call("POST", "/jobsearch/auth/otp/request", { body: { email: c.email }, noFlush: true });
+      assert.equal(sendResolved, false, "response must not wait for mail delivery");
+      const unknown = await call("POST", "/jobsearch/auth/otp/request", { body: { email: "ghost@test.invalid" }, noFlush: true });
+      assert.equal(known.status, 200);
+      assert.equal(unknown.status, 200);
+      assert.equal(known.text, unknown.text);
+      assert.deepEqual(known.body, GENERIC);
+      release();
+      await otp()._testing.flush();
+      assert.equal(sendStarted, true);
+      assert.equal(sendResolved, true);
+      assert.equal((await mail().sandbox.listOutbound({ to: c.email })).length, 1);
+      assert.equal((await mail().sandbox.listOutbound({ to: "ghost@test.invalid" })).length, 0);
+      const v = await call("POST", "/jobsearch/auth/otp/verify", { body: { email: c.email, code: await latestCode(c.email) } });
+      assert.equal(v.status, 200);
+    } finally {
+      release();
+      m.send = originalSend;
+    }
+  }));
+
+test("background send failure expires the code and logs neither code nor email", () =>
+  withApp(async ({ pool, call, newCandidate }) => {
+    const c = await newCandidate("throws@test.invalid");
+    const m = mail();
+    const originalSend = m.send;
+    let sentText = null;
+    m.send = async (msg) => {
+      sentText = msg.text;
+      throw new Error(`smtp exploded: ${msg.text}`);
+    };
+    const out = captureOutput();
+    let r;
+    try {
+      r = await call("POST", "/jobsearch/auth/otp/request", { body: { email: c.email } });
+    } finally {
+      out.restore();
+      m.send = originalSend;
+    }
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, GENERIC);
+    const code = /\b(\d{6})\b/.exec(sentText)[1];
+    for (const line of out.captured) {
+      assert.ok(!line.includes(code), "code leaked");
+      assert.ok(!line.includes(c.email), "email leaked");
+    }
+    const live = await pool.query("SELECT count(*)::int n FROM js_otps WHERE email=$1 AND used_at IS NULL AND expires_at > now()", [c.email]);
+    assert.equal(live.rows[0].n, 0);
   }));
