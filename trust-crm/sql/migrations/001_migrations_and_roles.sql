@@ -11,11 +11,8 @@ BEGIN
   FOR c IN
     SELECT con.conname
     FROM pg_constraint con
-    JOIN pg_class rel ON rel.oid = con.conrelid
-    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
     WHERE con.contype = 'c'
-      AND rel.relname = 'users'
-      AND ns.nspname = current_schema()
+      AND con.conrelid = to_regclass('users')
       AND pg_get_constraintdef(con.oid) ILIKE '%role%'
   LOOP
     EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', c.conname);
