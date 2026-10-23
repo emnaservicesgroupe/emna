@@ -143,6 +143,7 @@ feed is connected.
 
 - [Requirement checklist (what is done, tested, blocked)](../docs/vita-job-search/CHECKLIST.md)
 - [Setup and operations](../docs/vita-job-search/SETUP.md)
+- [Deploy on a Hostinger VPS with Docker (step by step)](../docs/vita-job-search/SETUP-HOSTINGER.md) — kit in [`deploy/hostinger/`](../deploy/hostinger/)
 - [Sources and providers the owner must connect](../docs/vita-job-search/SOURCES_AND_PROVIDERS.md)
 - [User guide (staff and candidates)](../docs/vita-job-search/USER_GUIDE.md)
 

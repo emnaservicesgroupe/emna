@@ -8,6 +8,10 @@ URLs, credentials or agreements that only the owner can provide. See
 [SOURCES_AND_PROVIDERS.md](SOURCES_AND_PROVIDERS.md). What is done and what is not is in
 [CHECKLIST.md](CHECKLIST.md).
 
+**Hostinger VPS / Docker:** a ready-made kit (Postgres + app + Caddy HTTPS, generated secrets, backups,
+first admin, safe sandbox defaults) is in `deploy/hostinger/`; follow [SETUP-HOSTINGER.md](SETUP-HOSTINGER.md).
+This page explains every setting in depth and applies to any server.
+
 **Never paste passwords, API keys or feed credentials into a chat, an issue or a commit.** Put them
 only in the server's environment (the `.env` file on the server, or the host's secret settings).
 
@@ -365,6 +369,17 @@ Rules:
   *transaction* pooling mode breaks them. Session pooling or no pooler is fine.
 - Use a process manager (systemd, pm2 or Docker restart policy) so the app restarts after a crash. A send
   interrupted by a crash becomes `outcome_unknown`; it is never re-sent blindly.
+- **Preflight (Task 20).** With `NODE_ENV=production`, `server.js` first checks the settings and **refuses to
+  start** (exit 1), listing every problem by name (never a value): missing, short (< 32 characters) or
+  placeholder `JWT_SECRET` / `STORAGE_URL_SECRET`, missing database settings, `TEST_DATABASE_URL` set,
+  invalid `TRUST_PROXY` or ports, an unwritable `STORAGE_DIR`, `MAIL_REAL_SEND=true` without a complete
+  `imap_smtp` setup (SMTP settings + `MAIL_FROM`), real mail together with `ALLOW_UNSCANNED_ATTACHMENTS=true`
+  and no ClamAV, or a short `INBOUND_MAIL_SECRET`. It prints warnings (sandbox mode, no ClamAV, webhook
+  disabled, scheduler/workers on or off) and starts.
+- **Graceful stop.** On SIGTERM/SIGINT (`docker stop`, `systemctl stop`) the server stops the scheduler,
+  workers and alert job, closes live-event streams, finishes in-flight requests and a running tick, closes
+  the database pool (releasing the advisory locks) and exits 0; after `SHUTDOWN_TIMEOUT_MS` (default 25 s)
+  it exits 1.
 
 Example systemd unit (adapt paths and user):
 
@@ -422,6 +437,9 @@ accept forwarding files nobody scanned.
 ## 9. HTTPS and reverse proxy
 
 Run the app behind an HTTPS reverse proxy (Caddy, nginx). Keep port 5000 closed to the internet.
+The Docker kit (`deploy/hostinger/Caddyfile`) already does this, including immediate flushing and no
+compression for `/jobsearch/events`. `GET /healthz` (no authentication) answers `{"ok":true}` when the app
+and its database respond, `503 {"ok":false}` otherwise - use it for load-balancer / container health checks.
 
 Caddy example:
 

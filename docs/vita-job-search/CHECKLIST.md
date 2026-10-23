@@ -19,7 +19,7 @@ quoted from the `test("…")` titles, shortened with "…" where long.
 no real e-mail has ever been sent, and no real mailbox is connected. All tests use sandbox mail and test
 job data. See [Completion statement](#completion-statement).
 
-Related documents: [SETUP.md](SETUP.md) · [SOURCES_AND_PROVIDERS.md](SOURCES_AND_PROVIDERS.md) · [USER_GUIDE.md](USER_GUIDE.md)
+Related documents: [SETUP.md](SETUP.md) · [SETUP-HOSTINGER.md](SETUP-HOSTINGER.md) · [SOURCES_AND_PROVIDERS.md](SOURCES_AND_PROVIDERS.md) · [USER_GUIDE.md](USER_GUIDE.md)
 
 ---
 
@@ -153,7 +153,10 @@ Related documents: [SETUP.md](SETUP.md) · [SOURCES_AND_PROVIDERS.md](SOURCES_AN
 | Pause module / source / candidate; scheduler status and manual tick | ✅ | `tests/js-scheduler.test.js` "admin endpoints: POST /jobsearch/scheduler/tick (admin only) and GET /jobsearch/scheduler/status", "module paused: tick does nothing…" | |
 | Background scheduler runs in one process at a time | ✅ | `modules/jobsearch/scheduler.js` (`guardedTick`); `tests/js-scheduler.test.js` "re-entrancy: … guardedTick skips while another session holds the advisory lock" | Needs direct or session-pooled Postgres connections (not PgBouncer transaction mode). |
 | Secrets only in environment variables; `.env.example` lists every variable | ✅ | `trust-crm/.env.example` (checked against every `process.env.*` read in the code, see Checks run) | `trust-crm/.env` was in git history (rotate, see limitations). |
-| HTTPS, domain, firewall, backups in production | 🔴 | SETUP.md | Owner's server work. Nothing is deployed. |
+| Deployment kit for a Hostinger VPS (Docker: Postgres 16 + app + Caddy automatic HTTPS; first run without a domain via `<ip>.sslip.io`, own domain by changing `SITE_ADDRESS`) | 🟡 | `deploy/hostinger/` (`docker-compose.yml`, `Caddyfile`, `.env.production.example`, `setup.sh`, `create-admin.sh`, `demo-seed.sh`, `backup.sh`, `restore.sh`, `update.sh`, `logs.sh`, `status.sh`), `trust-crm/Dockerfile`, `.dockerignore`, `scripts/db-init.js`, `scripts/docker-entrypoint.sh`; `tests/deploy-kit.test.js` (compose config, no published 5000/5432, no secrets, scripts `bash -n` + shellcheck, template passes the preflight, non-root image), `tests/db-init.test.js`; [SETUP-HOSTINGER.md](SETUP-HOSTINGER.md) | **Built, not deployed or tested on a real VPS.** In the Task 20 development container: the image built, the stack came up healthy, migrations ran on an empty database, `create-admin.sh` (weak password refused, works once), login over HTTPS, `demo-seed.sh` (fresh DB; refused on a real one), backup → restore, graceful stop and preflight refusal were all run; HTTPS was checked only with Caddy's local certificate (no internet access, so no real Let's Encrypt certificate and no sslip.io test). Everything starts in sandbox mode. |
+| Production preflight: the server refuses to start on unsafe settings and lists every problem (no values) | ✅ | `utils/preflight.js` (called first in `server.js` and `scripts/db-init.js`, never by `app.js`); `tests/preflight.test.js` (one test per rule), `tests/healthz-shutdown.test.js` "server.js (child process): NODE_ENV=production with unsafe settings refuses to start…" | Refuses: missing/short/placeholder `JWT_SECRET`/`STORAGE_URL_SECRET`, missing DB settings, `TEST_DATABASE_URL` set, invalid `TRUST_PROXY`/ports, unwritable `STORAGE_DIR`, `MAIL_REAL_SEND=true` without a complete `imap_smtp` setup, real mail + `ALLOW_UNSCANNED_ATTACHMENTS=true` without ClamAV, short `INBOUND_MAIL_SECRET`. Warns: sandbox mode, no ClamAV, scheduler/workers on/off, webhook disabled. |
+| Liveness probe and graceful shutdown | ✅ | `GET /healthz` (no auth, `{ok:true}` / 503 `{ok:false}`), `utils/shutdown.js`; `tests/healthz-shutdown.test.js` | SIGTERM: timers stop, SSE streams close, HTTP server drains, a running scheduler tick/worker batch finishes, the DB pool closes (releasing advisory locks), exit 0; forced exit 1 after `SHUTDOWN_TIMEOUT_MS` (25 s). |
+| HTTPS, domain, firewall, backups in production | 🔴 | [SETUP-HOSTINGER.md](SETUP-HOSTINGER.md), SETUP.md | The kit above automates them, but the owner must run it on their server. Nothing is deployed. |
 
 ## 10. Verification
 
@@ -295,7 +298,9 @@ the items marked 🔴 above:
 2. Set up real outgoing mail (SMTP) and the inbound mail bridge, and tested them with an address the owner
    controls.
 3. Connected ClamAV (without it, no CV is attached unless unscanned files are explicitly allowed).
-4. Deployed behind HTTPS with new secrets, backups and the security checklist in SETUP.md.
+4. Deployed behind HTTPS with new secrets, backups and the security checklist in SETUP.md (the Hostinger
+   kit in `deploy/hostinger/` does most of this — see [SETUP-HOSTINGER.md](SETUP-HOSTINGER.md); it has not
+   been run on a real VPS yet).
 5. Set up CI that runs `npm test`.
 
 **About automatic applications.** This module does **not** apply automatically on job websites, and many
