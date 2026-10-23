@@ -61,7 +61,6 @@ const IN_FLIGHT_APP = ["queued", "sent", "confirmed_submitted", "outcome_unknown
 const COUNTED_SUBMISSIONS = ["queued", "sent", "confirmed_submitted", "outcome_unknown"];
 const PRIOR_SUBMISSIONS = ["sent", "confirmed_submitted", "outcome_unknown"];
 const DUPLICATE_WINDOW_DAYS = 90;
-const DAY_MS = 86400000;
 
 // autoApproveEligibility reasons the guard handles itself (at send time the status is approved/queued,
 // caps are counted excluding this application, documents/job are checked by their own steps).
@@ -475,8 +474,9 @@ async function findDuplicate(client, app, job, now) {
   const emp = jobStore.normalizeEmployer(job.e_name || "");
   const title = jobStore.normalize(job.title);
   const city = jobStore.normalizeCity(job.location);
-  // Same skew rule as the caps: an injected clock ahead of the clock that stamped the rows never shortens the window.
-  const since = Math.min(now.getTime(), Date.now()) - DUPLICATE_WINDOW_DAYS * DAY_MS;
+  // Same skew rule as the caps: the rows carry DB-clock stamps, so the window starts at
+  // LEAST(injected now, DB now()) - span. A skewed app-server (Node) clock never shortens it.
+  const since = new Date((await client.query("SELECT LEAST($1::timestamptz, now()) - make_interval(days => $2) AS since", [now, DUPLICATE_WINDOW_DAYS])).rows[0].since).getTime();
   for (const o of others) {
     if (o.job_id === job.id) return `Application ${o.id} (${o.status}) is for the same job`;
     const theirs = urlsOf(o.job_id, o.url);

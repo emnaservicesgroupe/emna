@@ -378,7 +378,11 @@ async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT
     return { app, pkg: { included: pkg.included, blocked: pkg.blocked, notes }, letter: letter.text };
   });
   await logAfter(actor, "jobsearch.application.prepare", result.app.id, { status: result.app.status, blocked: result.pkg.blocked.length });
-  return { application: present(result.app), package: result.pkg, coverLetter: result.letter };
+  // Candidates see which documents/versions are in their package, never hashes (same rule as getApplication).
+  const pkgOut = actor && actor.role === "Candidate"
+    ? { ...result.pkg, included: result.pkg.included.map(({ sha256, ...d }) => d) }
+    : result.pkg;
+  return { application: present(result.app), package: pkgOut, coverLetter: result.letter };
 }
 
 // ---------------------------------------------------------------- approval / rejection / cancel

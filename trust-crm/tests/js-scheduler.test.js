@@ -958,3 +958,21 @@ test("startJobSearchScheduler is disabled under NODE_ENV=test (and JOBSEARCH_SCH
     delete process.env.JOBSEARCH_WORKERS;
   }
 });
+
+test("Task 18: the scheduler sweep prunes scheduler_match state rows of deleted (or missing) candidates; live candidates keep theirs", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const live = await candidate(w, { mode: "search_only" });
+  const gone = await candidate(w, { mode: "search_only" });
+  const t0 = T0();
+  await tick(t0);
+  const keys = async () => (await q("SELECT key FROM js_module_state WHERE key LIKE 'scheduler_match:%' ORDER BY key")).rows.map((r) => r.key);
+  assert.deepEqual(await keys(), [`scheduler_match:${live.id}`, `scheduler_match:${gone.id}`].sort());
+  await q("UPDATE candidates SET is_deleted = true WHERE id = $1", [gone.id]);
+  await q("INSERT INTO js_module_state (key, value) VALUES ('scheduler_match:999999', '{}'::jsonb), ('scheduler_match:junk', '{}'::jsonb)");
+  const s = await tick(new Date(t0.getTime() + 60000));
+  assert.equal(s.statePruned, 2, JSON.stringify(s));
+  assert.deepEqual(await keys(), [`scheduler_match:${live.id}`, "scheduler_match:junk"].sort(), "only well-formed keys of deleted/missing candidates are removed");
+  assert.ok((await q("SELECT 1 FROM js_module_state WHERE key = 'scheduler_last_tick'")).rowCount, "other state untouched");
+});

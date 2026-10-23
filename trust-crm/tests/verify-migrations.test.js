@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+// Same database as every other test file (tests/helpers/db.js default): never the DB_* values of a local .env.
+process.env.TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || "postgres://postgres:postgres@localhost:5432/trustcrm_test";
 const { verifyMigrations, verifyOnExistingData } = require("../scripts/verify-migrations");
 
 test("verify-migrations: real migrations apply from scratch and keep existing rows unchanged", async () => {

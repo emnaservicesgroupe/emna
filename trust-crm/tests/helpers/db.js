@@ -11,11 +11,24 @@ function baseUrl() {
   return process.env.TEST_DATABASE_URL || DEFAULT_URL;
 }
 
+// Best effort, once per test process: drop stale t_* schemas left by interrupted runs (older than 1 h, in the
+// TEST database only - the script refuses any other database). Never fails a test.
+let cleanupOnce = null;
+function cleanupStaleSchemas() {
+  if (!cleanupOnce) {
+    cleanupOnce = require("../../scripts/cleanup-test-schemas")
+      .cleanupTestSchemas({ connectionString: baseUrl() })
+      .catch(() => null);
+  }
+  return cleanupOnce;
+}
+
 /**
  * Creates a uniquely named schema, applies sql/schema.sql and all migrations
  * inside it, and returns a pool whose search_path is pinned to that schema.
  */
 async function createTestDb() {
+  await cleanupStaleSchemas();
   const schema = `t_${process.pid}_${crypto.randomBytes(6).toString("hex")}`;
   const admin = new Pool({ connectionString: baseUrl(), max: 1 });
   await admin.query(`CREATE SCHEMA "${schema}"`);

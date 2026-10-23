@@ -366,7 +366,7 @@ test("sweepStuckSending: an interrupted send whose queue item is gone is closed 
 
 // ---------------------------------------------------------------- pre-send guard at send time
 
-test("consent withdrawn after queueing (real withdrawal): the claimed item runs, guard blocks, zero mails, application cancelled, submission failed 'cancelled'", async () => {
+test("consent withdrawn after queueing (real withdrawal): the withdrawal cancels the application and fails the queued submission ('cancelled'); a claimed item then finds nothing to send (noop), zero mails", async () => {
   const w = await world();
   const r = await queued(w);
   await consentService.withdrawConsent({ user: { id: w.userId, role: "Candidate" }, candidateId: w.candidateId, scopeKey: "submit" });

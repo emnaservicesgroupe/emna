@@ -717,6 +717,21 @@ async function stepExpiry(ctx) {
   }
 }
 
+/**
+ * One scheduler_match:<candidateId> state row is kept per matched candidate; rows of deleted (or no longer
+ * existing) candidates are removed here so they do not accumulate. Only well-formed keys are touched. Bounded.
+ */
+async function stepPruneState(ctx) {
+  const r = await db().query(
+    `DELETE FROM js_module_state WHERE key IN (
+       SELECT s.key FROM js_module_state s
+        WHERE s.key ~ '^scheduler_match:[0-9]{1,9}$'
+          AND NOT EXISTS (SELECT 1 FROM candidates c WHERE c.id = substring(s.key from 17)::int AND c.is_deleted = false)
+        LIMIT 500)`
+  );
+  ctx.summary.statePruned = (ctx.summary.statePruned || 0) + r.rowCount;
+}
+
 /** Follow-up drafts stuck in 'sending' (> 10 min) -> back to draft (or 'sent' when the sandbox has it). Bounded. */
 async function stepSweepDrafts(ctx) {
   const out = await require("./draftService").sweepStuckDrafts({ minutes: 10, limit: 50 });
@@ -780,6 +795,7 @@ async function tick(now = new Date(), { deps = {} } = {}) {
     await step(ctx, "expiry", stepExpiry);
     await step(ctx, "stale", async (c) => { await queue.reclaimStale({ now: c.now }); });
     await step(ctx, "sweep_drafts", stepSweepDrafts);
+    await step(ctx, "prune_state", stepPruneState);
     await recordTick(summary);
     return summary;
   } catch (err) {

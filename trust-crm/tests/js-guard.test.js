@@ -1063,3 +1063,28 @@ test("Task 18 handoff: the middle of ads longer than 40k chars is scanned for ch
     assert.equal(r && r.reason, want, mid);
   }
 });
+
+test("Task 18 duplicate window uses the DB clock (earlier of the injected and DB clocks), never the Node clock", async () => {
+  const a = await world({ employer: "Spruce Grid Inc.", title: "Line Electrician", location: "Ottawa, ON", url: "https://careers.spruce.example/1" });
+  const b = await addJob(a, { employer: "Spruce Grid", title: "line electrician", location: "Ottawa", sourceKey: `g_src_dbclock_${n}`, url: "https://aggregator.example/spruce" });
+  const bApp = (await applicationService.createFromMatch({ matchId: b.matchId, actor: a.manager })).id;
+  await applicationService.prepareApplication({ id: bApp, actor: a.manager });
+  await applicationService.approveApplication({ id: bApp, actor: a.manager, reason: "ok" });
+  await applicationService.transition(a.appId, "queued", a.manager);
+  await sub(a.appId, "sent", { ago: "30 days" });
+  await q("UPDATE js_applications SET status='sent', updated_at = now() - interval '30 days' WHERE id=$1", [a.appId]);
+  // A Node clock 200 days ahead (skewed app server) plus a matching injected `now`: the window must still be
+  // anchored on the DB clock, so the 30-day-old send is inside it.
+  const realNow = Date.now;
+  const ahead = realNow() + 200 * 86400000;
+  Date.now = () => ahead;
+  try {
+    const r = await check(bApp, { now: new Date(ahead) });
+    assert.equal(r.code, "duplicate", JSON.stringify(r));
+  } finally {
+    Date.now = realNow;
+  }
+  // an injected clock in the PAST shortens nothing either: the earlier clock wins (send 30 days before real now,
+  // injected now = real now - 100 days -> window starts 190 days ago in DB time -> still a duplicate)
+  assert.equal((await check(bApp, { now: new Date(Date.now() - 100 * 86400000) })).code, "duplicate");
+});

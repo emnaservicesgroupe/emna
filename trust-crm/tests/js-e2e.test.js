@@ -215,7 +215,9 @@ test("J1 full journey (prepare_for_approval): CV -> consent -> search/dedupe/mat
   const pkg = (await w.q("SELECT * FROM js_application_documents WHERE application_id = $1 AND removed_at IS NULL", [appA.id])).rows;
   assert.deepEqual(pkg.map((d) => [d.cv_file_id, d.version, d.sha256, d.sensitive]), [[up2.body.cvFileId, 2, sha(pdf), false]], "package = the approved CV version only");
   const appB = await appFor(w, c.id, B.id);
-  if (appB) assert.notEqual(appB.status, "approved", "a residents-only job is never approved without a human");
+  // (Task 18: unconditional) the residents-only job is still prepared for a human to decide - never approved by itself
+  assert.ok(appB, "the residents-only match becomes an application");
+  assert.equal(appB.status, "ready_for_review", "a residents-only job is never approved without a human");
   assert.equal((await E.appMails(w)).length, 0, "ZERO application mails before a human approves");
   assert.equal(await w.count("SELECT count(*) AS n FROM js_submissions"), 0);
 
@@ -1076,6 +1078,47 @@ test("J8 disclaimer over HTTP + candidate-facing API responses carry no staff-on
   st.close();
   await st.done;
   for (const e of st.events) leaks.push(...E.staffOnlyKeys(e.data, `sse:${e.data.kind}`));
+
+  // (Task 18) every candidate-callable WRITE endpoint's response too (POST/PUT/DELETE), not only GETs
+  const appB = await appFor(w, A.id, (await jobBySource(w, "fx-north-1")).id);
+  const mB = await w.one("SELECT id FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [A.id, appB.job_id]);
+  const passport = (await w.one("INSERT INTO documents (candidate_id, doc_type, file_path) VALUES ($1, 'passport', '/crm/passport-j8.pdf') RETURNING id", [A.id])).id;
+  const iv = (await w.http("GET", "/jobsearch/interviews", A.token)).body.interviews[0];
+  const writes = [
+    ["POST", "/jobsearch/auth/otp/request", { email: A.email }, null],
+    ["PUT", `/jobsearch/candidates/${A.id}/profile/confirm`, { edits: {}, preferences: E.PREFS() }],
+    ["POST", `/jobsearch/candidates/${A.id}/consent`, { scope: E.CONSENT(), version: "2026-10-v1" }],
+    ["POST", `/jobsearch/candidates/${A.id}/pause`, { paused: true }],
+    ["POST", `/jobsearch/candidates/${A.id}/pause`, { paused: false }],
+    ["POST", "/jobsearch/applications", { matchId: mB.id }],
+    ["POST", `/jobsearch/applications/${appB.id}/prepare`, {}],
+    ["POST", `/jobsearch/applications/${appB.id}/sharing-authorizations`, { documentId: passport, legitimateNeed: "The employer asked for my passport for the work permit" }],
+    ["POST", `/jobsearch/applications/${appB.id}/prepare`, { documents: [{ documentId: passport }] }],
+    ["DELETE", `/jobsearch/applications/${appB.id}/sharing-authorizations/:auth`, undefined],
+    ["POST", `/jobsearch/applications/${appB.id}/cancel`, { reason: "I found another job" }],
+    ...(iv ? [["POST", `/jobsearch/interviews/${iv.id}/availability`, { available: true }]] : []),
+  ];
+  let authId = null;
+  const writeStatus = [];
+  for (const [method, url0, body, tokenOverride] of writes) {
+    const url = url0.replace(":auth", String(authId));
+    const r = await w.http(method, url, tokenOverride === null ? null : A.token, body);
+    if (/sharing-authorizations$/.test(url) && r.body && r.body.id) authId = r.body.id;
+    writeStatus.push(`${method} ${url} ${r.status}`);
+    leaks.push(...E.staffOnlyKeys(r.body, `${method} ${url}`));
+  }
+  const fd = new FormData();
+  fd.append("file", new Blob([makePdf("Karim Benali\nElectrician\nEmail: karim.benali@example.com")]), "cv-j8.pdf");
+  const up = await w.http("POST", `/jobsearch/candidates/${A.id}/cv`, A.token, fd);
+  leaks.push(...E.staffOnlyKeys(up.body, "POST cv"));
+  const cvA = await w.http("POST", `/jobsearch/cv-files/${up.body.cvFileId}/approve`, A.token, { language: "en" });
+  leaks.push(...E.staffOnlyKeys(cvA.body, "POST cv-files approve"));
+  const wd = await w.http("POST", `/jobsearch/candidates/${A.id}/consent/withdraw`, A.token, { scopeKey: "search" });
+  leaks.push(...E.staffOnlyKeys(wd.body, "POST consent/withdraw"));
+  writeStatus.push(`cv ${up.status}`, `cv-approve ${cvA.status}`, `withdraw ${wd.status}`);
+  for (const line of writeStatus) assert.ok(!/ 5\d\d$/.test(line), line);
+  assert.ok(writeStatus.some((x) => /\/prepare 200$/.test(x)), writeStatus.join("\n"));
+  assert.ok(writeStatus.some((x) => /sharing-authorizations 201$/.test(x)), writeStatus.join("\n"));
   assert.deepEqual(leaks, [], "staff-only fields in candidate-facing responses");
   // the sent mail's recipient, provider id and hash exist - they are just not shown to the candidate
   const sub = (await subsOf(w, J1.appA))[0];
@@ -1090,7 +1133,7 @@ test("J8 disclaimer over HTTP + candidate-facing API responses carry no staff-on
  * Independent report computation: one plain query per metric for the raw event rows, attributes looked
  * up separately, grouping in JS. Shares nothing with reportService's SQL but the metric definitions.
  */
-async function independentReport(w, from, to, groupBy, period = "week", scope = () => true) {
+async function independentReport(w, from, to, groupBy, period = "week", scope = () => true, jobFilter = () => true) {
   const ev = [];
   const add = async (metric, sql) => {
     for (const r of (await w.q(sql)).rows) ev.push({ metric, cid: r.cid, jid: r.jid, at: new Date(r.at) });
@@ -1135,7 +1178,7 @@ async function independentReport(w, from, to, groupBy, period = "week", scope = 
   const totals = Object.fromEntries(METRICS.map((m) => [m, 0]));
   for (const e of ev) {
     const c = cands.get(e.cid);
-    if (!c || c.is_deleted || !scope(c) || !(e.at >= from && e.at < to)) continue;
+    if (!c || c.is_deleted || !scope(c) || !jobFilter(jobs.get(e.jid)) || !(e.at >= from && e.at < to)) continue;
     const k = keyOf(e);
     if (!rows.has(k)) rows.set(k, Object.fromEntries(METRICS.map((m) => [m, 0])));
     rows.get(k)[e.metric] += 1;
@@ -1216,10 +1259,14 @@ test("J7 reporting from real records: every /reports groupBy, /dashboard and the
   for (const m of ["found", "matched", "prepared", "submitted", "failed", "replies", "interviews", "offers", "rejections"]) assert.ok(all[m] > 0, `the mix exercises ${m}`);
   assert.ok(nonZero > 0);
   // filters: country + source + staff
-  const ca = await w.http("GET", `/jobsearch/reports?${qs2({ groupBy: "source", country: "Germany" })}`, w.tokens.admin);
-  const de = await independentReport(w, from, to, "source", "week", () => true);
-  assert.ok(ca.body.totals.submitted >= 1 && ca.body.totals.submitted < de.totals.submitted, JSON.stringify(ca.body.totals));
-  assert.ok(ca.body.rows.every((r) => r.key === "test_fixture"));
+  // (Task 18) compared with an INDEPENDENT count restricted to German jobs (was: only "< all countries")
+  const germany = await w.http("GET", `/jobsearch/reports?${qs2({ groupBy: "source", country: "Germany" })}`, w.tokens.admin);
+  const germanyWant = await independentReport(w, from, to, "source", "week", () => true, (j) => String(j.country || "").trim().toLowerCase() === "germany");
+  const allCountries = await independentReport(w, from, to, "source", "week", () => true);
+  assert.deepEqual(germany.body.totals, germanyWant.totals, "country filter = independent count of German jobs");
+  assert.deepEqual(Object.fromEntries(germany.body.rows.map(({ key, label, ...m }) => [key, m])), Object.fromEntries(germanyWant.rows));
+  assert.ok(germany.body.totals.submitted >= 1 && germany.body.totals.submitted < allCountries.totals.submitted, JSON.stringify(germany.body.totals));
+  assert.ok(germany.body.rows.every((r) => r.key === "test_fixture"));
   // drill-down: every candidate/staff/employer key of the reports exists
   for (const [g, table] of [["candidate", "candidates"], ["staff", "users"], ["employer", "js_employers"]]) {
     const r = await w.http("GET", `/jobsearch/reports?${qs2({ groupBy: g })}`, w.tokens.admin);
