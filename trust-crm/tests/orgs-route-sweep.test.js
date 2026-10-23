@@ -57,6 +57,8 @@ const ROUTE_RULES = [
   { re: /^\w+ \/crm\//, allow: NONE, why: "staff CRM" },
   { re: /^POST \/auth\/register$/, allow: NONE, why: "users:write" },
   { re: /^\w+ \/candidates\//, allow: NONE, why: "staff candidate CRUD (/candidates/*)" },
+  // finance: legacy (/dashboard, POST /invoices, POST /payments) and stage-4 routes (routes/financeV2.js: /services*, /invoices/v2,
+  // /invoices, /invoices/:id, /invoices/:id/void, /invoices/:id/print). Staff permissions only; Candidate access to /finance/me* is added with Task 4.
   { re: /^\w+ \/finance\//, allow: NONE, why: "finance" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
@@ -336,7 +338,7 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   await ok(attacker.token, "/jobsearch/applications/2", "candidate own application");
   await ok(attacker.token, "/jobsearch/messages", "candidate messages");
   // Staff reach every staff-only prefix, and a staff token sees the victim's rows the portal tokens are refused.
-  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
+  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/finance/services", "/finance/invoices", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
     await ok(w.tokens.admin, url, "admin");
   }
   // The same victim rows through each portal token and the foreign Candidate: refused.
