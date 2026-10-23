@@ -11,7 +11,7 @@ const { checkEnv } = require("../utils/preflight");
 const ROOT = path.join(__dirname, "..");
 const KIT = path.join(ROOT, "..", "deploy", "hostinger");
 const read = (p) => fs.readFileSync(p, "utf8");
-const SCRIPTS = ["setup.sh", "create-admin.sh", "demo-seed.sh", "backup.sh", "restore.sh", "update.sh", "logs.sh", "status.sh"];
+const SCRIPTS = ["setup.sh", "create-admin.sh", "demo-seed.sh", "backup.sh", "restore.sh", "update.sh", "logs.sh", "status.sh", "show-sandbox-mail.sh", "db-init/10-app-role.sh"];
 const has = (cmd, args) => spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
 // a value that looks like a real secret: long hex / base64-ish token
 const SECRETISH = /(?:^|[=:\s"'])([A-Fa-f0-9]{24,}|[A-Za-z0-9+/_-]{32,}={0,2})(?:$|[\s"'])/m;
@@ -37,8 +37,15 @@ test("kit scripts: bash -n clean, set -euo pipefail, no eval, no curl|sh, no sec
     const src = read(p);
     const r = spawnSync("bash", ["-n", p], { encoding: "utf8" });
     assert.equal(r.status, 0, `${f}: ${r.stderr}`);
-    assert.match(src, /^#!\/usr\/bin\/env bash\n/, f);
-    assert.match(src, /^set -euo pipefail$/m, f);
+    if (f.endsWith(".sh") && f.startsWith("db-init/")) {
+      assert.match(src, /^#!\/bin\/sh\n/, f);
+      assert.match(src, /^set -eu$/m, f);
+    } else {
+      assert.match(src, /^#!\/usr\/bin\/env bash\n/, f);
+      assert.match(src, /^set -euo pipefail$/m, f);
+    }
+    // interactive reads keep leading/trailing spaces and backslashes (IFS= read -r)
+    for (const line of src.split("\n").filter((l) => /\bread -r\b/.test(l) && !/IFS=\. read -r -a/.test(l))) assert.match(line, /IFS= read -r/, `${f}: ${line.trim()}`);
     assert.doesNotMatch(src, /^\s*eval\b|[;&|]\s*eval\b/m, `${f}: eval`);
     assert.doesNotMatch(src, /curl[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b/, `${f}: curl | sh`);
     // a secret may only be written into a pipe to the container (create-admin.sh), never to the terminal
@@ -56,13 +63,27 @@ test("setup.sh: secrets from openssl rand -hex 32, .env chmod 600 and never over
   const s = read(path.join(KIT, "setup.sh"));
   assert.match(s, /openssl rand -hex 32/);
   assert.match(s, /for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD; do/);
+  // fix round: values reach awk through ENVIRON (no -v escape processing); temp files cleaned on exit
+  assert.match(s, /ENVIRON\["SET_VALUE"\]/);
+  assert.doesNotMatch(s, /awk -v/);
+  assert.match(s, /trap cleanup_tmp EXIT/);
+  // separate superuser file for the db container; never DB_USER=postgres
+  assert.match(s, /printf 'POSTGRES_USER=postgres\\nPOSTGRES_PASSWORD=\\n' > \.env\.db/);
+  assert.match(s, /set_env \.env\.db POSTGRES_PASSWORD "\$\(openssl rand -hex 32\)"/);
+  assert.match(s, /must be the unprivileged application role/);
+  // an empty SITE_ADDRESS in an existing .env is detected again instead of a dead end
+  assert.match(s, /elif \[ -z "\$\(get_env SITE_ADDRESS\)" \]; then\s+# an earlier run could not detect the IP/);
+  // firewall: the real sshd port, refusal when unknown
+  assert.match(s, /sshd -T/);
+  assert.match(s, /NOT enabling the firewall/);
+  assert.match(s, /xn--\[a-z0-9-\]\{1,59\}/, "punycode TLDs accepted");
   assert.match(s, /chmod 600 \.env/);
   assert.match(s, /umask 077/);
   assert.match(s, /if \[ -f \.env \]; then\s+say "Keeping the existing \.env/);
   assert.match(s, /https:\/\/api\.ipify\.org/);
   assert.match(s, /\.sslip\.io/);
   assert.match(s, /--domain\)/);
-  assert.match(s, /if \[ "\$FIREWALL" -eq 1 \]; then[\s\S]*sudo ufw allow OpenSSH[\s\S]*sudo ufw allow 443\/tcp/);
+  assert.match(s, /if \[ "\$FIREWALL" -eq 1 \]; then[\s\S]*sudo ufw allow "\$\{port\}\/tcp"[\s\S]*sudo ufw allow 443\/tcp/);
   assert.match(s, /download\.docker\.com\/linux\/ubuntu/);
   assert.match(s, /docker compose version|"\$\{DOCKER\[@\]\}" compose/);
   assert.match(s, /compose up -d --build/);
@@ -72,7 +93,7 @@ test("setup.sh: secrets from openssl rand -hex 32, .env chmod 600 and never over
 
 test("create-admin.sh: hidden password (read -s), sent on stdin to a node script in the container, never on a command line", () => {
   const s = read(path.join(KIT, "create-admin.sh"));
-  assert.match(s, /read -r -s -p "Password \(hidden\): " PASSWORD/);
+  assert.match(s, /IFS= read -r -s -p "Password \(hidden\): " PASSWORD/);
   assert.match(s, /printf '%s\\n%s\\n%s\\n' "\$FULL_NAME" "\$EMAIL" "\$PASSWORD" \| compose exec -T app node -e "\$NODE_SCRIPT"/);
   assert.match(s, /\/auth\/bootstrap-super-admin/);
   assert.match(s, /127\.0\.0\.1/);
@@ -92,7 +113,9 @@ test("demo-seed.sh: dev seed inside the container with NODE_ENV=development + VI
 
 test("backup/restore/update: pg_dump custom format + storage tar, retention, checksums, restore confirmation, backup before update", () => {
   const b = read(path.join(KIT, "backup.sh"));
-  assert.match(b, /pg_dump -U "\$DB_USER" -d "\$DB_NAME" -Fc/);
+  assert.match(b, /pg_dump -U "\$PG_SUPER" -d "\$DB_NAME" -Fc/);
+  assert.match(b, /trap on_exit EXIT/, "partial backups removed on failure");
+  assert.match(b, /if \[ ! -d "\$BACKUP_DIR" \]; then[\s\S]*chmod 700 "\$BACKUP_DIR"[\s\S]*fi/, "chmod only a folder it creates");
   assert.match(b, /tar -C \/data -czf - storage/);
   assert.match(b, /RETENTION="\$\{RETENTION:-14\}"/);
   assert.match(b, /sha256sum/);
@@ -100,11 +123,25 @@ test("backup/restore/update: pg_dump custom format + storage tar, retention, che
   assert.match(b, /crontab -e/);
   const r = read(path.join(KIT, "restore.sh"));
   assert.match(r, /Type RESTORE to continue/);
-  assert.match(r, /pg_restore -U "\$DB_USER" -d "\$DB_NAME" --clean --if-exists --no-owner --single-transaction/);
+  assert.match(r, /pg_restore -U "\$DB_USER" -d "\$TMP_DB" --no-owner --no-privileges --single-transaction --exit-on-error/);
+  assert.match(r, /CREATE DATABASE \\"\$\{TMP_DB\}\\" OWNER \\"\$\{DB_USER\}\\"/);
+  assert.match(r, /RENAME TO \\"\$\{OLD_DB\}\\"/);
+  assert.match(r, /trap restart_stack EXIT/);
+  assert.ok(r.indexOf("trap restart_stack EXIT") < r.indexOf("compose stop app caddy"), "the trap is set before the stack is stopped");
+  assert.match(r, /\.\/backup\.sh/);
   assert.match(r, /sha256sum --quiet -c SHA256SUMS/);
   const u = read(path.join(KIT, "update.sh"));
   assert.ok(u.indexOf("./backup.sh") < u.indexOf("git pull --ff-only"), "backup first");
-  assert.match(u, /compose build app/);
+  assert.match(u, /compose pull db caddy/);
+  assert.match(u, /compose build --pull app/);
+  assert.match(u, /^main\(\) \{$/m);
+  assert.match(u, /\nmain "\$@"\nexit \$\?\n$/, "read fully before running (self-modification safe)");
+  assert.match(u, /git ls-remote --exit-code --heads/);
+  assert.match(u, /git switch main/);
+  const sm = read(path.join(KIT, "show-sandbox-mail.sh"));
+  assert.match(sm, /default_transaction_read_only=on/);
+  assert.match(sm, /FROM js_sandbox_mail/);
+  assert.match(sm, /sign-in codes/);
 });
 
 test("docker-compose.yml: only Caddy publishes ports (80/443); app 5000 and db never published; no secrets; db network internal; app read-only + non-root image", (t) => {
@@ -113,7 +150,15 @@ test("docker-compose.yml: only Caddy publishes ports (80/443); app 5000 and db n
   assert.doesNotMatch(yml, /^\s*-\s*["']?(?:[\d.]+:)?\d*:?(?:5000|5432)(?::\d+)?["']?\s*$/m, "port 5000/5432 must not be published");
   assert.equal((yml.match(/^\s*ports:/gm) || []).length, 1, "only one service (caddy) has ports");
   assert.ok(!SECRETISH.test(yml.replace(/\$\{[^}]+\}/g, "")), "looks like a secret value");
-  assert.match(yml, /POSTGRES_PASSWORD: \$\{DB_PASSWORD:\?/);
+  // fix round I6: the app role is unprivileged; the superuser is only in .env.db (db container)
+  assert.doesNotMatch(yml.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n"), /POSTGRES_PASSWORD/, "the superuser password is not passed from .env");
+  assert.match(yml, /env_file: \.env\.db/);
+  assert.match(yml, /VITA_APP_USER: \$\{DB_USER:\?/);
+  assert.match(yml, /- \.\/db-init:\/docker-entrypoint-initdb\.d:ro/);
+  const init = read(path.join(KIT, "db-init", "10-app-role.sh"));
+  assert.match(init, /NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/);
+  assert.match(init, /ALTER DATABASE :"db" OWNER TO :"app_user"/);
+  assert.match(init, /CREATE EXTENSION IF NOT EXISTS btree_gist/);
   assert.match(yml, /env_file: \.env/);
   assert.match(yml, /image: postgres:16/);
   assert.match(yml, /image: caddy:2/);
@@ -133,12 +178,13 @@ test("docker-compose.yml: only Caddy publishes ports (80/443); app 5000 and db n
       encoding: "utf8",
       env: { PATH: process.env.PATH, HOME: process.env.HOME || tmp, DOCKER_CONFIG: path.join(tmp, "docker") },
     });
-    if (r.status !== 0 && /env_file|\.env/.test(r.stderr)) {
+    if (r.status !== 0 && /env_file|\.env|env file/.test(r.stderr)) {
       // env_file .env must exist for `config`; create an empty stand-in in a copy of the kit
       const copy = path.join(tmp, "kit");
       fs.mkdirSync(copy);
       for (const f of ["docker-compose.yml", "Caddyfile"]) fs.copyFileSync(path.join(KIT, f), path.join(copy, f));
       fs.writeFileSync(path.join(copy, ".env"), "");
+      fs.writeFileSync(path.join(copy, ".env.db"), "");
       const r2 = spawnSync("docker", ["compose", "--project-directory", copy, "-f", path.join(copy, "docker-compose.yml"), "--env-file", envFile, "config", "--format", "json", "--no-env-resolution"], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: tmp, DOCKER_CONFIG: path.join(tmp, "docker") } });
       assert.equal(r2.status, 0, r2.stderr);
       return checkConfig(JSON.parse(r2.stdout));
@@ -160,6 +206,7 @@ function checkConfig(cfg) {
   assert.equal(cfg.services.app.environment.DB_HOST, "db");
   assert.equal(cfg.services.app.read_only, true);
   assert.deepEqual(Object.keys(cfg.services.db.networks), ["backend"]);
+  assert.equal(cfg.services.app.env_file && cfg.services.app.env_file.some((e) => /\.env\.db/.test(e.path || e)), false, "the app never reads .env.db");
   assert.equal(cfg.networks.backend.internal, true);
   assert.equal(cfg.services.app.depends_on.db.condition, "service_healthy");
   assert.ok(cfg.services.db.healthcheck && cfg.services.db.healthcheck.test);
@@ -174,6 +221,15 @@ test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no comp
   assert.doesNotMatch(c, /includeSubDomains/i, "sslip.io names are shared - never includeSubDomains");
   for (const h of ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy", "-Server"]) assert.ok(c.includes(h), h);
   assert.match(c, /redir @root \/vita\/ 302/);
+  // fix round C1: the bootstrap route is never reachable through Caddy (any case, repeated slashes)
+  assert.match(c, /@bootstrap path_regexp bootstrap \(\?i\)\^\/\+auth\/\+bootstrap-super-admin/);
+  assert.match(c, /respond @bootstrap `\{"error":"Not found"\}` 404/);
+  assert.ok(c.indexOf("respond @bootstrap") < c.indexOf("reverse_proxy"), "listed before the proxy");
+  assert.match(c, /@healthz path \/healthz\s*\n\s*respond @healthz `\{"ok":true\}` 200/, "public /healthz never queries the DB");
+  assert.match(c, /request_body \{\s*max_size \{\$CADDY_MAX_BODY:12MB\}\s*\}/);
+  assert.match(c, /read_header 10s/);
+  assert.doesNotMatch(c, /\bwrite \d/, "no write timeout (SSE)");
+  assert.match(c, /import \/tmp\/caddy-global\.d\/\*\.caddy/);
   // live events (SSE): flushed immediately and never compressed (verified through Caddy in the Task 20 sandbox run)
   assert.match(c, /reverse_proxy app:5000 \{\s*flush_interval -1\s*\}/);
   assert.match(c, /@compress not path \/jobsearch\/events\s*\n\s*encode @compress zstd gzip/);
@@ -194,6 +250,7 @@ test(".env.production.example: every variable preflight needs; safe sandbox defa
   assert.equal(env.JOBSEARCH_SCHEDULER, "on");
   assert.equal(env.JOBSEARCH_WORKERS, "on");
   assert.equal(env.SITE_ADDRESS, "");
+  assert.equal(env.DB_USER, "vita_app", "the app role is not the superuser");
   for (const [k, v] of Object.entries(env)) {
     if (/SECRET|PASSWORD|PASS$|_KEY$|TOKEN/.test(k)) assert.equal(v, "", `${k} must be empty in the template`);
     assert.ok(!SECRETISH.test(`=${v}`), `${k} looks like a secret value`);
@@ -201,7 +258,7 @@ test(".env.production.example: every variable preflight needs; safe sandbox defa
   const text = read(path.join(KIT, ".env.production.example"));
   assert.match(text, /set it to false\s*\n?#?\s*before enabling real mail/i);
   // every documented variable is a real one (.env.example lists every variable the code reads)
-  const known = read(path.join(ROOT, ".env.example")) + "\nSITE_ADDRESS";
+  const known = read(path.join(ROOT, ".env.example")) + "\nSITE_ADDRESS ACME_EMAIL CADDY_MAX_BODY";
   const all = [...text.matchAll(/^#?\s?([A-Z][A-Z0-9_]{2,})=/gm)].map((m) => m[1]);
   for (const k of all) assert.ok(known.includes(k), `${k} is not a known variable (.env.example)`);
   // what setup.sh produces passes the production preflight
@@ -238,5 +295,7 @@ test(".dockerignore excludes .env, tests, node_modules, .storage, .git and docs;
   for (const x of [".env", ".env.*", "tests", "node_modules", ".storage", ".git", "docs"]) assert.ok(lines.includes(x), x);
   const gi = read(path.join(KIT, ".gitignore")).split("\n").map((l) => l.trim());
   assert.ok(gi.includes(".env"));
+  assert.ok(gi.includes(".env.db"));
+  assert.ok(gi.includes(".env.tmp.*"));
   assert.ok(gi.includes("backups/"));
 });

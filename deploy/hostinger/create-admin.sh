@@ -7,6 +7,8 @@
 # The password is typed hidden (read -s), is never echoed, never written to disk and never put on a command
 # line (where `ps` could show it): name, e-mail and password go through standard input into a small node
 # script inside the app container, which posts them to the app on 127.0.0.1 (not over the internet).
+# This is the ONLY way to reach the bootstrap: Caddy answers 404 for it and, in production, the app refuses
+# every caller that is not on its own loopback interface or that carries proxy headers.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -24,14 +26,14 @@ compose() { "${DOCKER[@]}" compose "$@"; }
 printf 'Create the first VITA SuperAdmin account.\n'
 printf 'Password rules: at least 12 characters, not a common password, must not contain the e-mail name.\n\n'
 
-read -r -p "Full name: " FULL_NAME
-read -r -p "E-mail: " EMAIL
+IFS= read -r -p "Full name: " FULL_NAME
+IFS= read -r -p "E-mail: " EMAIL
 [ -n "$FULL_NAME" ] || die "the full name is required"
 [[ "$EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "'$EMAIL' does not look like an e-mail address"
 
-read -r -s -p "Password (hidden): " PASSWORD
+IFS= read -r -s -p "Password (hidden): " PASSWORD
 printf '\n'
-read -r -s -p "Repeat the password: " PASSWORD2
+IFS= read -r -s -p "Repeat the password: " PASSWORD2
 printf '\n'
 [ "$PASSWORD" = "$PASSWORD2" ] || { unset PASSWORD PASSWORD2; die "the passwords do not match"; }
 unset PASSWORD2

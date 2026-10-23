@@ -34,7 +34,7 @@ cat <<'TXT'
 ==================================================================
 TXT
 if [ -t 0 ]; then
-  read -r -p "Type DEMO to load demo data: " answer
+  IFS= read -r -p "Type DEMO to load demo data: " answer
   [ "$answer" = "DEMO" ] || die "cancelled"
 fi
 

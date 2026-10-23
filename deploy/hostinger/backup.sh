@@ -27,28 +27,38 @@ DOCKER=(docker)
 docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
 compose() { "${DOCKER[@]}" compose "$@"; }
 
-get_env() { grep -E "^$1=" .env | tail -n 1 | cut -d= -f2- || true; }
-DB_USER="$(get_env DB_USER)"
-DB_NAME="$(get_env DB_NAME)"
-[[ "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]] || die "DB_USER in .env is missing or unusual"
+get_env() { grep -E "^$2=" "$1" 2> /dev/null | tail -n 1 | cut -d= -f2- || true; }
+DB_NAME="$(get_env .env DB_NAME)"
+# pg_dump runs as the Postgres superuser (from .env.db) inside the db container, over its local socket.
+PG_SUPER="$(get_env .env.db POSTGRES_USER)"
 [[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || die "DB_NAME in .env is missing or unusual"
+[[ "$PG_SUPER" =~ ^[A-Za-z0-9_]+$ ]] || die "POSTGRES_USER in .env.db is missing (run ./setup.sh)"
 
 umask 077
-mkdir -p "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
+if [ ! -d "$BACKUP_DIR" ]; then
+  # only a folder this script creates is restricted to 700; an existing folder you chose keeps its permissions
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+fi
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 DEST="$BACKUP_DIR/vita-$STAMP"
+[ ! -e "$DEST" ] || DEST="$DEST-$$"
 mkdir "$DEST"
+# On any failure, remove the incomplete backup folder (a partial backup must never look like a good one).
+DONE=0
+on_exit() { if [ "$DONE" -ne 1 ] && [ -n "${DEST:-}" ] && [ -d "$DEST" ]; then rm -rf -- "$DEST"; printf 'Backup FAILED; removed the incomplete %s\n' "$DEST" >&2; fi; }
+trap on_exit EXIT
 
 printf 'Backing up to %s\n' "$DEST"
 # pg_dump runs inside the db container; the dump streams to this host (no password needed: local socket).
-compose exec -T db pg_dump -U "$DB_USER" -d "$DB_NAME" -Fc --no-owner > "$DEST/db.dump.partial"
+compose exec -T db pg_dump -U "$PG_SUPER" -d "$DB_NAME" -Fc --no-owner > "$DEST/db.dump.partial"
 mv "$DEST/db.dump.partial" "$DEST/db.dump"
 # Uploaded files: tar of /data/storage from the app container (read-only for this purpose).
 compose exec -T app tar -C /data -czf - storage > "$DEST/storage.tar.gz.partial"
 mv "$DEST/storage.tar.gz.partial" "$DEST/storage.tar.gz"
 ( cd "$DEST" && sha256sum db.dump storage.tar.gz > SHA256SUMS )
 [ -s "$DEST/db.dump" ] || die "the database dump is empty"
+DONE=1
 printf 'Done: %s (%s)\n' "$DEST" "$(du -sh "$DEST" | cut -f1)"
 
 # Retention: delete the oldest vita-* folders beyond RETENTION (names sort by time).

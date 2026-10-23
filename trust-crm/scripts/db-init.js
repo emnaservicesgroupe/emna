@@ -41,7 +41,11 @@ async function initDatabase(pool, { log = console, retries = 30, delayMs = 2000 
   }
   const applied = await runMigrations(pool);
   log.log(applied.length ? `db-init: applied migrations: ${applied.join(", ")}` : "db-init: database is up to date (no pending migrations)");
-  return { schemaApplied, applied };
+  // Task 20 (I6): the app should never connect as a Postgres superuser
+  const role = (await pool.query("SELECT rolsuper OR rolcreaterole OR rolcreatedb AS privileged FROM pg_roles WHERE rolname = current_user")).rows[0];
+  const privileged = Boolean(role && role.privileged);
+  if (privileged) log.log("db-init: WARNING the app connects with a privileged Postgres role (superuser/createrole/createdb); use an unprivileged role that owns the database (the Docker kit creates vita_app)");
+  return { schemaApplied, applied, privileged };
 }
 
 module.exports = { initDatabase };

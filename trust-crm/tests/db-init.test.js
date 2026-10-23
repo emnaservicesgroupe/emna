@@ -25,7 +25,10 @@ test("db-init: empty database -> original schema + all migrations; second run is
       assert.ok((await pool.query("SELECT to_regclass($1) AS t", [t])).rows[0].t, t);
     }
     await pool.query("INSERT INTO users (full_name, email, password, role) VALUES ('Kept','kept@test.invalid','x','Admin')");
-    const second = await initDatabase(pool, { log: quiet });
+    const lines = [];
+    const second = await initDatabase(pool, { log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } });
+    assert.equal(second.privileged, true, "the test database connects as the postgres superuser");
+    assert.ok(lines.some((l) => /WARNING the app connects with a privileged Postgres role/.test(l)));
     assert.equal(second.schemaApplied, false);
     assert.deepEqual(second.applied, []);
     assert.equal((await pool.query("SELECT count(*)::int n FROM users")).rows[0].n, 1);

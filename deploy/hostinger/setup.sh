@@ -3,15 +3,20 @@
 #
 #   ./setup.sh                              first run without a domain (uses <server-ip>.sslip.io)
 #   ./setup.sh --domain vita.example.com    use your own domain (its DNS A record must point at this server)
-#   ./setup.sh --configure-firewall         also allow SSH/80/443 in ufw and enable it
+#   ./setup.sh --configure-firewall         also allow your SSH port, 80 and 443 in ufw and enable it
 #   ./setup.sh --help
 #
-# Safe to run again: an existing .env is never overwritten (only SITE_ADDRESS is updated when --domain is
-# given), secrets are generated once and never printed, and `docker compose up -d --build` is idempotent.
+# Safe to run again: an existing .env / .env.db is never overwritten (only SITE_ADDRESS is updated when
+# --domain is given or when it is still empty), secrets are generated once and never printed, and
+# `docker compose up -d --build` is idempotent.
 # Everything starts in SAFE SANDBOX MODE: no real e-mail, no live job sources.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+# Temporary files from set_env are removed on every exit path.
+cleanup_tmp() { rm -f .env.tmp.* .env.db.tmp.* 2> /dev/null || true; }
+trap cleanup_tmp EXIT
 
 DOMAIN=""
 FIREWALL=0
@@ -45,7 +50,8 @@ done
 valid_hostname() {
   local h="$1"
   [ "${#h}" -le 253 ] || return 1
-  [[ "$h" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+  # labels of letters/digits/dashes; TLD letters only, or an IDN TLD in punycode (xn--...)
+  [[ "$h" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$ ]]
 }
 
 valid_ipv4() {
@@ -121,16 +127,17 @@ compose() { "${DOCKER[@]}" compose "$@"; }
 [ -f .env.production.example ] || die ".env.production.example not found next to setup.sh"
 
 # ------------------------------------------------------------------ 3. .env (secrets generated once, never printed)
-# set_env KEY VALUE: replace the KEY= line in .env (VALUE is generated hex or a validated host name).
+# set_env FILE KEY VALUE: replace the KEY= line in FILE. The value reaches awk through the environment
+# (ENVIRON), never as program text or a -v assignment, so no character in it is interpreted.
 set_env() {
-  local key="$1" value="$2" tmp
-  tmp="$(mktemp .env.tmp.XXXXXX)"
+  local file="$1" key="$2" value="$3" tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
   chmod 600 "$tmp"
-  awk -v k="$key" -v v="$value" 'BEGIN { done = 0 }
-    $0 ~ "^" k "=" { print k "=" v; done = 1; next }
+  SET_KEY="$key" SET_VALUE="$value" awk 'BEGIN { k = ENVIRON["SET_KEY"]; v = ENVIRON["SET_VALUE"]; done = 0 }
+    index($0, k "=") == 1 { print k "=" v; done = 1; next }
     { print }
-    END { if (!done) print k "=" v }' .env > "$tmp"
-  mv "$tmp" .env
+    END { if (!done) print k "=" v }' "$file" > "$tmp"
+  mv "$tmp" "$file"
 }
 get_env() {
   local key="$1"
@@ -143,57 +150,93 @@ detect_site_address() {
   if ! valid_ipv4 "$ip"; then
     warn "could not detect the public IPv4 address automatically (https://api.ipify.org)."
     if [ -t 0 ]; then
-      read -r -p "Type this server's public IPv4 address (shown in hPanel > VPS > Overview): " ip
+      IFS= read -r -p "Type this server's public IPv4 address (shown in hPanel > VPS > Overview): " ip
     fi
     valid_ipv4 "$ip" || die "no valid IPv4 address; run again with --domain your.domain or type the IP when asked"
   fi
   printf '%s.sslip.io' "${ip//./-}"
 }
 
+umask 077
 if [ -f .env ]; then
   say "Keeping the existing .env (it is never overwritten; secrets unchanged)."
   chmod 600 .env
   if [ -n "$DOMAIN" ]; then
-    set_env SITE_ADDRESS "$DOMAIN"
+    set_env .env SITE_ADDRESS "$DOMAIN"
     say "SITE_ADDRESS set to $DOMAIN"
+  elif [ -z "$(get_env SITE_ADDRESS)" ]; then
+    # an earlier run could not detect the IP: try again (or ask) instead of stopping
+    SITE="$(detect_site_address)"
+    set_env .env SITE_ADDRESS "$SITE"
+    say "SITE_ADDRESS was empty; set to $SITE"
   fi
 else
-  umask 077
   cp .env.production.example .env
   chmod 600 .env
   for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD; do
-    set_env "$key" "$(openssl rand -hex 32)"
+    set_env .env "$key" "$(openssl rand -hex 32)"
   done
   if [ -n "$DOMAIN" ]; then
     SITE="$DOMAIN"
   else
     SITE="$(detect_site_address)"
   fi
-  set_env SITE_ADDRESS "$SITE"
+  set_env .env SITE_ADDRESS "$SITE"
   say "Created .env (permissions 600) with newly generated secrets (not shown) and SITE_ADDRESS=$SITE"
 fi
+
+# Postgres SUPERUSER credentials: a separate file that only the db container reads (never the app).
+if [ -f .env.db ]; then
+  chmod 600 .env.db
+else
+  if "${DOCKER[@]}" volume inspect vita_db-data > /dev/null 2>&1; then
+    warn "a database volume (vita_db-data) already exists: its superuser password is NOT changed by a new .env.db."
+  fi
+  printf 'POSTGRES_USER=postgres\nPOSTGRES_PASSWORD=\n' > .env.db
+  chmod 600 .env.db
+  set_env .env.db POSTGRES_PASSWORD "$(openssl rand -hex 32)"
+  say "Created .env.db (permissions 600) with a generated Postgres superuser password (not shown)."
+fi
+[ "$(grep -E '^DB_USER=' .env | tail -n 1 | cut -d= -f2-)" != "postgres" ] || die "DB_USER in .env must be the unprivileged application role (vita_app), not postgres"
 
 SITE="$(get_env SITE_ADDRESS)"
 [ -n "$SITE" ] || die "SITE_ADDRESS is empty in .env: run ./setup.sh --domain your.domain"
 valid_hostname "$SITE" || die "SITE_ADDRESS in .env is not a valid host name"
 
 # ------------------------------------------------------------------ 4. firewall (only when asked)
+# The port(s) sshd really listens on (a changed SSH port must stay open, or you lock yourself out).
+ssh_ports() {
+  local ports
+  ports="$(sudo sshd -T 2> /dev/null | awk '$1 == "port" { print $2 }' | sort -u || true)"
+  if [ -z "$ports" ]; then
+    ports="$(sudo ss -tlnpH 2> /dev/null | awk '/sshd/ { n = split($4, a, ":"); print a[n] }' | sort -u || true)"
+  fi
+  printf '%s\n' "$ports" | grep -E '^[0-9]{1,5}$' || true
+}
+
 if [ "$FIREWALL" -eq 1 ]; then
   command -v ufw > /dev/null 2>&1 || die "ufw is not installed: sudo apt-get install -y ufw"
-  say "Configuring ufw: allow SSH (22), HTTP (80), HTTPS (443 tcp+udp), then enable."
-  sudo ufw allow OpenSSH
+  mapfile -t SSH_PORTS < <(ssh_ports)
+  if [ "${#SSH_PORTS[@]}" -eq 0 ]; then
+    die "could not find the port sshd listens on: NOT enabling the firewall (you could be locked out). Allow your SSH port by hand: sudo ufw allow <port>/tcp"
+  fi
+  say "Configuring ufw: allow SSH (port ${SSH_PORTS[*]}), HTTP (80), HTTPS (443 tcp+udp), then enable."
+  warn "make sure ${SSH_PORTS[*]} is the port you are connected on; keep this SSH session open and test a NEW login before closing it."
+  for port in "${SSH_PORTS[@]}"; do
+    sudo ufw allow "${port}/tcp"
+  done
   sudo ufw allow 80/tcp
   sudo ufw allow 443/tcp
   sudo ufw allow 443/udp
   sudo ufw --force enable
   sudo ufw status verbose
 else
-  say "Firewall not changed (use --configure-firewall to allow only 22/80/443 with ufw; Hostinger's hPanel firewall must allow 80/443 too)."
+  say "Firewall not changed (use --configure-firewall to allow only SSH/80/443 with ufw; Hostinger's hPanel firewall must allow 80/443 too)."
 fi
 
 # ------------------------------------------------------------------ 5. start
 if [ "$ASSUME_YES" -ne 1 ] && [ -t 0 ]; then
-  read -r -p "Build and start VITA at https://$SITE/vita/ now? [Y/n] " answer
+  IFS= read -r -p "Build and start VITA at https://$SITE/vita/ now? [Y/n] " answer
   case "${answer:-y}" in
     y|Y|yes|YES) ;;
     *) say "Stopped. Start later with: docker compose up -d --build"; exit 0 ;;
@@ -235,6 +278,8 @@ VITA is running in SAFE SANDBOX MODE (no real e-mail is sent, no live job source
   Next step:   ./create-admin.sh        (creates the first SuperAdmin; works once)
   Status:      ./status.sh              Logs: ./logs.sh app
   Backups:     ./backup.sh              (set up the daily cron job described in SETUP-HOSTINGER.md)
+  Sandbox mail: ./show-sandbox-mail.sh  (codes/messages for allow-listed test addresses only; real
+                candidates need real mail, see SETUP-HOSTINGER.md section 10)
 
 Guide: docs/vita-job-search/SETUP-HOSTINGER.md
 TXT
