@@ -200,7 +200,7 @@ async function findDuplicates(q, cand) {
 
 async function recordIdentityRef(ctx, actor, candidateId, input) {
   P.require(actor, 'candidates:write_assigned');
-  const c = await staffGet(ctx, actor, candidateId); // enforces assignment scope
+  await staffGet(ctx, actor, candidateId); // enforces assignment scope
   const number = normIdentity(input.number);
   if (number.length < 5) throw E.unprocessable('invalid_identity', 'The document number looks too short');
   const hash = C.hmac(ctx.keys.identity, `${input.kind}:${number}`);
