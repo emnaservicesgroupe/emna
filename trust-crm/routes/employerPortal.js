@@ -5,6 +5,7 @@ const { requirePortalRole } = require("../modules/orgs/portalAuth");
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { asyncHandler } = require("../modules/jobsearch/errorHandler");
 const svc = require("../modules/orgs/employerRequests");
+const presentations = require("../modules/orgs/presentations");
 
 const router = express.Router();
 
@@ -42,6 +43,21 @@ router.patch(
 router.post(
   "/requests/:id/cancel",
   asyncHandler(async (req, res) => res.json(await svc.cancel(req.user, req.org.id, req.params.id)))
+);
+
+router.get(
+  "/presentations",
+  asyncHandler(async (req, res) => res.json(await presentations.employerList(req.org.id, req.query)))
+);
+
+router.get(
+  "/presentations/:id",
+  asyncHandler(async (req, res) => res.json(await presentations.employerGet(req.org.id, req.params.id)))
+);
+
+router.post(
+  "/presentations/:id/respond",
+  asyncHandler(async (req, res) => res.json(await presentations.employerRespond(req.user, req.org.id, req.params.id, req.body)))
 );
 
 // eslint-disable-next-line no-unused-vars

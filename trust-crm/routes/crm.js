@@ -14,6 +14,13 @@
 //   GET|POST /employers, /agencies  ?q&status&limit&offset; GET|PATCH /:id    orgs:read (GET) / orgs:write (POST, PATCH)
 //   POST  /employers|agencies/:id/invite {email, full_name}        orgs:write (201; inviteSent reports the OTP mail)
 //   POST  /employers|agencies/:id/suspend|reactivate               orgs:write (revokes portal sessions)
+//   GET|POST /candidates/:id/share-consents {employer_id, basis}  GET: candidates:read; POST: candidates:write (+ candidate scope; 409 duplicate active)
+//   DELETE /candidates/:id/share-consents/:consentId               candidates:write (withdraws; hides presentations from the employer at once)
+//   GET   /employer-requests ?status&employer_id&q&limit&offset; GET /:id   orgs:read (GET /:id includes staff_note, presentations, timeline)
+//   PATCH /employer-requests/:id {status?, staff_note?, employer_visible_note?}   orgs:write (validated status transitions)
+//   POST  /employer-requests/:id/create-site-job                   orgs:write + sitejobs:write (DRAFT only, never published)
+//   POST  /employer-requests/:id/presentations {candidate_id, staff_note_for_employer?, summary?}   orgs:write + candidates:read + candidate scope + ACTIVE share consent
+//   GET   /presentations ?status&request_id&employer_id            orgs:read (candidate scope); PATCH /presentations/:id/withdraw  orgs:write
 //   GET   /staff                                                   users:write  -> {rows:[{id,full_name,role}]} (assign-to select)
 //   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
 const express = require("express");
@@ -24,6 +31,8 @@ const leads = require("../modules/crm/leadsAdmin");
 const convert = require("../modules/crm/convert");
 const siteJobs = require("../modules/crm/siteJobsAdmin");
 const orgs = require("../modules/orgs/orgsAdmin");
+const shareConsents = require("../modules/orgs/shareConsents");
+const presentations = require("../modules/orgs/presentations");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -98,6 +107,22 @@ for (const type of ["employer", "agency"]) {
   router.post(`${base}/:id/suspend`, W, asyncHandler(async (req, res) => res.json(await orgs.suspend(req.user, type, req.params.id))));
   router.post(`${base}/:id/reactivate`, W, asyncHandler(async (req, res) => res.json(await orgs.reactivate(req.user, type, req.params.id))));
 }
+
+const CR = checkPermission("candidates:read");
+const CW = checkPermission("candidates:write");
+router.get("/candidates/:id/share-consents", CR, asyncHandler(async (req, res) => res.json(await shareConsents.list(req.user, req.params.id))));
+router.post("/candidates/:id/share-consents", CW, asyncHandler(async (req, res) => res.status(201).json(await shareConsents.record(req.user, req.params.id, body(req)))));
+router.delete("/candidates/:id/share-consents/:consentId", CW, asyncHandler(async (req, res) => res.json(await shareConsents.withdraw(req.user, req.params.id, req.params.consentId))));
+
+const OR = checkPermission("orgs:read");
+const OW = checkPermission("orgs:write");
+router.get("/employer-requests", OR, asyncHandler(async (req, res) => res.json(await presentations.listRequests(req.query))));
+router.get("/employer-requests/:id", OR, asyncHandler(async (req, res) => res.json(await presentations.getRequest(req.user, req.params.id))));
+router.patch("/employer-requests/:id", OW, asyncHandler(async (req, res) => res.json(await presentations.patchRequest(req.user, req.params.id, body(req)))));
+router.post("/employer-requests/:id/create-site-job", OW, asyncHandler(async (req, res) => res.status(201).json(await presentations.createSiteJobFromRequest(req.user, req.params.id))));
+router.post("/employer-requests/:id/presentations", OW, CR, asyncHandler(async (req, res) => res.status(201).json(await presentations.present(req.user, req.params.id, body(req)))));
+router.get("/presentations", OR, asyncHandler(async (req, res) => res.json(await presentations.listPresentations(req.user, req.query))));
+router.patch("/presentations/:id/withdraw", OW, asyncHandler(async (req, res) => res.json(await presentations.withdrawPresentation(req.user, req.params.id))));
 
 router.use(jobsearchErrorHandler);
 
