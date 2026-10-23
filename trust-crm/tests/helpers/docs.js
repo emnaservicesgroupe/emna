@@ -96,4 +96,55 @@ function makeDocx(text) {
   });
 }
 
-module.exports = { makePdf, makeDocx };
+/** Deflated DOCX whose document.xml expands to `mb` MB of spaces (zip bomb; from the reviewer's repro). */
+function makeBombDocx(mb) {
+  const raw = Buffer.concat([
+    Buffer.from('<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">a'),
+    Buffer.alloc(mb * 1024 * 1024, 0x20),
+    Buffer.from("b</w:t></w:r></w:p></w:body></w:document>"),
+  ]);
+  const comp = zlib.deflateRawSync(raw, { level: 9 });
+  const parts = [
+    ["[Content_Types].xml", Buffer.from('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>'), 0],
+    ["word/document.xml", raw, 8, comp],
+  ];
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const [name, data, method, compressed] of parts) {
+    const body = compressed || data;
+    const nb = Buffer.from(name);
+    const crc = zlib.crc32(data);
+    const l = Buffer.alloc(30);
+    l.writeUInt32LE(0x04034b50, 0);
+    l.writeUInt16LE(20, 4);
+    l.writeUInt16LE(method, 8);
+    l.writeUInt32LE(crc, 14);
+    l.writeUInt32LE(body.length, 18);
+    l.writeUInt32LE(data.length, 22);
+    l.writeUInt16LE(nb.length, 26);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0);
+    c.writeUInt16LE(20, 4);
+    c.writeUInt16LE(20, 6);
+    c.writeUInt16LE(method, 10);
+    c.writeUInt32LE(crc, 16);
+    c.writeUInt32LE(body.length, 20);
+    c.writeUInt32LE(data.length, 24);
+    c.writeUInt16LE(nb.length, 28);
+    c.writeUInt32LE(offset, 42);
+    locals.push(l, nb, body);
+    centrals.push(c, nb);
+    offset += l.length + nb.length + body.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(parts.length, 8);
+  end.writeUInt16LE(parts.length, 10);
+  end.writeUInt32LE(cd.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+
+module.exports = { makePdf, makeDocx, makeBombDocx };

@@ -109,6 +109,7 @@ router.get(
       "Content-Type": file.mime,
       "Content-Disposition": `attachment; filename="cv-${req.params.key.split("-")[0]}.${req.params.key.split(".").pop()}"`,
       "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "sandbox",
       "Cache-Control": "private, no-store",
     });
     return res.send(file.buf);

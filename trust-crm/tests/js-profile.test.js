@@ -6,7 +6,7 @@ const net = require("net");
 const path = require("path");
 const jwt = require("jsonwebtoken");
 const { createTestDb, loadApp } = require("./helpers/db");
-const { makePdf, makeDocx } = require("./helpers/docs");
+const { makePdf, makeDocx, makeBombDocx } = require("./helpers/docs");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "js-profile-test-secret";
@@ -169,6 +169,68 @@ test("extractFromFile: real PDF and DOCX built in code extract; images give an e
   await assert.rejects(() => extractFromFile(Buffer.from("%PDF-1.4 not really"), "application/pdf"));
 });
 
+test("extract: hostile long lines finish fast (no ReDoS) and invent nothing", () => {
+  const N = 200000;
+  const cases = {
+    "whitespace-only line": " ".repeat(N),
+    "internal-spaces line": "a" + " ".repeat(N) + "b",
+    "a@ repeats": "a@".repeat(N / 2),
+    "long email-ish run": "a".repeat(N),
+    "digit/space line": "1 ".repeat(N / 2),
+    "dot/digit line": "1" + ".".repeat(N) + "x",
+    "languages line": "LANGUAGES\n" + "a" + " ".repeat(N) + "b",
+    "languages parens": "LANGUAGES\n" + "a (".repeat(N / 3),
+    "experience line": "EXPERIENCE\n2019 - 2020 a" + " ".repeat(N) + "b",
+    "heading with colons/spaces": "SKILLS" + ": ".repeat(N / 2),
+    "many short lines": "x\n".repeat(N),
+  };
+  for (const [label, text] of Object.entries(cases)) {
+    const t0 = process.hrtime.bigint();
+    const r = extract(text);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 200, `${label} took ${ms.toFixed(0)} ms`);
+    assert.equal(r.email, null, label);
+    assert.equal(r.phone, null, label);
+    assert.equal(r.name, null, label);
+    assert.deepEqual(r.certificates, [], label);
+    assert.deepEqual(r.education, [], label);
+    assert.ok(r.skills.every((x) => x.length <= 200), label);
+  }
+});
+
+test("zip bomb DOCX is rejected 422 quickly, before decompression; timeouts are contained", () =>
+  withApp(async ({ upload, call, newCandidate }) => {
+    const c = await newCandidate(null);
+    const bomb = makeBombDocx(60);
+    assert.ok(bomb.length < 200000, "bomb is small on the wire");
+    const t0 = Date.now();
+    const r = await upload(c.candidateId, c.token, bomb, "cv.docx");
+    assert.equal(r.status, 422, r.buf.toString());
+    assert.ok(Date.now() - t0 < 3000);
+    assert.match(r.body.error, /too large or complex/);
+    await assert.rejects(() => extractFromFile(bomb, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"), /rejected/);
+
+    // Forced slow parse: the worker is terminated at the timeout, request gets 422, server stays up.
+    const saved = { d: process.env.EXTRACT_TEST_DELAY_MS, t: process.env.EXTRACT_TIMEOUT_MS };
+    process.env.EXTRACT_TEST_DELAY_MS = "3000";
+    process.env.EXTRACT_TIMEOUT_MS = "300";
+    try {
+      const t1 = Date.now();
+      const slow = await upload(c.candidateId, c.token, makePdf(SAMPLE));
+      assert.equal(slow.status, 422);
+      assert.match(slow.body.error, /too long/);
+      assert.ok(Date.now() - t1 < 2500, "returned at the timeout, not after the slow parse");
+    } finally {
+      for (const [k, v] of [["EXTRACT_TEST_DELAY_MS", saved.d], ["EXTRACT_TIMEOUT_MS", saved.t]]) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+    const ok = await upload(c.candidateId, c.token, makePdf(SAMPLE));
+    assert.equal(ok.status, 201, "server still serves uploads");
+    assert.equal((await call("GET", `/jobsearch/candidates/${c.candidateId}/profile`, { token: c.token })).status, 200);
+  }));
+
 // ---------- upload / profile ----------
 
 test("candidate uploads a PDF: original stored, extracted profile created, scan reported honestly", () =>
@@ -190,6 +252,16 @@ test("candidate uploads a PDF: original stored, extracted profile created, scan 
     assert.ok(Buffer.from(await storage.get(row.storage_key)).equals(pdf), "original bytes stored untouched");
     assert.equal(r.body.profile.cv_files[0].download_url.startsWith("/jobsearch/files/"), true);
     assert.equal("storage_key" in r.body.profile.cv_files[0], false, "raw storage key is not exposed");
+  }));
+
+test("confirm records provenance 'cv' only for fields that had a value", () =>
+  withApp(async ({ upload, call, newCandidate }) => {
+    const c = await newCandidate(null);
+    await upload(c.candidateId, c.token, makePdf(SAMPLE));
+    const r = await call("PUT", `/jobsearch/candidates/${c.candidateId}/profile/confirm`, { token: c.token, body: { preferences: PREFS } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.provenance.certificates, undefined);
+    assert.equal(r.body.provenance.name, "cv");
   }));
 
 test("candidate uploads a DOCX and it extracts", () =>
@@ -396,6 +468,7 @@ test("scan hook: clean, infected (422, not stored) and unreachable scanner", () 
       process.env.CLAMAV_PORT = String(bad.address().port);
       const inf = await upload(c.candidateId, c.token, makePdf(SAMPLE + "\nextra"));
       assert.equal(inf.status, 422);
+      assert.equal((await pool.query("SELECT count(*)::int n FROM js_audit_events WHERE action='cv.upload_rejected_infected' AND candidate_id=$1", [c.candidateId])).rows[0].n, 1);
       assert.equal((await pool.query("SELECT count(*)::int n FROM js_cv_files WHERE candidate_id=$1", [c.candidateId])).rows[0].n, 1, "infected upload is not stored");
       bad.close();
 
@@ -427,6 +500,7 @@ test("signed file link: owner ok; other candidate, wrong user, expired, tampered
     assert.ok(own.buf.equals(pdf));
     assert.equal(own.headers.get("content-type"), "application/pdf");
     assert.equal(own.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(own.headers.get("content-security-policy"), "sandbox");
     assert.match(own.headers.get("content-disposition"), /^attachment/);
 
     assert.equal((await call("GET", link, { token: other.token })).status, 404, "other candidate");

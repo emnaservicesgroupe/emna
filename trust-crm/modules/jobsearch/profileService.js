@@ -143,14 +143,27 @@ async function uploadCv({ user, candidateId, file }) {
   } catch (err) {
     throw mapStorageError(err);
   }
+  // Scanner policy: a clean/infected verdict is authoritative. If the scanner is not configured
+  // or fails (down, timeout, bad reply) the upload is still accepted but stored and shown as
+  // 'scan_unavailable' - never as 'clean'.
   const scan = await scanner.scan(buf);
-  if (scan.status === "infected") throw new HttpError(422, "File rejected: malware detected");
+  if (scan.status === "infected") {
+    await db().query("INSERT INTO js_audit_events (actor, action, candidate_id, detail) VALUES ($1,'cv.upload_rejected_infected',$2,$3::jsonb)", [
+      `user:${user.id}`,
+      id,
+      JSON.stringify({ detail: scan.detail, size: buf.length }),
+    ]);
+    throw new HttpError(422, "File rejected: malware detected");
+  }
 
   let extraction;
   try {
     extraction = await extractFromFile(buf, mime);
   } catch (err) {
-    console.error("jobsearch cv extraction failed:", err && err.name);
+    const reason = err && err.reason;
+    console.error("jobsearch cv extraction failed:", err && err.name, reason);
+    if (reason === "timeout") throw new HttpError(422, "The document took too long to read and was rejected");
+    if (reason === "too_large" || reason === "memory") throw new HttpError(422, "The document is too large or complex to read and was rejected");
     throw new HttpError(422, "The document could not be read");
   }
   const { provenance, ...extracted } = extraction;
@@ -240,7 +253,10 @@ async function confirmProfile({ user, candidateId, edits, preferences }) {
         // Earlier edits survive unless a newer extraction exists for a field nobody edited.
         const edited = prevProv[f] && prevProv[f] !== "cv" && f in prevConfirmed;
         confirmed[f] = edited ? prevConfirmed[f] : extracted[f];
-        provenance[f] = edited ? prevProv[f] : "cv";
+        const v = confirmed[f];
+        const hasValue = Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined;
+        if (edited) provenance[f] = prevProv[f];
+        else if (hasValue) provenance[f] = "cv"; // only values actually found in the CV
       } else if (f in prevConfirmed) {
         confirmed[f] = prevConfirmed[f];
         provenance[f] = prevProv[f] || actor;
