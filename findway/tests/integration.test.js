@@ -385,10 +385,12 @@ test('disabling the integration blocks (never silently drops) pending deliveries
   const { candidateId, lead } = await qualifiedCandidate();
   await recordPassport(candidateId, `DI${Date.now() % 1e7}`);
   await env.api('PUT', '/api/admin/integrations/trustcrm', { token: admin.token, body: { enabled: false } });
+  assert.equal((await status()).status, 'disabled'); // never shown as connected while paused
   await runWorker();
   const [d] = await delivery('lead.qualified', lead.id);
   assert.equal(d.status, 'blocked'); assert.equal(d.detail.reason, 'connection_disabled');
   await env.api('PUT', '/api/admin/integrations/trustcrm', { token: admin.token, body: { enabled: true } });
+  assert.equal((await status()).status, 'configured_untested'); // must be re-tested after a pause
   assert.equal((await env.api('POST', `/api/admin/integrations/deliveries/${d.id}/retry`, { token: admin.token })).status, 200);
   await runWorker();
   assert.equal((await delivery('lead.qualified', lead.id))[0].status, 'succeeded');

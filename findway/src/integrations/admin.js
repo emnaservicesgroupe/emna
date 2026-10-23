@@ -25,7 +25,7 @@ async function overview(ctx, actor) {
   const inboundSecret = (await secrets.active(ctx, 'inbound:trustcrm')).map((s) => ({ kid: s.kid, created_at: s.created_at }));
   return {
     connections: conns.map((c) => ({
-      key: c.key, name: c.display_name, enabled: c.enabled, status: c.status, base_url: c.base_url,
+      key: c.key, name: c.display_name, enabled: c.enabled, status: c.enabled || c.status === 'not_configured' ? c.status : 'disabled', base_url: c.base_url,
       credentials_configured: c.key === 'trustcrm' ? !!(ctx.config.trustcrm.serviceEmail && ctx.config.trustcrm.servicePassword) : null,
       last_tested_at: c.last_tested_at, last_test_error: c.last_test_error, last_success_at: c.last_success_at,
       deliveries: byTarget(c.key), recent_failures: failures1h.find((f) => f.target_key === c.key)?.n || 0,
@@ -42,10 +42,12 @@ async function configure(ctx, actor, { base_url, enabled }) {
   return ctx.db.tx(async (q) => {
     const cur = await q.one(`SELECT * FROM integration_connections WHERE key='trustcrm' FOR UPDATE`);
     const url = base_url !== undefined ? base_url.replace(/\/+$/, '') : cur.base_url;
-    // any change to the target invalidates the previous test result: it must be re-proven
-    const status = !url || !creds ? 'not_configured' : (url !== cur.base_url || cur.status === 'disabled') ? 'configured_untested' : cur.status;
     const en = enabled === undefined ? cur.enabled : enabled;
-    const row = await q.one(`UPDATE integration_connections SET base_url=$1, enabled=$2, status=CASE WHEN $2 = false AND $3 = 'connected' THEN 'connected' ELSE $3 END, updated_at=now() WHERE key='trustcrm' RETURNING *`, [url, en, status]);
+    // A changed target, or re-enabling after a pause, invalidates the previous test: it must be proven again.
+    let status = cur.status;
+    if (!url || !creds) status = 'not_configured';
+    else if (url !== cur.base_url || (en && !cur.enabled) || cur.status === 'not_configured') status = 'configured_untested';
+    const row = await q.one(`UPDATE integration_connections SET base_url=$1, enabled=$2, status=$3, updated_at=now() WHERE key='trustcrm' RETURNING *`, [url, en, status]);
     await audit(q, actor, { action: 'integration.configured', entityType: 'integration', entityId: 'trustcrm', details: { enabled: en, base_url: url } });
     return row;
   });
