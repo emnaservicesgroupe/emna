@@ -8,6 +8,25 @@
 (function () {
   "use strict";
 
+  /**
+   * Reconnect delay for the event stream: exponential (1 s, 2 s, 4 s ... capped at 30 s) with
+   * "equal jitter" (half fixed, half random) so many clients do not reconnect in lockstep.
+   * attempt >= 1; rand in [0, 1). Pure, so it is unit-tested from Node.
+   */
+  function backoffDelay(attempt, rand) {
+    var n = Math.max(1, Math.floor(Number(attempt) || 1));
+    var r = typeof rand === "number" && rand >= 0 && rand < 1 ? rand : 0;
+    var base = Math.min(30000, 1000 * Math.pow(2, Math.min(n - 1, 5)));
+    return Math.round(base / 2 + r * (base / 2));
+  }
+  /** A stream only counts as healthy (attempt counter reset) after it stayed open this long or delivered an event. */
+  var STABLE_STREAM_MS = 10000;
+
+  if (typeof window === "undefined") {
+    if (typeof module !== "undefined" && module.exports) module.exports = { backoffDelay: backoffDelay, STABLE_STREAM_MS: STABLE_STREAM_MS };
+    return;
+  }
+
   var I18N = window.VITA_I18N;
   var TOKEN_KEY = "vita.session";
   var LANG_KEY = "vita.lang";
@@ -196,7 +215,12 @@
   function h(tag, props) {
     var el = document.createElement(tag);
     var p = props || {};
+    var badAttr = function (name) {
+      if (/^on|^style$|^src(?:doc)$|^formaction$/i.test(name)) throw new Error("h(): attribute not allowed: " + name);
+    };
     Object.keys(p).forEach(function (k) {
+      if (k !== "on") badAttr(k);
+      if (k === "attrs" && p[k] && typeof p[k] === "object") Object.keys(p[k]).forEach(badAttr);
       var v = p[k];
       if (v === undefined || v === null || v === false) return;
       if (k === "class") el.className = v;
@@ -376,7 +400,7 @@
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
     }
-    return Promise.resolve()
+    var p = Promise.resolve()
       .then(fn)
       .catch(function (err) {
         toast(errorMessage(err), "bad");
@@ -388,6 +412,10 @@
           button.removeAttribute("aria-busy");
         }
       });
+    // The error is already reported in a toast: mark the promise handled so a caller that does
+    // not chain .catch never produces an unhandled rejection (callers may still .catch it).
+    p.catch(function () {});
+    return p;
   }
 
   /** Accessible modal confirmation (native <dialog>). Resolves true/false. */
@@ -426,6 +454,7 @@
   function connectEvents(o) {
     var stopped = false;
     var attempt = 0;
+    var stableTimer = null;
     var controller = null;
     var timer = null;
     var lastId = null;
@@ -449,14 +478,15 @@
       if (!data.length) return;
       var ev;
       try { ev = JSON.parse(data.join("\n")); } catch (e) { return; }
+      attempt = 0;
       if (o.onEvent) safe(o.onEvent, ev);
     }
 
     function schedule() {
       if (stopped) return;
+      window.clearTimeout(stableTimer);
       attempt += 1;
-      var base = Math.min(30000, 1000 * Math.pow(2, Math.min(attempt, 5)));
-      var delay = Math.round(base / 2 + Math.random() * (base / 2));
+      var delay = backoffDelay(attempt, Math.random());
       status("reconnecting");
       timer = window.setTimeout(run, delay);
     }
@@ -477,7 +507,10 @@
             return null;
           }
           if (!res.ok || !res.body) throw new Error("events unavailable");
-          attempt = 0;
+          // A bare 200 that closes at once must not reset the backoff (that would hammer the server):
+          // reset only once the stream stayed open long enough or delivered an event.
+          window.clearTimeout(stableTimer);
+          stableTimer = window.setTimeout(function () { attempt = 0; }, STABLE_STREAM_MS);
           status("live");
           refetch();
           var reader = res.body.getReader();
@@ -512,6 +545,7 @@
       stop: function () {
         stopped = true;
         window.clearTimeout(timer);
+        window.clearTimeout(stableTimer);
         window.clearInterval(periodic);
         document.removeEventListener("visibilitychange", onVisible);
         if (controller) controller.abort();

@@ -1,35 +1,89 @@
 #!/usr/bin/env node
 // DEV-ONLY seed for exercising the VITA web UI (/vita/) locally or in a browser test.
 //
-//   NODE_ENV=development DATABASE_URL=postgres://.../vita_ui_dev node scripts/dev-seed-ui.js
+//   NODE_ENV=development DATABASE_URL=postgres://localhost/vita_ui_dev node scripts/dev-seed-ui.js
 //
-// - Refuses to run unless NODE_ENV is "development" or "test" (always refuses "production").
-// - Applies sql/schema.sql (only when the database is empty) and all migrations.
-// - Creates: a SuperAdmin, a Manager (staff) and two Candidate logins. Candidate e-mails use the
-//   sandbox domain test.invalid so OTP codes are recorded in js_sandbox_mail (never really sent).
-// - Every job, employer, candidate and message it writes is labelled "DEMO". No source is marked
-//   as connected: the real adapters keep their honest status (requires_setup, manual).
-// Passwords: VITA_SEED_PASSWORD if set, otherwise a random one printed once on stdout.
-// Idempotent: if the DEMO SuperAdmin exists, it prints the logins again and changes nothing.
+// DEMO DATA — NOT FOR PRODUCTION. Safety guards (each refusal exits with code 2 and writes nothing):
+// - NODE_ENV=production is always refused; NODE_ENV must be "development" or "test", or unset with
+//   a local database. Any other value is refused.
+// - The database host (TEST_DATABASE_URL, else DATABASE_URL, else DB_HOST - the same order as db.js)
+//   must be local: localhost, 127.0.0.1, ::1 or a unix-socket path. A remote host needs
+//   VITA_SEED_ALLOW_REMOTE=1 (and never works with NODE_ENV unset).
+// - If the users table already holds any user that is not one of the DEMO logins below, the
+//   database is treated as a real install and refused, unless VITA_SEED_FORCE=1.
+// - Password: VITA_SEED_PASSWORD (at least 12 characters) or, by default, a fresh random password
+//   generated per run with crypto and printed once on stdout. There is no fixed default.
+// What it writes: schema + migrations on an empty database, a SuperAdmin, a Manager (staff) and two
+// Candidate logins (sandbox domain test.invalid, so OTP codes land in js_sandbox_mail), and jobs,
+// employers, candidates and messages all labelled "DEMO". No source is marked as connected.
+// Idempotent: if the DEMO SuperAdmin exists it changes nothing (and prints no password).
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-const ENV = process.env.NODE_ENV;
-if (ENV === "production" || !["development", "test"].includes(ENV)) {
-  process.stderr.write(`dev-seed-ui: refusing to run with NODE_ENV=${ENV || "(unset)"}; set NODE_ENV=development (dev databases only).\n`);
+const ADMIN_EMAIL = "demo.superadmin@test.invalid";
+const STAFF_EMAIL = "demo.manager@test.invalid";
+const CAND_EMAIL = "demo.candidate@test.invalid";
+const CAND2_EMAIL = "demo.candidate2@test.invalid";
+const DEMO_EMAILS = [ADMIN_EMAIL, STAFF_EMAIL, CAND_EMAIL, CAND2_EMAIL];
+const MIN_PASSWORD = 12;
+
+function refuse(msg) {
+  process.stderr.write(`dev-seed-ui: refusing to run: ${msg}\n`);
   process.exit(2);
 }
+
+/** The host db.js would connect to, as a string ('' = libpq default, i.e. the local socket). */
+function databaseHost(env) {
+  const url = env.TEST_DATABASE_URL || env.DATABASE_URL;
+  if (url) {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      return { host: null, source: "connection string (unparseable)" };
+    }
+    const socket = u.searchParams.get("host");
+    return { host: socket || decodeURIComponent(u.hostname || ""), source: env.TEST_DATABASE_URL ? "TEST_DATABASE_URL" : "DATABASE_URL" };
+  }
+  return { host: env.DB_HOST || env.PGHOST || "", source: env.DB_HOST ? "DB_HOST" : "default" };
+}
+
+function isLocalHost(host) {
+  if (host === null || host === undefined) return false;
+  const h = String(host).trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h.startsWith("/");
+}
+
+function checkEnvironment(env) {
+  const nodeEnv = env.NODE_ENV;
+  const { host, source } = databaseHost(env);
+  const local = isLocalHost(host);
+  if (nodeEnv === "production") refuse("NODE_ENV=production (dev databases only).");
+  if (nodeEnv !== undefined && nodeEnv !== "" && !["development", "test"].includes(nodeEnv)) refuse(`NODE_ENV=${nodeEnv}; use NODE_ENV=development.`);
+  if (!nodeEnv && !local) refuse(`NODE_ENV is unset and the database host (${source}) is not local.`);
+  if (!local && env.VITA_SEED_ALLOW_REMOTE !== "1") refuse(`the database host from ${source} is not local; set VITA_SEED_ALLOW_REMOTE=1 only for a disposable remote dev database.`);
+  const pw = env.VITA_SEED_PASSWORD;
+  if (pw !== undefined && pw !== "" && pw.length < MIN_PASSWORD) refuse(`VITA_SEED_PASSWORD must be at least ${MIN_PASSWORD} characters.`);
+}
+
+checkEnvironment(process.env);
 
 const bcrypt = require("bcrypt");
 const db = require("../db");
 const { runMigrations } = require("./migrate");
 
-const ADMIN_EMAIL = "demo.superadmin@test.invalid";
-const STAFF_EMAIL = "demo.manager@test.invalid";
-const CAND_EMAIL = "demo.candidate@test.invalid";
-const CAND2_EMAIL = "demo.candidate2@test.invalid";
+/** Refuses a database that already has real (non-DEMO) users, unless VITA_SEED_FORCE=1. */
+async function checkNotRealInstall() {
+  const has = await db.query("SELECT to_regclass('users') AS t");
+  if (!has.rows[0].t) return;
+  const real = await db.query("SELECT count(*)::int AS n FROM users WHERE lower(email) <> ALL($1::text[])", [DEMO_EMAILS]);
+  if (real.rows[0].n > 0 && process.env.VITA_SEED_FORCE !== "1") {
+    await db.end().catch(() => {});
+    refuse(`the users table already has ${real.rows[0].n} non-DEMO user(s): this looks like a real install. Set VITA_SEED_FORCE=1 only for a disposable dev database.`);
+  }
+}
 
 async function ensureSchema() {
   const has = await db.query("SELECT to_regclass('users') AS t");
@@ -38,14 +92,19 @@ async function ensureSchema() {
 }
 
 async function main() {
+  console.log("==============================================");
+  console.log("  DEMO DATA — NOT FOR PRODUCTION (dev-seed-ui)");
+  console.log("==============================================");
+  await checkNotRealInstall();
   await ensureSchema();
-  const password = process.env.VITA_SEED_PASSWORD || crypto.randomBytes(9).toString("base64url");
   const existing = await db.query("SELECT id FROM users WHERE email = $1", [ADMIN_EMAIL]);
   if (existing.rowCount) {
     console.log("dev-seed-ui: DEMO data already present; nothing changed.");
-    printLogins(process.env.VITA_SEED_PASSWORD ? password : "(the password used when it was first seeded)");
+    printLogins("(unchanged: the password used when it was first seeded)");
     return;
   }
+  // Fresh random password per run unless one (>= 12 chars, checked above) is supplied.
+  const password = process.env.VITA_SEED_PASSWORD || crypto.randomBytes(18).toString("base64url");
   const hash = await bcrypt.hash(password, 10);
   const unusable = await bcrypt.hash(crypto.randomBytes(24).toString("hex"), 10);
   const client = await db.connect();

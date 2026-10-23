@@ -441,7 +441,7 @@
             V.toast(paused ? t("candidate.resumed") : t("candidate.pausedDone"), "ok");
             renderCandidateCard();
           });
-        });
+        }).catch(function () { /* reported by busy() */ });
       });
       actions.appendChild(h("span", { class: "badge " + (paused ? "bad" : "ok"), text: paused ? t("candidate.paused") : t("candidate.active") }));
       actions.appendChild(h("span", { class: "badge neutral", text: tc("mode", st.mode) }));
@@ -767,7 +767,7 @@
       renderDrawer(a.id, true);
       refreshSoon();
     };
-    var recipientText = recipient && recipient.recipient ? t("recipient.confirmLine", { to: recipient.recipient, source: tc("rsrc", recipient.recipientSource) }) + (recipient.recipientSource === "posted_in_ad" ? " " + t("recipient.notVerified") : "") : t("recipient.none");
+    var recipientText = recipient && recipient.recipient ? t("recipient.confirmLine", { to: recipient.recipient, source: tc("rsrc", recipient.recipientSource) }) + (recipient.recipientSource === "posted_in_ad" ? " " + t("recipient.notVerified") : "") : !recipient || recipient.error ? t("recipient.unavailable") : t("recipient.none");
 
     var row = h("div", { class: "btn-row" });
     var canPrep = can("write") && PREPARABLE.indexOf(a.status) >= 0;

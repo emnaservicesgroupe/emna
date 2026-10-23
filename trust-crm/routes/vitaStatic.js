@@ -25,22 +25,20 @@ function securityHeaders(_req, res, next) {
     "X-Frame-Options": "DENY",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    // Revalidate everything (ETag/Last-Modified) so a deploy is picked up immediately; also on 301/404.
+    "Cache-Control": "no-cache",
   });
   next();
 }
 
 const router = express.Router();
-router.use(securityHeaders);
 router.use(
   express.static(PUBLIC_DIR, {
     index: "index.html",
     dotfiles: "ignore",
     redirect: false,
     fallthrough: true,
-    setHeaders(res) {
-      // Always revalidate (ETag/Last-Modified) so a deploy is picked up immediately.
-      res.set("Cache-Control", "no-cache");
-    },
+    cacheControl: false, // Cache-Control comes from securityHeaders
   })
 );
 router.use((_req, res) => {
@@ -49,7 +47,7 @@ router.use((_req, res) => {
 
 /** Mounts GET /vita -> /vita/ and the static UI. The trailing-slash check avoids a redirect loop. */
 function mountVita(app) {
-  app.use("/vita", (req, res, next) => {
+  app.use("/vita", securityHeaders, (req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") {
       const pathname = req.originalUrl.split("?")[0];
       if (pathname === "/vita") return res.redirect(301, "/vita/");

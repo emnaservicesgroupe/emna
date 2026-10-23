@@ -161,6 +161,46 @@ test("static scan: no HTML-injection or eval sinks in public/vita/*.js", () => {
   for (const f of files(".css")) assert.doesNotMatch(read(f), /@import|url\(\s*["']?(?:https?:)?\/\//i, `${f}: external css resource`);
 });
 
+test("static scan: href/src/srcdoc and on* attributes are only set inside the allowed helpers", () => {
+  // Allowed: safeLink (http/https only) and download (blob: object URL) in vita.js.
+  const ALLOWED = { "vita.js": ["safeLink", "download"] };
+  for (const f of files(".js")) {
+    if (f === "i18n.js") continue;
+    const src = read(f);
+    const fnAt = (idx) => {
+      const before = src.slice(0, idx);
+      const m = [...before.matchAll(/function\s+([A-Za-z0-9_]+)\s*\(/g)].pop();
+      return m ? m[1] : null;
+    };
+    for (const m of src.matchAll(/\b(?:href|src)\s*:|srcdoc|setAttribute\(\s*["'](?:on|href|src|style)|\.on[a-z]+\s*=|\.(?:href|src)\s*=/g)) {
+      const fn = fnAt(m.index);
+      assert.ok((ALLOWED[f] || []).includes(fn), `${f}: "${m[0]}" used in ${fn || "top level"}`);
+    }
+  }
+  // the generic DOM helper refuses event-handler attributes passed through attrs{}
+  assert.match(read("vita.js"), /function safeLink[\s\S]*?u\.protocol !== "https:" && u\.protocol !== "http:"/);
+});
+
+test("SSE reconnect backoff: exponential, capped at 30 s, jittered, attempt >= 1", () => {
+  const { backoffDelay, STABLE_STREAM_MS } = require("../public/vita/vita.js");
+  assert.equal(STABLE_STREAM_MS, 10000);
+  assert.equal(backoffDelay(1, 0), 500);
+  assert.equal(backoffDelay(1, 0.999999), 1000);
+  assert.equal(backoffDelay(2, 0), 1000);
+  assert.equal(backoffDelay(3, 0), 2000);
+  for (const a of [6, 7, 50, 1e6]) {
+    assert.ok(backoffDelay(a, 0) === 15000 && backoffDelay(a, 0.999999) <= 30000, `attempt ${a}`);
+  }
+  assert.equal(backoffDelay(0, 0), 500, "attempt is clamped to >= 1");
+  assert.equal(backoffDelay(4, 2), backoffDelay(4, 0), "bad random input falls back to 0");
+  const samples = new Set(Array.from({ length: 20 }, (_, i) => backoffDelay(5, i / 20)));
+  assert.ok(samples.size > 10, "jitter spreads reconnects");
+  // the client must not reset the counter on a bare 200: only after a stable period or an event
+  const js = read("vita.js");
+  assert.match(js, /stableTimer = window\.setTimeout\(function \(\) \{ attempt = 0; \}, STABLE_STREAM_MS\)/);
+  assert.doesNotMatch(js, /throw new Error\("events unavailable"\);\s*attempt = 0;/);
+});
+
 test("tokens are kept in sessionStorage (with memory fallback), never put in URLs", () => {
   const js = read("vita.js");
   assert.match(js, /sessionStorage/);
@@ -179,6 +219,9 @@ test("http: /vita redirects, assets are served with CSP and security headers, / 
     const r = await fetch(`${base}/vita`, { redirect: "manual" });
     assert.ok([301, 302, 308].includes(r.status), `status ${r.status}`);
     assert.equal(r.headers.get("location"), "/vita/");
+    for (const [k, v] of Object.entries({ "content-security-policy": CSP, "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cache-control": "no-cache" })) {
+      assert.equal(r.headers.get(k), v, `redirect ${k}`);
+    }
 
     const assets = [...files(".html"), ...files(".js"), ...files(".css"), "logo.webp"];
     for (const f of ["index.html", "admin.html", "portal.html", "vita.css", "print.css", "vita.js", "i18n.js", "admin.js", "portal.js", "logo.webp"]) assert.ok(assets.includes(f), `missing ${f}`);
@@ -208,8 +251,24 @@ test("http: /vita redirects, assets are served with CSP and security headers, / 
     const missing = await fetch(`${base}/vita/nope.js`);
     assert.equal(missing.status, 404);
     assert.equal(missing.headers.get("content-security-policy"), CSP);
-    // dotfiles and traversal are not served
-    assert.equal((await fetch(`${base}/vita/..%2fapp.js`)).status, 404);
+    assert.equal(missing.headers.get("cache-control"), "no-cache");
+    assert.equal(missing.headers.get("x-content-type-options"), "nosniff");
+    // dotfiles, source maps and traversal attempts are not served; every refusal still carries the CSP
+    const http = require("http");
+    const rawGet = (p) => new Promise((resolve, reject) => {
+      const u = new URL(base);
+      http.get({ host: u.hostname, port: u.port, path: p }, (res) => { res.resume(); res.on("end", () => resolve(res)); }).on("error", reject);
+    });
+    for (const p of [
+      "/vita/..%2fapp.js", "/vita/%2e%2e/app.js", "/vita/%2e%2e%2fapp.js", "/vita/..%252fapp.js", "/vita/%252e%252e%252fapp.js",
+      "/vita/.env", "/vita/..%2f.env", "/vita/%2e%2e%2f.env", "/vita/vita.js.map", "/vita/..%5capp.js", "/vita/..\\app.js",
+      "/vita//etc/passwd", "/vita/%2fetc%2fpasswd", "/vita/..%2f..%2f..%2fetc%2fpasswd", "/vita/../app.js",
+    ]) {
+      const res = await rawGet(p);
+      assert.equal(res.statusCode, 404, `${p} -> ${res.statusCode}`);
+      assert.equal(res.headers["content-security-policy"], CSP, `${p} CSP`);
+      assert.equal(res.headers["x-content-type-options"], "nosniff", `${p} nosniff`);
+    }
     // the API is untouched by the static mount
     assert.equal((await fetch(`${base}/jobsearch/auth/me`)).status, 401);
   });

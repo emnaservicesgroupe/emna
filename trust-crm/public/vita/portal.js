@@ -530,8 +530,16 @@
           });
         }).catch(function (e2) { err.textContent = V.errorMessage(e2); });
       };
-      if (sc.submit && !scope.submit) V.confirmDialog(t("consent.submitConfirm"), t("consent.grant")).then(function (ok) { if (ok) go(); });
-      else go();
+      // Narrowing (unticking a key that is currently granted) stops work: confirm it like a withdrawal.
+      var narrowed = active ? SCOPE_KEYS.filter(function (k) { return scope[k] === true && !sc[k]; }) : [];
+      var steps = [];
+      if (narrowed.length) steps.push([t("consent.withdrawConfirm", { scope: narrowed.map(function (k) { return t("consent." + k); }).join(", ") }), t("consent.withdraw"), true]);
+      if (sc.submit && !scope.submit) steps.push([t("consent.submitConfirm"), t("consent.grant"), false]);
+      var ask = function (i) {
+        if (i >= steps.length) return go();
+        V.confirmDialog(steps[i][0], steps[i][1], steps[i][2]).then(function (ok) { if (ok) ask(i + 1); });
+      };
+      ask(0);
     });
     out.push(form);
 
