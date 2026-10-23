@@ -133,7 +133,7 @@
     // Fixed-language slots (e.g. the disclaimer in all three languages) never follow the UI language.
     scope.querySelectorAll("[data-disclaimer-lang]").forEach(function (el) {
       var l = el.getAttribute("data-disclaimer-lang");
-      el.textContent = I18N.dictionaries[l].disclaimer;
+      el.textContent = I18N.dictionaries[l][el.getAttribute("data-disclaimer-key") || "disclaimer"];
       el.setAttribute("lang", l);
       el.setAttribute("dir", I18N.dirFor(l));
     });

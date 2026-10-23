@@ -220,3 +220,77 @@ test("/auth/register refuses Employer and Agency roles (portal users are created
     await cleanup();
   }
 });
+
+// ---------- migration 015 (review round 1) ----------
+
+const MIG15 = () => fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "015_orgs_review_fixes.sql"), "utf8");
+
+test("migration 015 is idempotent and adds employer_presentations.consent_id as a nullable FK to candidate_share_consents", () =>
+  withDb(async (pool) => {
+    const { runMigrations } = require("../scripts/migrate");
+    assert.deepEqual(await runMigrations(pool), []);
+    await pool.query(MIG15());
+    await pool.query(MIG15());
+    const col = await pool.query(
+      "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name='employer_presentations' AND column_name='consent_id'"
+    );
+    assert.equal(col.rows[0] && col.rows[0].is_nullable, "YES");
+    const e = await employer(pool);
+    const rid = (await request(pool, e)).rows[0].id;
+    const c = await candidate(pool);
+    await assert.rejects(pool.query("INSERT INTO employer_presentations (request_id, candidate_id, consent_id) VALUES ($1,$2,999999)", [rid, c]), /foreign key/i);
+  }));
+
+test("migration 015 backfills consent_id with the latest consent at or before the presentation", () =>
+  withDb(async (pool) => {
+    const e = await employer(pool);
+    const other = await employer(pool, "Other");
+    const rid = (await request(pool, e)).rows[0].id;
+    const c = await candidate(pool);
+    const cons = async (emp, rec, wd) =>
+      (await pool.query("INSERT INTO candidate_share_consents (candidate_id, employer_id, basis, recorded_at, withdrawn_at) VALUES ($1,$2,'b',$3,$4) RETURNING id", [c, emp, rec, wd])).rows[0].id;
+    const old = await cons(e, "2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z");
+    const cur = await cons(e, "2026-02-01T00:00:00Z", null);
+    await cons(other, "2026-01-20T00:00:00Z", null); // other employer: ignored
+    const later = await cons(e, "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z"); // after the presentation: ignored
+    const p = (await pool.query("INSERT INTO employer_presentations (request_id, candidate_id, created_at) VALUES ($1,$2,'2026-02-10T00:00:00Z') RETURNING id", [rid, c])).rows[0].id;
+    await pool.query("UPDATE employer_presentations SET consent_id = NULL");
+    await pool.query(MIG15());
+    const got = (await pool.query("SELECT consent_id FROM employer_presentations WHERE id=$1", [p])).rows[0].consent_id;
+    assert.equal(String(got), String(cur));
+    assert.notEqual(String(got), String(old));
+    assert.notEqual(String(got), String(later));
+  }));
+
+test("migration 015 normalises junk crm_employers.status to 'new' and validates the 013 constraint", () =>
+  withDb(async (pool) => {
+    await pool.query("ALTER TABLE crm_employers DROP CONSTRAINT crm_employers_status_check");
+    await pool.query("INSERT INTO crm_employers (name, status) VALUES ('J1','weird'), ('J2','active'), ('J3','suspended')");
+    await pool.query("ALTER TABLE crm_employers ADD CONSTRAINT crm_employers_status_check CHECK (status IN ('new','active','suspended','inactive')) NOT VALID");
+    const before = await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='crm_employers_status_check' AND conrelid='crm_employers'::regclass");
+    assert.equal(before.rows[0].convalidated, false);
+    await pool.query(MIG15());
+    const after = await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='crm_employers_status_check' AND conrelid='crm_employers'::regclass");
+    assert.equal(after.rows[0].convalidated, true);
+    const st = (await pool.query("SELECT name, status FROM crm_employers ORDER BY name")).rows;
+    assert.deepEqual(st.map((r) => r.status), ["new", "active", "suspended"]);
+    await assert.rejects(pool.query("INSERT INTO crm_employers (name, status) VALUES ('J4','bogus')"), /check constraint/i);
+  }));
+
+test("users constraints after all migrations: the only CHECK mentioning role is the role-in-list one; the others keep their schema.sql names", () =>
+  withDb(async (pool) => {
+    const list = async () =>
+      (await pool.query("SELECT conname, contype, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = to_regclass('users') AND contype IN ('c','p','u','f') ORDER BY conname")).rows;
+    const rows = await list();
+    const checks = rows.filter((r) => r.contype === "c");
+    assert.deepEqual(checks.map((r) => r.conname), ["users_role_check"]);
+    for (const role of ["SuperAdmin", "Admin", "Manager", "Receptionist", "Accountant", "HR", "Agent", "Candidate", "Employer", "Agency"]) assert.match(checks[0].def, new RegExp(`'${role}'`));
+    assert.deepEqual(rows.filter((r) => r.contype !== "c").map((r) => r.conname), ["users_email_key", "users_pkey"]);
+    // an unrelated CHECK on users survives a re-run of 015, and a dropped role check is restored
+    await pool.query("ALTER TABLE users ADD CONSTRAINT users_name_len_check CHECK (length(full_name) > 0)");
+    await pool.query("ALTER TABLE users DROP CONSTRAINT users_role_check");
+    await pool.query(MIG15());
+    assert.deepEqual((await list()).filter((r) => r.contype === "c").map((r) => r.conname), ["users_name_len_check", "users_role_check"]);
+    assert.ok(await user(pool, "Employer", "e15@x.invalid"));
+    await assert.rejects(user(pool, "Nope", "n15@x.invalid"), /check constraint/i);
+  }));

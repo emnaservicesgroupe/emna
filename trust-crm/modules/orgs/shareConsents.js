@@ -5,7 +5,7 @@ const { HttpError } = require("../jobsearch/httpError");
 const { assertCandidateAccess } = require("../jobsearch/scope");
 const { logAudit } = require("../../utils/audit");
 const timeline = require("../crm/timeline");
-const { inTransaction, parseId } = require("../crm/leadsAdmin");
+const { inTransaction, parseId, hasPerm } = require("../crm/leadsAdmin");
 
 const db = () => require("../../db");
 const BASIS_MAX = 500;
@@ -59,7 +59,9 @@ async function record(user, rawCandidateId, input) {
 async function withdraw(user, rawCandidateId, rawConsentId) {
   const id = parseId(rawCandidateId);
   const consentId = parseId(rawConsentId);
-  await assertCandidateAccess(user, id);
+  // Withdrawing a consent is a safety action: Admin/SuperAdmin may always do it (candidate soft-deleted or reassigned
+  // out of scope); other staff need the usual candidate scope.
+  if (!hasPerm(user, "users:write")) await assertCandidateAccess(user, id);
   return inTransaction(async (client) => {
     const cur = await client.query("SELECT id, employer_id, withdrawn_at FROM candidate_share_consents WHERE id = $1 AND candidate_id = $2 FOR UPDATE", [consentId, id]);
     if (cur.rowCount === 0) throw new HttpError(404, "Not found");

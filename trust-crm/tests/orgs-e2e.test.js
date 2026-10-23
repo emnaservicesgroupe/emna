@@ -38,7 +38,7 @@ for (const k of ["CLAMAV_HOST", "MAIL_REAL_SEND"]) delete process.env[k];
 const E = require("./helpers/e2e");
 
 const SUMMARY_KEYS = ["availability", "country_of_residence", "languages", "profession", "staff_note_for_employer", "years_experience"];
-const ITEM_KEYS = ["created_at", "employer_note", "id", "request_id", "request_title", "responded_at", "status", "summary"];
+const ITEM_KEYS = ["closed", "created_at", "employer_note", "id", "request_id", "request_title", "responded_at", "status", "summary"];
 const AGENCY_KEYS = ["country", "created_at", "full_name", "id", "profession", "stage", "status_text"];
 // Strings from the seeded candidate that must never reach an employer.
 const SECRETS = ["Karim Zouaoui", "karim.z@test.invalid", "+216 20 123 456", "TN-PASS-77123", "SENSITIVE-ID-889", "SecretCorp", "1988-03-04"];

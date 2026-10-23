@@ -258,12 +258,14 @@
     var buttons = O.RESPONSES.map(function (status) {
       var current = p.status === status;
       var b = h("button", { type: "button", class: "btn" + (current ? "" : " secondary"), text: t("employer.respond." + status), attrs: { "aria-pressed": current ? "true" : "false" } });
+      if (p.closed) b.disabled = true; // the request is closed: read-only
       b.addEventListener("click", function () { respond(p, status, note.value, b, err); });
       return b;
     });
     var answered = p.responded_at
       ? h("p", { class: "small" }, h("strong", { text: t("employer.pres.answered") + ": " }), V.fmtDateTime(p.responded_at))
       : h("p", { class: "small muted", text: t("employer.pres.awaiting") });
+    var closedNote = p.closed ? h("p", { class: "small muted", text: t("employer.pres.closed") }) : null;
     return h("article", { class: "card" },
       h("div", { class: "card-head" },
         h("h3", { text: p.request_title }), h("span", { class: "spacer" }),
@@ -272,6 +274,7 @@
       h("p", { class: "small muted", text: t("employer.pres.presentedOn", { date: V.fmtDate(p.created_at) }) }),
       C.kv(rows),
       answered,
+      closedNote,
       h("div", { class: "field" },
         h("label", { for: noteId, text: t("employer.pres.noteLabel") }),
         note,

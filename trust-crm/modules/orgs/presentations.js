@@ -47,6 +47,21 @@ function cleanText(v, label, max) {
 }
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
 
+// Contact-data heuristics for anything an employer will see: e-mail, URL, 6+ digits (phone/passport-like).
+const SUMMARY_VALUE_MAX = 120;
+function looksLikeContact(str) {
+  if (typeof str !== "string") return false;
+  if (str.includes("@")) return true;
+  if (/[a-z][a-z0-9+.-]*:\/\//i.test(str) || /\bwww\./i.test(str)) return true;
+  return str.replace(/\D/g, "").length >= 6;
+}
+/** Staff-written text for the employer: contact data is rejected (400), never silently dropped. */
+function cleanEmployerNote(v, label) {
+  const t = cleanText(v, label, EMPLOYER_NOTE_MAX);
+  if (t !== null && looksLikeContact(t)) throw new HttpError(400, `${label} must not contain contact details (e-mail address, web link or phone/ID number)`);
+  return t;
+}
+
 // ---------- staff: employer requests ----------
 
 const REQ_COLS = `r.id, r.employer_id, e.name AS employer_name, r.title, r.positions, r.country, r.city, r.category,
@@ -94,7 +109,7 @@ async function loadRequest(client, id, { lock = false } = {}) {
 
 const PRES_COLS = `p.id, p.request_id, p.candidate_id, c.full_name AS candidate_name, p.presented_by, p.summary,
   p.staff_note_for_employer, p.status, p.employer_note, p.responded_at, p.created_at,
-  EXISTS (SELECT 1 FROM candidate_share_consents sc WHERE sc.candidate_id = p.candidate_id AND sc.employer_id = r.employer_id AND sc.withdrawn_at IS NULL) AS consent_active`;
+  EXISTS (SELECT 1 FROM candidate_share_consents sc WHERE sc.id = p.consent_id AND sc.withdrawn_at IS NULL) AS consent_active`;
 
 async function presentationsFor(user, requestId) {
   const scope = candidateScopeSql(user, "c", 1);
@@ -157,34 +172,32 @@ async function patchRequest(user, rawId, input) {
 
 async function createSiteJobFromRequest(user, rawId) {
   const id = parseId(rawId);
-  const lockKey = String(7000000000 + id);
-  const lockClient = await db().connect();
-  try {
-    // One draft per request even under concurrent calls: a session advisory lock around check + create + link.
-    await lockClient.query("SELECT pg_advisory_lock($1::bigint)", [lockKey]);
-    const req = await loadRequest(lockClient, id);
+  // One transaction for check + draft + link + timeline + audit: a failure anywhere leaves no orphan draft. The
+  // transaction-level advisory lock (released at COMMIT/ROLLBACK) serialises concurrent calls for the same request.
+  return inTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [String(7000000000 + id)]);
+    const req = await loadRequest(client, id);
     if (req.site_job_id) throw new HttpError(409, "A site job was already created from this request");
     if (!PRESENT_STATUSES.includes(req.status)) throw new HttpError(409, "Request must be in_review or accepted");
     // The staff user needs sitejobs:write (enforced by the existing service). The employer is NOT named on the draft.
-    const draft = await siteJobs.createSiteJob(user, {
-      title: req.title,
-      country: req.country,
-      city: req.city,
-      category: req.category,
-      description: req.description,
-      requirements: req.requirements,
-      salary_text: req.salary_text,
-    });
-    await inTransaction(async (client) => {
-      await client.query("UPDATE employer_requests SET site_job_id = $2, updated_at = now() WHERE id = $1", [String(id), draft.id]);
-      await timeline.add(client, { entity: "employer_request", entityId: id, actorId: user.id, event: "site_job_created", detail: { site_job_id: Number(draft.id) } });
-      await logAudit({ client, userId: user.id, action: "crm.employer_request.site_job", tableName: "employer_requests", recordId: String(id), newData: { site_job_id: Number(draft.id), status: "draft" } });
-    });
+    const draft = await siteJobs.createSiteJob(
+      user,
+      {
+        title: req.title,
+        country: req.country,
+        city: req.city,
+        category: req.category,
+        description: req.description,
+        requirements: req.requirements,
+        salary_text: req.salary_text,
+      },
+      client
+    );
+    await client.query("UPDATE employer_requests SET site_job_id = $2, updated_at = now() WHERE id = $1", [String(id), draft.id]);
+    await timeline.add(client, { entity: "employer_request", entityId: id, actorId: user.id, event: "site_job_created", detail: { site_job_id: Number(draft.id) } });
+    await logAudit({ client, userId: user.id, action: "crm.employer_request.site_job", tableName: "employer_requests", recordId: String(id), newData: { site_job_id: Number(draft.id), status: "draft" } });
     return { request_id: id, site_job: draft };
-  } finally {
-    await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [lockKey]).catch(() => {});
-    lockClient.release();
-  }
+  });
 }
 
 // ---------- summary snapshot ----------
@@ -264,13 +277,24 @@ async function buildSummary(client, candidateId, staffSummary, staffNote) {
   for (const k of ["profession", "years_experience", "languages", "country_of_residence", "availability"]) {
     summary[k] = fromProfile[k] !== null ? fromProfile[k] : staffSummary[k] !== undefined ? staffSummary[k] : null;
   }
+  // Drop (and report) anything that looks like contact data or is overlong, whatever its source.
+  const redacted = [];
+  for (const k of ["profession", "languages", "country_of_residence", "availability"]) {
+    const v = summary[k];
+    if (v === null) continue;
+    const parts = Array.isArray(v) ? v : [v];
+    if (parts.some((x) => typeof x === "string" && (x.length > SUMMARY_VALUE_MAX || looksLikeContact(x)))) {
+      summary[k] = null;
+      redacted.push(k);
+    }
+  }
   if (Object.values(summary).every((v) => v === null)) {
     const e = new HttpError(400, "No confirmed profile data for this candidate; supply a summary object (profession, years_experience, languages, country_of_residence, availability)");
     e.code = "no_profile_data";
     throw e;
   }
   summary.staff_note_for_employer = staffNote;
-  return summary;
+  return { summary, redacted };
 }
 
 // ---------- staff: presentations ----------
@@ -281,30 +305,45 @@ async function present(user, rawRequestId, input) {
   if (!isObj(input)) throw new HttpError(400, "JSON object body required");
   for (const k of Object.keys(input)) if (!["candidate_id", "staff_note_for_employer", "summary"].includes(k)) throw new HttpError(400, `Unknown field: ${k.slice(0, 40)}`);
   const candidateId = parseId(input.candidate_id);
-  const note = input.staff_note_for_employer === undefined ? null : cleanText(input.staff_note_for_employer, "staff_note_for_employer", EMPLOYER_NOTE_MAX);
+  const note = input.staff_note_for_employer === undefined ? null : cleanEmployerNote(input.staff_note_for_employer, "staff_note_for_employer");
   const staffSummary = validateStaffSummary(input.summary);
   await assertCandidateAccess(user, candidateId);
   return inTransaction(async (client) => {
     const req = await loadRequest(client, requestId, { lock: true });
     if (!PRESENT_STATUSES.includes(req.status)) throw new HttpError(409, "Request must be in_review or accepted to present candidates");
     const consent = await client.query(
-      "SELECT 1 FROM candidate_share_consents WHERE candidate_id = $1 AND employer_id = $2 AND withdrawn_at IS NULL FOR SHARE",
+      "SELECT id FROM candidate_share_consents WHERE candidate_id = $1 AND employer_id = $2 AND withdrawn_at IS NULL FOR SHARE",
       [candidateId, req.employer_id]
     );
     if (consent.rowCount === 0) throw new HttpError(409, "No active share consent from this candidate for this employer; record it first");
-    const dup = await client.query("SELECT 1 FROM employer_presentations WHERE request_id = $1 AND candidate_id = $2", [String(requestId), candidateId]);
-    if (dup.rowCount > 0) throw new HttpError(409, "This candidate was already presented for this request");
-    const summary = await buildSummary(client, candidateId, staffSummary, note);
-    const ins = await client.query(
-      `INSERT INTO employer_presentations (request_id, candidate_id, presented_by, summary, staff_note_for_employer)
-       VALUES ($1,$2,$3,$4::jsonb,$5) RETURNING id`,
-      [String(requestId), candidateId, user.id, JSON.stringify(summary), note]
-    );
-    const pid = ins.rows[0].id;
-    await timeline.add(client, { entity: "presentation", entityId: pid, actorId: user.id, event: "presented", detail: { request_id: requestId, candidate_id: candidateId } });
+    const consentId = consent.rows[0].id;
+    // A presentation made under an earlier (withdrawn) consent is stale: presenting again refreshes that row under the
+    // current consent (the unique (request, candidate) key stays); one under the current consent is a duplicate.
+    const dup = await client.query("SELECT id, consent_id FROM employer_presentations WHERE request_id = $1 AND candidate_id = $2 FOR UPDATE", [String(requestId), candidateId]);
+    if (dup.rowCount > 0 && dup.rows[0].consent_id !== null && String(dup.rows[0].consent_id) === String(consentId)) throw new HttpError(409, "This candidate was already presented for this request");
+    const { summary, redacted } = await buildSummary(client, candidateId, staffSummary, note);
+    let pid;
+    if (dup.rowCount > 0) {
+      pid = dup.rows[0].id;
+      await client.query(
+        `UPDATE employer_presentations SET presented_by = $2, summary = $3::jsonb, staff_note_for_employer = $4, status = 'presented',
+                employer_note = NULL, responded_at = NULL, consent_id = $5, created_at = now() WHERE id = $1`,
+        [pid, user.id, JSON.stringify(summary), note, consentId]
+      );
+    } else {
+      const ins = await client.query(
+        `INSERT INTO employer_presentations (request_id, candidate_id, presented_by, summary, staff_note_for_employer, consent_id)
+         VALUES ($1,$2,$3,$4::jsonb,$5,$6) RETURNING id`,
+        [String(requestId), candidateId, user.id, JSON.stringify(summary), note, consentId]
+      );
+      pid = ins.rows[0].id;
+    }
+    const again = dup.rowCount > 0;
+    await timeline.add(client, { entity: "presentation", entityId: pid, actorId: user.id, event: "presented", detail: { request_id: requestId, candidate_id: candidateId, ...(again ? { represented: true } : {}) } });
     await timeline.add(client, { entity: "employer_request", entityId: requestId, actorId: user.id, event: "candidate_presented", detail: { presentation_id: Number(pid), candidate_id: candidateId } });
-    await logAudit({ client, userId: user.id, action: "crm.presentation.create", tableName: "employer_presentations", recordId: String(pid), newData: { request_id: requestId, candidate_id: candidateId, summary } });
+    await logAudit({ client, userId: user.id, action: "crm.presentation.create", tableName: "employer_presentations", recordId: String(pid), newData: { request_id: requestId, candidate_id: candidateId, consent_id: Number(consentId), summary, ...(redacted.length ? { redacted } : {}) } });
     const row = await client.query(`SELECT ${PRES_COLS} FROM employer_presentations p JOIN employer_requests r ON r.id = p.request_id JOIN candidates c ON c.id = p.candidate_id WHERE p.id = $1`, [pid]);
+    row.rows[0].redacted = redacted;
     return row.rows[0];
   });
 }
@@ -341,16 +380,21 @@ async function previewPresentation(user, rawRequestId, query = {}) {
   if (rawCand === undefined) throw new HttpError(400, "candidate_id is required");
   const candidateId = parseId(rawCand);
   const noteRaw = oneParam(query.staff_note_for_employer, "staff_note_for_employer");
-  const note = noteRaw === undefined ? null : cleanText(noteRaw, "staff_note_for_employer", EMPLOYER_NOTE_MAX);
+  const note = noteRaw === undefined ? null : cleanEmployerNote(noteRaw, "staff_note_for_employer");
   const staffSummary = staffSummaryFromQuery(query);
   await assertCandidateAccess(user, candidateId);
   const req = await loadRequest(db(), requestId);
-  const consent = await db().query("SELECT 1 FROM candidate_share_consents WHERE candidate_id = $1 AND employer_id = $2 AND withdrawn_at IS NULL", [candidateId, req.employer_id]);
-  const dup = await db().query("SELECT 1 FROM employer_presentations WHERE request_id = $1 AND candidate_id = $2", [String(requestId), candidateId]);
+  const consent = await db().query("SELECT id FROM candidate_share_consents WHERE candidate_id = $1 AND employer_id = $2 AND withdrawn_at IS NULL", [candidateId, req.employer_id]);
+  // Only a presentation made under the CURRENT consent counts as already presented (an older one is refreshed by POST).
+  const dup = await db().query(
+    "SELECT 1 FROM employer_presentations WHERE request_id = $1 AND candidate_id = $2 AND consent_id IS NOT DISTINCT FROM $3::bigint AND consent_id IS NOT NULL",
+    [String(requestId), candidateId, consent.rowCount ? consent.rows[0].id : null]
+  );
   let summary = null;
+  let redacted = [];
   let needsSummary = false;
   try {
-    summary = await buildSummary(db(), candidateId, staffSummary, note);
+    ({ summary, redacted } = await buildSummary(db(), candidateId, staffSummary, note));
   } catch (err) {
     if (err && err.code === "no_profile_data") needsSummary = true;
     else throw err;
@@ -366,6 +410,7 @@ async function previewPresentation(user, rawRequestId, query = {}) {
     already_presented: dup.rowCount > 0,
     needs_summary: needsSummary,
     summary,
+    redacted,
     presentable: statusOk && consent.rowCount > 0 && dup.rowCount === 0 && summary !== null,
   };
 }
@@ -406,7 +451,9 @@ async function withdrawPresentation(user, rawId) {
   const id = parseId(rawId);
   const pre = await db().query("SELECT candidate_id FROM employer_presentations WHERE id = $1", [String(id)]);
   if (pre.rowCount === 0) throw new HttpError(404, "Not found");
-  await assertCandidateAccess(user, pre.rows[0].candidate_id);
+  // Withdrawing is a safety action: Admin/SuperAdmin may always do it (even if the candidate was soft-deleted or
+  // reassigned); other staff need the usual candidate scope.
+  if (!hasPerm(user, "users:write")) await assertCandidateAccess(user, pre.rows[0].candidate_id);
   return inTransaction(async (client) => {
     const cur = await client.query("SELECT id, status FROM employer_presentations WHERE id = $1 FOR UPDATE", [String(id)]);
     if (cur.rowCount === 0) throw new HttpError(404, "Not found");
@@ -429,10 +476,15 @@ function publicSummary(stored) {
   return out;
 }
 
-const EMP_SELECT = `SELECT p.id, p.request_id, r.title AS request_title, p.summary, p.status, p.employer_note, p.responded_at, p.created_at
-  FROM employer_presentations p
+// Employer-side reads: the candidate must exist and not be soft-deleted, and the presentation must still be bound to
+// an un-withdrawn consent (the exact consent it was made under, never a later one).
+const EMP_FROM = `FROM employer_presentations p
   JOIN employer_requests r ON r.id = p.request_id
-  JOIN candidate_share_consents sc ON sc.candidate_id = p.candidate_id AND sc.employer_id = r.employer_id AND sc.withdrawn_at IS NULL`;
+  JOIN candidates c ON c.id = p.candidate_id AND c.is_deleted = false
+  JOIN candidate_share_consents sc ON sc.id = p.consent_id AND sc.withdrawn_at IS NULL`;
+const EMP_SELECT = `SELECT p.id, p.request_id, r.title AS request_title, p.summary, p.status, p.employer_note, p.responded_at, p.created_at,
+  (r.status IN ('declined','filled','cancelled')) AS closed
+  ${EMP_FROM}`;
 
 function toEmployerItem(row) {
   return {
@@ -444,6 +496,7 @@ function toEmployerItem(row) {
     employer_note: row.employer_note,
     responded_at: row.responded_at,
     created_at: row.created_at,
+    closed: row.closed === true,
   };
 }
 
@@ -452,8 +505,7 @@ async function employerList(orgId, query = {}) {
   const offset = pageParam(query.offset, "offset", { min: 0, max: 100000, dflt: 0 });
   const where = "WHERE r.employer_id = $1 AND p.status <> 'withdrawn'";
   const rows = await db().query(`${EMP_SELECT} ${where} ORDER BY p.created_at DESC, p.id DESC LIMIT $2 OFFSET $3`, [orgId, limit, offset]);
-  const total = await db().query(`SELECT count(*)::int AS n FROM employer_presentations p JOIN employer_requests r ON r.id = p.request_id
-    JOIN candidate_share_consents sc ON sc.candidate_id = p.candidate_id AND sc.employer_id = r.employer_id AND sc.withdrawn_at IS NULL ${where}`, [orgId]);
+  const total = await db().query(`SELECT count(*)::int AS n ${EMP_FROM} ${where}`, [orgId]);
   return { presentations: rows.rows.map(toEmployerItem), total: total.rows[0].n, limit, offset };
 }
 
@@ -472,13 +524,12 @@ async function employerRespond(user, orgId, rawId, input) {
   const note = input.note === undefined ? null : cleanText(input.note, "note", EMPLOYER_NOTE_MAX);
   return inTransaction(async (client) => {
     const cur = await client.query(
-      `SELECT p.id, p.status FROM employer_presentations p
-         JOIN employer_requests r ON r.id = p.request_id
-         JOIN candidate_share_consents sc ON sc.candidate_id = p.candidate_id AND sc.employer_id = r.employer_id AND sc.withdrawn_at IS NULL
+      `SELECT p.id, p.status, r.status AS request_status ${EMP_FROM}
         WHERE p.id = $1 AND r.employer_id = $2 FOR UPDATE OF p`,
       [String(id), orgId]
     );
     if (cur.rowCount === 0 || cur.rows[0].status === "withdrawn") throw new HttpError(404, "Not found");
+    if (!PRESENT_STATUSES.includes(cur.rows[0].request_status)) throw new HttpError(409, "This request is closed; responses are no longer accepted");
     const from = cur.rows[0].status;
     await client.query("UPDATE employer_presentations SET status = $2, employer_note = $3, responded_at = now() WHERE id = $1", [String(id), input.status, note]);
     await timeline.add(client, { entity: "presentation", entityId: id, actorId: user.id, event: "employer_responded", detail: { from, to: input.status } });

@@ -90,11 +90,12 @@ async function load(client, id, { lock = false } = {}) {
 
 const sameValue = (a, b) => (a instanceof Date || b instanceof Date ? new Date(a || 0).getTime() === new Date(b || 0).getTime() && Boolean(a) === Boolean(b) : a === b);
 
-async function createSiteJob(user, input) {
+/** `outer` (optional): an open transaction client to join; the caller then owns BEGIN/COMMIT/ROLLBACK. */
+async function createSiteJob(user, input, outer = null) {
   requireWrite(user);
   const data = clean(input);
   if (data.title === undefined) throw new HttpError(400, "title is required");
-  return inTransaction(async (client) => {
+  return (outer ? (fn) => fn(outer) : inTransaction)(async (client) => {
     const cols = Object.keys(data);
     const r = await client.query(
       `INSERT INTO site_jobs (${cols.join(", ")}, status, created_by) VALUES (${cols.map((_, i) => `$${i + 1}`).join(", ")}, 'draft', $${cols.length + 1}) RETURNING ${COLUMNS}`,

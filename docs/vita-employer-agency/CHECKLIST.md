@@ -106,3 +106,27 @@ For each requirement of the design (`docs/superpowers/specs/2026-10-23-vita-empl
 - Staff APIs do not return the duplicate flag of an agency lead in the lead list; the flag is stored (`duplicate_of`, `duplicate_candidate_id`, a timeline entry "duplicate_flagged") and is not shown to the agency.
 - The share consent is attested by staff; there is no candidate-side button to grant or withdraw it.
 - Rate-limit counters for the code login are in memory (reset when the app restarts); the daily caps for employer requests and agency candidates are counted in the database.
+
+## Review round 1 (independent review) — fixes and remaining limits
+
+Migration `015_orgs_review_fixes.sql` (additive, idempotent). Every item below has a test written first in the existing test file for that area.
+
+| # | Finding | Status | Where tested |
+|---|---|---|---|
+| 1 | Employer reads and respond showed presentations of soft-deleted candidates; staff withdraw could be blocked by deletion or reassignment | Fixed: every employer query joins `candidates` with `is_deleted = false`; consent withdraw and presentation withdraw are always allowed for Admin/SuperAdmin (`users:write`), other staff need candidate scope as before | `orgs-presentations.test.js` (review 1: soft-deleted, reassigned) |
+| 2 | A later NEW consent revived an old presentation | Fixed: `employer_presentations.consent_id` (backfilled in 015); employer queries join that exact consent and need it un-withdrawn. Presenting again after a new consent refreshes the same row (the `(request, candidate)` key stays unique) under the new consent with a rebuilt summary and a cleared response | `orgs-presentations.test.js`, `orgs-schema.test.js` (backfill) |
+| 3 | Respond was accepted on closed requests | Fixed: respond needs request status `in_review` or `accepted` (else 409). Presentations of declined/filled/cancelled requests stay visible read-only with `closed: true`; the employer page disables the buttons and says so | `orgs-presentations.test.js`, `orgs-ui.test.js` |
+| 4 | Suspend/reactivate toggled `users.is_active` | Fixed: both only change the organisation status and bump `token_version`; access is blocked by the org-status check; users deactivated individually stay deactivated | `orgs-admin.test.js` |
+| 5 | Contact data could reach the employer through the summary | Fixed: before freezing/previewing, string values that contain `@`, a URL scheme or `www.`, 6 or more digits (separators ignored) or more than 120 characters are set to null and listed in `redacted` (preview and POST response). `staff_note_for_employer` is rejected with 400 for the same contact patterns (the 120-character rule does not apply to the note; its cap stays 1000) | `orgs-presentations.test.js` |
+| 6 | create-site-job was not atomic | Fixed: check, draft, link, timeline and audit run in one transaction with `pg_advisory_xact_lock`; `siteJobsAdmin.createSiteJob` accepts an optional client. A failing link leaves no draft | `orgs-presentations.test.js` (injected trigger failure, concurrent calls) |
+| 7 | Ids are global sequences | **Known limit, not changed** (see below) | n/a |
+| 8 | `crm_employers.status` constraint left NOT VALID; 013 role-check drop loop matches `%role%` | Fixed in 015: junk statuses set to `new`, constraint validated (only if present and not yet valid); `users_role_check` is re-created if missing/stale. 013 is untouched. After all migrations the only CHECK on `users` is `users_role_check`; the others keep their `schema.sql` names (`users_pkey`, `users_email_key`) | `orgs-schema.test.js` |
+| 9 | Disclaimer was candidate-oriented on the portals | Fixed: `employer.disclaimer` and `agency.disclaimer` (ar/en/fr) are the primary line, the standard sentence follows, and the all-languages block shows both | `orgs-ui.test.js` |
+
+Remaining limits after this round:
+
+- **Ids are global sequences** (`bigserial`): a portal user sees ids of their own requests, presentations and candidates, so the gaps between them let them infer platform-wide volume. Not changed on purpose.
+- Migration 013's loop drops every `users` CHECK whose definition mentions "role". `schema.sql` has only the role-in-list check, so nothing else is lost on a database built from this repository; a database with extra hand-added role-related CHECKs lost them when 013 ran (015 cannot restore what it cannot know).
+- The staff presentation preview returns `redacted` but the staff tab does not highlight it yet; staff see the field as empty.
+- A presentation refreshed after a new consent keeps its id (history is in the timeline and audit log, not in a second row).
+- The 120-character rule is defensive: staff-supplied values are already capped at 100/120 by validation and profile values are trimmed to 100/120.

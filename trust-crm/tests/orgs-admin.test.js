@@ -296,7 +296,7 @@ for (const type of ["employer", "agency"]) {
       assert.equal(s.status, 200, s.text);
       assert.equal(s.body.status, "suspended");
       const after = await w.one("SELECT is_active, token_version FROM users WHERE id=$1", [uid.id]);
-      assert.equal(after.is_active, false);
+      assert.equal(after.is_active, true, "suspend leaves users.is_active alone (the org-status check blocks access)");
       assert.ok(after.token_version > uid.token_version);
       assert.equal((await w.http("GET", "/jobsearch/auth/me", token)).status, 401, "old token dead immediately");
       otp()._testing.reset();
@@ -309,8 +309,16 @@ for (const type of ["employer", "agency"]) {
       assert.equal((await w.http("POST", `${p}/${id}/suspend`, w.T.mgr)).status, 200);
       assert.equal(Number((await w.one("SELECT count(*) n FROM audit_logs WHERE action=$1", [`crm.${type}.suspend`])).n), n);
 
+      // a second portal user deactivated individually BEFORE the suspension must stay deactivated afterwards
+      await w.q("INSERT INTO users (full_name,email,password,role,is_active) VALUES ('Gone','gone@test.invalid','x',$1,false)", [ROLE[type]]);
+      const goneId = (await w.one("SELECT id FROM users WHERE email='gone@test.invalid'")).id;
+      await w.q("INSERT INTO crm_org_accounts (user_id, org_type, org_id) VALUES ($1,$2,$3)", [goneId, type, id]);
+      const tvBefore = (await w.one("SELECT token_version FROM users WHERE id=$1", [uid.id])).token_version;
       const r = await w.http("POST", `${p}/${id}/reactivate`, w.T.mgr);
       assert.equal(r.body.status, "active");
+      assert.equal((await w.one("SELECT is_active FROM users WHERE id=$1", [goneId])).is_active, false, "reactivate never re-enables an individually deactivated user");
+      assert.equal((await w.one("SELECT is_active FROM users WHERE id=$1", [uid.id])).is_active, true);
+      assert.ok((await w.one("SELECT token_version FROM users WHERE id=$1", [uid.id])).token_version > tvBefore, "reactivate bumps token_version");
       assert.equal((await w.http("GET", "/jobsearch/auth/me", token)).status, 401, "old token stays dead after reactivation");
       await w.q("UPDATE js_otps SET created_at = created_at - interval '5 minutes' WHERE email = $1", [email]); // clear the DB resend cooldown
       const again = await w.login(email);

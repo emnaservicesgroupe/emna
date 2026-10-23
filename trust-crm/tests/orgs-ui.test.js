@@ -626,3 +626,40 @@ test("http: the new pages and scripts are served under the strict CSP and securi
     assert.match(await pub.text(), /href="\/vita\/employer\.html"/);
   });
 });
+
+// ---------------------------------------------------------------- review round 1: portal-specific disclaimer wording
+
+const PORTAL_LINE = {
+  employer: {
+    key: "employer.disclaimer",
+    en: "VITA helps match employers with candidates. We do not guarantee that any candidate will be available, qualified, approved for a work permit or able to travel.",
+  },
+  agency: {
+    key: "agency.disclaimer",
+    en: "VITA does not guarantee employment, sponsorship, a work permit or a visa for any candidate you register.",
+  },
+};
+for (const p of PORTALS) {
+  test(`${p.html}: the ${p.page}-specific disclaimer is the primary line and the standard sentence follows it (ar/en/fr)`, () => {
+    const html = read(p.html);
+    const spec = PORTAL_LINE[p.page];
+    assert.equal(I18N.dictionaries.en[spec.key], spec.en);
+    for (const l of ["ar", "fr"]) {
+      assert.ok(spec.key in I18N.dictionaries[l], `${l}:${spec.key}`);
+      assert.notEqual(I18N.dictionaries[l][spec.key], spec.en, `${l} is translated`);
+      assert.equal(ph(I18N.dictionaries[l][spec.key]), ph(spec.en));
+    }
+    assert.match(I18N.dictionaries.ar[spec.key], /[؀-ۿ]/);
+    // primary line first, carrying the page-specific text as the no-JS fallback
+    const primary = new RegExp(`<p class="primary" data-i18n="${spec.key.replace(".", "\\.")}">${spec.en.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</p>`);
+    assert.match(html, primary);
+    const iSpecific = html.indexOf(`data-i18n="${spec.key}"`);
+    const iStandard = html.indexOf('data-i18n="disclaimer"');
+    assert.ok(iSpecific > 0 && iStandard > iSpecific, "standard sentence comes below the specific line");
+    assert.doesNotMatch(html, /<p class="primary" data-i18n="disclaimer">/, "the standard sentence is no longer the primary line");
+    assert.ok(html.includes(DISCLAIMER.en), "standard English disclaimer still ships in the page");
+    // all-languages block carries the specific line in each language too, rendered from the dictionaries
+    for (const l of LANGS) assert.match(html, new RegExp(`data-disclaimer-lang="${l}" data-disclaimer-key="${spec.key.replace(".", "\\.")}"`), `${l} specific slot`);
+    assert.match(fs.readFileSync(path.join(VITA, "vita.js"), "utf8"), /data-disclaimer-key/);
+  });
+}

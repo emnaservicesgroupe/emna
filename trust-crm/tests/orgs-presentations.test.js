@@ -202,7 +202,7 @@ test("present: exact allowlist snapshot from confirmed profile, no leakage, cons
     assert.equal(list.status, 200);
     assert.equal(list.body.presentations.length, 1);
     const item = list.body.presentations[0];
-    assert.deepEqual(Object.keys(item).sort(), ["created_at", "employer_note", "id", "request_id", "request_title", "responded_at", "status", "summary"]);
+    assert.deepEqual(Object.keys(item).sort(), ["closed", "created_at", "employer_note", "id", "request_id", "request_title", "responded_at", "status", "summary"]);
     assert.deepEqual(Object.keys(item.summary).sort(), KEYS);
     for (const s of SECRETS.concat([`"candidate_id"`, "INTERNAL", "assigned_to"])) assert.ok(!list.text.includes(s), `employer list leaks ${s}`);
     const det = await w.http("GET", `/employer/presentations/${item.id}`, emp.token);
@@ -339,9 +339,10 @@ test("withdrawing the share consent hides existing presentations at once and blo
     // new presentation of same candidate needs a fresh consent
     const rid2 = await w.mkReq(emp.orgId);
     assert.equal((await w.http("POST", `/crm/employer-requests/${rid2}/presentations`, w.T.admin, { candidate_id: cand })).status, 409);
-    // re-consent restores visibility
+    // a NEW consent does not revive the old presentation (it is bound to the consent it was made under)
     await consent(w, cand, emp.orgId);
-    assert.equal((await w.http("GET", "/employer/presentations", emp.token)).body.presentations.length, 1);
+    assert.equal((await w.http("GET", "/employer/presentations", emp.token)).body.presentations.length, 0);
+    assert.equal((await w.http("GET", `/employer/presentations/${pid}`, emp.token)).status, 404);
   });
 });
 
@@ -487,5 +488,181 @@ test("presentation-preview: returns the exact summary POST stores, never writes,
     for (const k of ["rec", "agentA", "acct", "hr", "cand"]) assert.equal((await prev(`candidate_id=${owned}`, k)).status, 403, k);
     assert.equal((await w.http("GET", `/crm/employer-requests/${rid}/presentation-preview?candidate_id=${owned}`, emp.token)).status, 403);
     assert.equal((await w.http("GET", `/crm/employer-requests/${rid}/presentation-preview?candidate_id=${owned}`)).status, 401);
+  });
+});
+
+// ---------- review round 1 ----------
+
+const candidateModel = () => require("../models/candidateModel");
+const setup = async (w, { status = "in_review" } = {}) => {
+  const emp = await createEmployerUser(w.pool);
+  const rid = await w.mkReq(emp.orgId, status);
+  const cand = await w.mkCand();
+  const c = await consent(w, cand, emp.orgId);
+  const pr = await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, { candidate_id: cand });
+  assert.equal(pr.status, 201, pr.text);
+  return { emp, rid, cand, consentId: c.body.id, pid: pr.body.id };
+};
+
+test("review 1: a soft-deleted candidate disappears from every employer read and respond; Admin can still withdraw consent and presentation", async () => {
+  await withWorld(async (w) => {
+    const { emp, cand, consentId, pid } = await setup(w);
+    assert.equal((await w.http("GET", "/employer/presentations", emp.token)).body.presentations.length, 1);
+    await candidateModel().softDeleteCandidate(cand);
+    const list = await w.http("GET", "/employer/presentations", emp.token);
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.body.presentations, []);
+    assert.equal(list.body.total, 0);
+    assert.equal((await w.http("GET", `/employer/presentations/${pid}`, emp.token)).status, 404);
+    assert.equal((await w.http("POST", `/employer/presentations/${pid}/respond`, emp.token, { status: "interested" })).status, 404);
+    assert.equal((await w.one("SELECT status FROM employer_presentations WHERE id=$1", [pid])).status, "presented");
+    // staff withdraw paths are not blocked by the deletion
+    const wp = await w.http("PATCH", `/crm/presentations/${pid}/withdraw`, w.T.admin);
+    assert.equal(wp.status, 200, wp.text);
+    assert.equal(wp.body.status, "withdrawn");
+    const wc = await w.http("DELETE", `/crm/candidates/${cand}/share-consents/${consentId}`, w.T.admin);
+    assert.equal(wc.status, 200, wc.text);
+    assert.ok(wc.body.withdrawn_at);
+  });
+});
+
+test("review 1: reassigned-away candidate: Admin can still withdraw; the former owner (out of scope) cannot", async () => {
+  await withWorld(async (w) => {
+    const { cand, consentId, pid } = await setup(w);
+    await w.q("UPDATE candidates SET assigned_to=$2 WHERE id=$1", [cand, w.ids.agentB]);
+    assert.equal((await w.http("DELETE", `/crm/candidates/${cand}/share-consents/${consentId}`, w.T.agentA)).status, 404, "out of scope stays 404");
+    assert.equal((await w.http("DELETE", `/crm/candidates/${cand}/share-consents/${consentId}`, w.T.admin)).status, 200);
+    await candidateModel().softDeleteCandidate(cand);
+    assert.equal((await w.http("PATCH", `/crm/presentations/${pid}/withdraw`, w.T.mgr)).status, 404, "manager only sees assigned, non-deleted candidates");
+    assert.equal((await w.http("PATCH", `/crm/presentations/${pid}/withdraw`, w.T.admin)).status, 200);
+  });
+});
+
+test("review 1: a presentation is bound to the consent it was made under; a NEW consent does not revive it, a new presentation is required", async () => {
+  await withWorld(async (w) => {
+    const { emp, rid, cand, consentId, pid } = await setup(w);
+    assert.equal(String((await w.one("SELECT consent_id FROM employer_presentations WHERE id=$1", [pid])).consent_id), String(consentId));
+    assert.equal((await w.http("DELETE", `/crm/candidates/${cand}/share-consents/${consentId}`, w.T.admin)).status, 200);
+    const c2 = await consent(w, cand, emp.orgId);
+    assert.equal(c2.status, 201);
+    assert.deepEqual((await w.http("GET", "/employer/presentations", emp.token)).body.presentations, []);
+    assert.equal((await w.http("GET", `/employer/presentations/${pid}`, emp.token)).status, 404);
+    assert.equal((await w.http("POST", `/employer/presentations/${pid}/respond`, emp.token, { status: "interested" })).status, 404);
+    // staff see the old presentation as no longer under an active consent
+    const staff = await w.http("GET", `/crm/employer-requests/${rid}`, w.T.admin);
+    assert.equal(staff.body.presentations[0].consent_active, false);
+    // a new presentation (same request) is created under the new consent and is visible again
+    const again = await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, { candidate_id: cand });
+    assert.equal(again.status, 201, again.text);
+    assert.equal(again.body.status, "presented");
+    assert.equal(again.body.employer_note, null);
+    assert.equal(String((await w.one("SELECT consent_id FROM employer_presentations WHERE request_id=$1 AND candidate_id=$2", [rid, cand])).consent_id), String(c2.body.id));
+    const list = await w.http("GET", "/employer/presentations", emp.token);
+    assert.equal(list.body.presentations.length, 1);
+    // while the consent it was made under is still active, presenting again is still a duplicate
+    assert.equal((await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, { candidate_id: cand })).status, 409);
+  });
+});
+
+test("review 1: respond needs an in_review/accepted request; closed requests stay visible read-only with closed=true", async () => {
+  await withWorld(async (w) => {
+    const { emp, rid, pid } = await setup(w);
+    const respond = (b = { status: "interested" }) => w.http("POST", `/employer/presentations/${pid}/respond`, emp.token, b);
+    let item = (await w.http("GET", `/employer/presentations/${pid}`, emp.token)).body;
+    assert.equal(item.closed, false);
+    assert.equal((await w.http("PATCH", `/crm/employer-requests/${rid}`, w.T.admin, { status: "accepted" })).status, 200);
+    assert.equal((await respond()).status, 200, "accepted request accepts responses");
+    for (const st of ["declined", "filled", "cancelled", "submitted"]) {
+      await w.q("UPDATE employer_requests SET status=$2 WHERE id=$1", [rid, st]);
+      const det = await w.http("GET", `/employer/presentations/${pid}`, emp.token);
+      assert.equal(det.status, 200, st);
+      assert.equal(det.body.closed, st !== "submitted", st);
+      const list = await w.http("GET", "/employer/presentations", emp.token);
+      assert.equal(list.body.presentations.length, 1, st);
+      assert.equal(list.body.presentations[0].closed, st !== "submitted", st);
+      const r = await respond({ status: "not_suitable" });
+      assert.equal(r.status, 409, st);
+      assert.equal((await w.one("SELECT status FROM employer_presentations WHERE id=$1", [pid])).status, "interested", `${st}: unchanged`);
+    }
+    await w.q("UPDATE employer_requests SET status='in_review' WHERE id=$1", [rid]);
+    assert.equal((await respond({ status: "interview" })).status, 200);
+  });
+});
+
+test("review 1: contact-like values are dropped from the frozen summary and reported; the staff note is rejected", async () => {
+  await withWorld(async (w) => {
+    const emp = await createEmployerUser(w.pool);
+    const rid = await w.mkReq(emp.orgId);
+    const cand = await w.mkCand(w.ids.agentA, { profile: false });
+    await consent(w, cand, emp.orgId);
+    const prev = (q) => w.http("GET", `/crm/employer-requests/${rid}/presentation-preview?candidate_id=${cand}&${q}`, w.T.admin);
+    const base = "years_experience=7&country_of_residence=Tunisia&availability=immediately";
+    const p = await prev(`${base}&profession=${encodeURIComponent("Welder, call +49 170 1234567")}&languages=${encodeURIComponent("Arabic, me@mail.example")}`);
+    assert.equal(p.status, 200, p.text);
+    assert.equal(p.body.summary.profession, null);
+    assert.equal(p.body.summary.languages, null);
+    assert.equal(p.body.summary.years_experience, 7);
+    assert.deepEqual(p.body.redacted.sort(), ["languages", "profession"]);
+    for (const bad of ["x@y.z", "see https://evil.example/x", "www.example.com", "ftp://h/x", "00 49-170 12 34"]) {
+      const r = await prev(`years_experience=3&profession=Welder&country_of_residence=Tunisia&availability=${encodeURIComponent(bad)}`);
+      assert.equal(r.status, 200, bad);
+      assert.equal(r.body.summary.availability, null, bad);
+      assert.deepEqual(r.body.redacted, ["availability"], bad);
+    }
+    const clean = await prev(`${base}&profession=Welder&languages=Arabic`);
+    assert.deepEqual(clean.body.redacted, []);
+    assert.equal(clean.body.summary.profession, "Welder");
+    // everything redacted => nothing left to present
+    const none = await prev(`profession=${encodeURIComponent("a@b.co")}`);
+    assert.equal(none.body.needs_summary, true);
+    // POST freezes the redacted summary, the preview shows the same
+    const posted = await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, {
+      candidate_id: cand,
+      summary: { profession: "Welder, call +49 170 1234567", years_experience: 7, country_of_residence: "Tunisia", availability: "immediately" },
+    });
+    assert.equal(posted.status, 201, posted.text);
+    assert.equal(posted.body.summary.profession, null);
+    assert.deepEqual(posted.body.redacted, ["profession"]);
+    const stored = JSON.stringify((await w.one("SELECT summary FROM employer_presentations WHERE id=$1", [posted.body.id])).summary);
+    assert.ok(!stored.includes("1234567") && !stored.includes("+49"));
+    // the staff note is validated with the same rules and rejected (not silently dropped)
+    const rid2 = await w.mkReq(emp.orgId);
+    const cand2 = await w.mkCand();
+    await consent(w, cand2, emp.orgId);
+    for (const note of ["Call me +49 170 1234567", "mail a@b.example", "visit www.x.test", "https://x.test", "ref 123 456 789"]) {
+      const r = await w.http("POST", `/crm/employer-requests/${rid2}/presentations`, w.T.admin, { candidate_id: cand2, staff_note_for_employer: note });
+      assert.equal(r.status, 400, note);
+      assert.match(r.body.error, /contact/i);
+      const pv = await w.http("GET", `/crm/employer-requests/${rid2}/presentation-preview?candidate_id=${cand2}&staff_note_for_employer=${encodeURIComponent(note)}`, w.T.admin);
+      assert.equal(pv.status, 400, `preview: ${note}`);
+    }
+    assert.equal((await w.q("SELECT 1 FROM employer_presentations WHERE request_id=$1", [rid2])).rowCount, 0);
+    const ok = await w.http("POST", `/crm/employer-requests/${rid2}/presentations`, w.T.admin, { candidate_id: cand2, staff_note_for_employer: "Strong welder, 5 years" });
+    assert.equal(ok.status, 201, ok.text);
+  });
+});
+
+test("review 1: create-site-job is one transaction: a failing link step leaves no orphan draft", async () => {
+  await withWorld(async (w) => {
+    const emp = await createEmployerUser(w.pool);
+    const rid = await w.mkReq(emp.orgId, "in_review");
+    await w.q(`CREATE FUNCTION fail_link() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.site_job_id IS NOT NULL THEN RAISE EXCEPTION 'injected link failure'; END IF; RETURN NEW; END $$`);
+    await w.q("CREATE TRIGGER fail_link_trg BEFORE UPDATE ON employer_requests FOR EACH ROW EXECUTE FUNCTION fail_link()");
+    const bad = await w.http("POST", `/crm/employer-requests/${rid}/create-site-job`, w.T.admin);
+    assert.equal(bad.status, 500);
+    assert.equal((await w.q("SELECT 1 FROM site_jobs")).rowCount, 0, "no orphan draft");
+    assert.equal((await w.one("SELECT site_job_id FROM employer_requests WHERE id=$1", [rid])).site_job_id, null);
+    assert.equal((await w.q("SELECT 1 FROM crm_timeline WHERE entity='site_job'")).rowCount, 0);
+    assert.equal((await w.q("SELECT 1 FROM audit_logs WHERE action='crm.site_job.create'")).rowCount, 0);
+    await w.q("DROP TRIGGER fail_link_trg ON employer_requests");
+    const ok = await w.http("POST", `/crm/employer-requests/${rid}/create-site-job`, w.T.admin);
+    assert.equal(ok.status, 201, ok.text);
+    assert.equal((await w.q("SELECT 1 FROM site_jobs")).rowCount, 1);
+    // concurrent calls still produce exactly one draft
+    const rid2 = await w.mkReq(emp.orgId, "accepted");
+    const res = await Promise.all([1, 2, 3, 4].map(() => w.http("POST", `/crm/employer-requests/${rid2}/create-site-job`, w.T.admin)));
+    assert.equal(res.filter((r) => r.status === 201).length, 1, res.map((r) => r.status).join());
+    assert.equal(res.filter((r) => r.status === 409).length, 3);
+    assert.equal((await w.q("SELECT 1 FROM site_jobs")).rowCount, 2);
   });
 });

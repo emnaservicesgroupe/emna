@@ -223,12 +223,14 @@ async function setSuspended(user, type, rawId, suspend) {
     const before = cur.rows[0];
     if (suspend ? before.status === "suspended" : before.status !== "suspended") return before; // idempotent no-op
     const r = await client.query(`UPDATE ${c.table} SET status = $2, updated_at = now() WHERE id = $1 RETURNING ${columns(type)}`, [id, target]);
-    // Existing tokens die at once (tv mismatch) and a suspended org's users cannot log in (is_active=false).
+    // Existing tokens die at once (token_version bump) and verifyToken's org-status check blocks a suspended org's
+    // users. users.is_active is deliberately NOT touched either way, so reactivation never re-enables a user that
+    // was deactivated individually.
     const u = await client.query(
-      `UPDATE users SET is_active = $3, token_version = token_version + 1
-        WHERE id IN (SELECT user_id FROM crm_org_accounts WHERE org_type = $1 AND org_id = $2) AND role = $4
+      `UPDATE users SET token_version = token_version + 1
+        WHERE id IN (SELECT user_id FROM crm_org_accounts WHERE org_type = $1 AND org_id = $2) AND role = $3
         RETURNING id`,
-      [type, id, !suspend, c.role]
+      [type, id, c.role]
     );
     await timeline.add(client, { entity: type, entityId: id, actorId: user.id, event: suspend ? "suspended" : "reactivated", detail: { from: before.status, to: target, users: u.rowCount } });
     await logAudit({
