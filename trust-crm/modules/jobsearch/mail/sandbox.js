@@ -32,7 +32,13 @@ function toList(to) {
 
 async function status() {
   // 'connected' is kept for API compatibility; mode 'sandbox' tells every screen that NO real mail is sent.
-  return { status: "connected", mode: "sandbox", detail: `sandbox - no real mail is sent (recorded in js_sandbox_mail; allow-list: ${allowPatterns().join(", ")})` };
+  // problems: only a CONFIGURED but invalid MAIL_FROM / MAIL_REPLY_TO (an unset MAIL_FROM is fine here: Task 20).
+  return {
+    status: "connected",
+    mode: "sandbox",
+    detail: `sandbox - no real mail is sent (recorded in js_sandbox_mail; allow-list: ${allowPatterns().join(", ")})`,
+    problems: require("./address").problems(),
+  };
 }
 
 async function send({ to, subject, text, html, attachments, headers } = {}) {
@@ -53,7 +59,7 @@ async function send({ to, subject, text, html, attachments, headers } = {}) {
      VALUES ($1,$2,$3,$4,$5,$6,$7)`,
     [
       recipients.join(", "),
-      process.env.MAIL_FROM || "vita@test.invalid",
+      require("./address").plainAddress(process.env.MAIL_FROM) || "vita@test.invalid",
       subject || "",
       text || (html ? String(html) : ""),
       providerMessageId,

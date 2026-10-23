@@ -25,7 +25,7 @@ function problems() {
   if (host && !out.includes("MAIL_SMTP_HOST") && !HOST_RE.test(host.trim())) out.push("MAIL_SMTP_HOST (invalid host name)");
   const port = process.env.MAIL_SMTP_PORT;
   if (port !== undefined && port !== "" && !(/^\d{1,5}$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) out.push("MAIL_SMTP_PORT (must be 1-65535)");
-  out.push(...address.problems());
+  out.push(...address.problems({ real: true }));
   return out;
 }
 
@@ -72,7 +72,7 @@ async function send({ to, subject, text, html, attachments, headers } = {}) {
     auth: { user: process.env.MAIL_SMTP_USER, pass: process.env.MAIL_SMTP_PASS },
   });
   const info = await transport.sendMail({
-    from: address.fromAddress(),
+    from: address.fromAddress({ real: true }),
     to, subject, text, html, attachments, headers,
   });
   return { providerMessageId: info.messageId || null, accepted: Array.isArray(info.accepted) ? info.accepted.length > 0 : true };

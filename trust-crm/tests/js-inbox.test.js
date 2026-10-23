@@ -2070,3 +2070,32 @@ test("round 4 confirm endpoint: 404/409 unless the message is matched to THIS ap
     assert.equal(await subStatus(w2.sub.id), "sent", "the other application is untouched");
   });
 });
+
+test("Task 20: follow-up drafts send through the sandbox with MAIL_FROM unset outside NODE_ENV=test; a real provider still requires MAIL_FROM (503)", async () => {
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { text: "Could you send us your availability for next week?" }));
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
+  const restore = () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+  const d1 = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  const d2 = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  let sent;
+  try {
+    process.env.NODE_ENV = "production";
+    delete process.env.MAIL_FROM;
+    delete process.env.MAIL_PROVIDER;
+    sent = await draftService.sendFollowUp({ draftId: d1.id, actor: w.manager });
+    process.env.MAIL_PROVIDER = "imap_smtp";
+    await assert.rejects(draftService.sendFollowUp({ draftId: d2.id, actor: w.manager }), (e) => e.status === 503 && /MAIL_FROM/.test(e.message));
+  } finally {
+    restore();
+  }
+  assert.equal(sent.sent, true);
+  const out = await mail.sandbox.listOutbound({ to: `hr@${w.domain}` });
+  assert.ok(out.length >= 1);
+  assert.match(out[out.length - 1].headers["Message-ID"], /@test\.invalid>$/);
+});

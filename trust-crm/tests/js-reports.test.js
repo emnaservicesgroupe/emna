@@ -373,6 +373,29 @@ test("Task 19 I-1/M-3 health mail: sandbox reports mode 'sandbox'; imap_smtp wit
   }
 });
 
+test("Task 20 health mail: sandbox with MAIL_FROM unset outside NODE_ENV=test shows NO problems; an invalid configured MAIL_FROM is named", async () => {
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
+  try {
+    delete process.env.MAIL_PROVIDER;
+    delete process.env.MAIL_FROM;
+    process.env.NODE_ENV = "production";
+    const r = await get("/jobsearch/health", tk.admin);
+    process.env.NODE_ENV = saved.NODE_ENV;
+    assert.equal(r.body.mail.mode, "sandbox");
+    assert.deepEqual(r.body.mail.problems, []);
+    process.env.MAIL_FROM = "jobs@x.example\r\nBcc: y@evil.example";
+    const bad = await get("/jobsearch/health", tk.admin);
+    assert.equal(bad.body.mail.problems.length, 1);
+    assert.match(bad.body.mail.problems[0], /^MAIL_FROM \(/);
+    assert.ok(!bad.text.includes("evil.example"));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 // ---------------------------------------------------------------- CSV
 
 function parseCsv(text) {

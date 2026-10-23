@@ -279,9 +279,10 @@ test("Task 19 I-1: MAIL_FROM must be a plain address (CRLF, display names, lists
 
 test("Task 19 I-1 fromAddress(): configured plain address; test-only fallback; throws outside NODE_ENV=test when unset or invalid", () => {
   const addr = require("../modules/jobsearch/mail/address");
-  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_REPLY_TO: process.env.MAIL_REPLY_TO };
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_REPLY_TO: process.env.MAIL_REPLY_TO, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
   try {
     delete process.env.MAIL_REPLY_TO;
+    process.env.MAIL_PROVIDER = "imap_smtp";
     process.env.MAIL_FROM = "Applications@Agency.Example";
     process.env.NODE_ENV = "production";
     assert.equal(addr.fromAddress(), "applications@agency.example");
@@ -292,11 +293,57 @@ test("Task 19 I-1 fromAddress(): configured plain address; test-only fallback; t
     assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED" && /MAIL_FROM/.test(e.message));
     process.env.MAIL_FROM = "jobs@agency.example\r\nBcc: x@evil.example";
     assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED");
+    delete process.env.MAIL_PROVIDER;
+    // Task 20: with the default sandbox provider a CONFIGURED but invalid value is still refused...
     process.env.NODE_ENV = "development";
     assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED");
+    // ...and with a real provider an unset MAIL_FROM is refused in every environment but test
+    delete process.env.MAIL_FROM;
+    delete process.env.MAIL_REPLY_TO;
+    process.env.MAIL_PROVIDER = "imap_smtp";
+    for (const env of ["production", "development"]) {
+      process.env.NODE_ENV = env;
+      assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED", env);
+      assert.throws(() => addr.replyToBase(), (e) => e.code === "MAIL_FROM_REQUIRED", env);
+      assert.throws(() => addr.messageIdDomain(), (e) => e.code === "MAIL_FROM_REQUIRED", env);
+    }
+    delete process.env.MAIL_PROVIDER;
     process.env.NODE_ENV = "test";
     delete process.env.MAIL_FROM;
     assert.equal(addr.fromAddress(), "vita@test.invalid");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("Task 20: sandbox provider (default) with MAIL_FROM unset uses vita@test.invalid in every environment (never throws); problems() stays empty", () => {
+  const addr = require("../modules/jobsearch/mail/address");
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_REPLY_TO: process.env.MAIL_REPLY_TO, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
+  try {
+    delete process.env.MAIL_FROM;
+    delete process.env.MAIL_REPLY_TO;
+    for (const provider of [undefined, "sandbox", "SANDBOX", "something-unknown"]) {
+      if (provider === undefined) delete process.env.MAIL_PROVIDER;
+      else process.env.MAIL_PROVIDER = provider;
+      for (const env of ["production", "development", undefined]) {
+        if (env === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = env;
+        assert.equal(addr.fromAddress(), "vita@test.invalid", `${provider}/${env}`);
+        assert.equal(addr.replyToBase(), "vita@test.invalid");
+        assert.equal(addr.messageIdDomain(), "test.invalid");
+        assert.deepEqual(addr.problems(), [], "sandbox: an unset MAIL_FROM is not a problem");
+      }
+    }
+    process.env.NODE_ENV = "production";
+    delete process.env.MAIL_PROVIDER;
+    process.env.MAIL_FROM = "jobs@agency.example";
+    assert.equal(addr.fromAddress(), "jobs@agency.example", "a configured value still wins in the sandbox");
+    process.env.MAIL_PROVIDER = "imap_smtp";
+    delete process.env.MAIL_FROM;
+    assert.deepEqual(addr.problems(), ["MAIL_FROM"], "real provider: MAIL_FROM required");
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];

@@ -1014,20 +1014,23 @@ test("Task 19 I-1: Reply-To and Message-ID use the MAIL_FROM domain (never test.
   }
 });
 
-test("Task 19 I-1: outside NODE_ENV=test an unset or CRLF-tainted MAIL_FROM refuses the send before any intent (internal_error task, zero mails)", async () => {
-  for (const bad of [undefined, "jobs@vita.test.invalid\r\nBcc: spy@evil.example"]) {
-    const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM };
+test("Task 19 I-1 / Task 20: outside NODE_ENV=test a CRLF-tainted MAIL_FROM, or an unset one with a REAL provider, refuses the send before any intent (internal_error task, zero mails)", async () => {
+  for (const [bad, provider] of [[undefined, "imap_smtp"], ["jobs@vita.test.invalid\r\nBcc: spy@evil.example", undefined]]) {
+    const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
     const w = await world();
     const r = await queued(w);
     process.env.NODE_ENV = "production";
     if (bad === undefined) delete process.env.MAIL_FROM;
     else process.env.MAIL_FROM = bad;
+    if (provider) process.env.MAIL_PROVIDER = provider;
     let out;
     try {
       out = await submitter.handleSubmit({ ...r.job, attempts: 5, max_attempts: 5 }, DEPS);
     } finally {
       process.env.NODE_ENV = saved.NODE_ENV;
       process.env.MAIL_FROM = saved.MAIL_FROM;
+      if (saved.MAIL_PROVIDER === undefined) delete process.env.MAIL_PROVIDER;
+      else process.env.MAIL_PROVIDER = saved.MAIL_PROVIDER;
     }
     assert.equal(out.status, "blocked", JSON.stringify(out));
     assert.equal(out.code, "internal_error");
@@ -1037,4 +1040,25 @@ test("Task 19 I-1: outside NODE_ENV=test an unset or CRLF-tainted MAIL_FROM refu
     assert.match(sub.evidence.error, /MAIL_FROM/);
     assert.notEqual(sub.evidence.phase, "sending");
   }
+});
+
+test("Task 20: sandbox provider with MAIL_FROM unset outside NODE_ENV=test still sends (to the sandbox) with vita@test.invalid Reply-To / Message-ID", async () => {
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_PROVIDER: process.env.MAIL_PROVIDER };
+  const w = await world();
+  const r = await queued(w);
+  process.env.NODE_ENV = "production";
+  delete process.env.MAIL_FROM;
+  delete process.env.MAIL_PROVIDER;
+  let out;
+  try {
+    out = await submitter.handleSubmit(r.job, DEPS);
+  } finally {
+    process.env.NODE_ENV = saved.NODE_ENV;
+    process.env.MAIL_FROM = saved.MAIL_FROM;
+    if (saved.MAIL_PROVIDER !== undefined) process.env.MAIL_PROVIDER = saved.MAIL_PROVIDER;
+  }
+  assert.equal(out.status, "sent", JSON.stringify(out));
+  const [m] = await outbound(w.recipient);
+  assert.match(m.headers["Reply-To"], /^vita\+vita-[a-f0-9]{20}@test\.invalid$/);
+  assert.match(m.headers["Message-ID"], /@test\.invalid>$/);
 });
