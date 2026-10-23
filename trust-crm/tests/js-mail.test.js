@@ -123,3 +123,115 @@ test("imapSmtp refuses to send unless MAIL_REAL_SEND=true", async () => {
     for (const k of Object.keys(process.env)) if (/^MAIL_(SMTP|IMAP)_/.test(k)) delete process.env[k];
   }
 });
+
+// ---------------------------------------------------------------- Task 18: SMTP needs only SMTP settings
+
+const SMTP_KEYS = ["MAIL_FROM", "MAIL_SMTP_HOST", "MAIL_SMTP_PORT", "MAIL_SMTP_USER", "MAIL_SMTP_PASS", "MAIL_IMAP_HOST", "MAIL_IMAP_USER", "MAIL_IMAP_PASS", "MAIL_REAL_SEND", "INBOUND_MAIL_SECRET"];
+async function withMailEnv(env, fn) {
+  const saved = Object.fromEntries(SMTP_KEYS.map((k) => [k, process.env[k]]));
+  for (const k of SMTP_KEYS) delete process.env[k];
+  Object.assign(process.env, env);
+  try {
+    return await fn();
+  } finally {
+    for (const k of SMTP_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+}
+
+/** Minimal local SMTP server (no TLS, no auth checks): records envelopes and DATA. */
+async function fakeSmtp() {
+  const net = require("net");
+  const got = [];
+  const server = net.createServer((sock) => {
+    let buf = "";
+    let inData = false;
+    let cur = { from: null, to: [], data: "" };
+    sock.write("220 fake.test ESMTP\r\n");
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      let i;
+      while ((i = buf.indexOf("\r\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (inData) {
+          if (line === ".") {
+            inData = false;
+            got.push(cur);
+            cur = { from: null, to: [], data: "" };
+            sock.write("250 2.0.0 queued as FAKE1\r\n");
+          } else cur.data += `${line}\n`;
+          continue;
+        }
+        const u = line.toUpperCase();
+        if (u.startsWith("EHLO")) sock.write("250-fake.test\r\n250 AUTH PLAIN LOGIN\r\n");
+        else if (u.startsWith("HELO")) sock.write("250 fake.test\r\n");
+        else if (u.startsWith("AUTH")) sock.write("235 2.7.0 ok\r\n");
+        else if (u.startsWith("MAIL FROM")) { cur.from = line; sock.write("250 ok\r\n"); }
+        else if (u.startsWith("RCPT TO")) { cur.to.push(line); sock.write("250 ok\r\n"); }
+        else if (u === "DATA") { inData = true; sock.write("354 go\r\n"); }
+        else if (u === "QUIT") { sock.end("221 bye\r\n"); }
+        else if (u === "RSET" || u === "NOOP") sock.write("250 ok\r\n");
+        else sock.write("502 unknown\r\n");
+      }
+    });
+    sock.on("error", () => {});
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { port: server.address().port, got, close: () => new Promise((r) => server.close(r)) };
+}
+
+test("Task 18 imapSmtp: real sending needs ONLY the SMTP settings + MAIL_REAL_SEND=true (no MAIL_IMAP_*)", async () => {
+  const imap = require("../modules/jobsearch/mail/imapSmtp");
+  const smtp = await fakeSmtp();
+  try {
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw-not-logged", MAIL_REAL_SEND: "true", MAIL_FROM: "applications@vita.test.invalid" }, async () => {
+      const r = await imap.send({ to: "hr@employer.test.invalid", subject: "Application", text: "Hello" });
+      assert.equal(r.accepted, true, JSON.stringify(r));
+      assert.equal(smtp.got.length, 1);
+      assert.match(smtp.got[0].to[0], /hr@employer\.test\.invalid/);
+      assert.match(smtp.got[0].data, /Subject: Application/);
+    });
+    // MAIL_REAL_SEND not true: nothing reaches the server (sandbox default unchanged)
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw" }, async () => {
+      const r = await imap.send({ to: "hr@employer.test.invalid", subject: "x", text: "y" });
+      assert.equal(r.accepted, false);
+      assert.equal(smtp.got.length, 1);
+    });
+    // an SMTP setting missing -> requires_setup, whatever the IMAP settings
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_USER: "vita", MAIL_IMAP_HOST: "imap.invalid", MAIL_IMAP_USER: "u", MAIL_IMAP_PASS: "p", MAIL_REAL_SEND: "true" }, async () => {
+      await assert.rejects(imap.send({ to: "a@test.invalid", subject: "s", text: "t" }), (e) => e.code === "REQUIRES_SETUP" && /MAIL_SMTP_PASS/.test(e.message) && !/MAIL_IMAP/.test(e.message));
+    });
+  } finally {
+    await smtp.close();
+  }
+});
+
+test("Task 18 imapSmtp.status(): outbound 'connected' only with valid SMTP settings AND MAIL_REAL_SEND=true; inbound 'webhook' vs 'requires_setup'", async () => {
+  const imap = require("../modules/jobsearch/mail/imapSmtp");
+  const SMTP = { MAIL_SMTP_HOST: "smtp.example.test", MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "secret-value" };
+  const cases = [
+    [{}, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
+    [{ MAIL_IMAP_HOST: "imap.x", MAIL_IMAP_USER: "u", MAIL_IMAP_PASS: "p", MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
+    [{ ...SMTP }, { status: "requires_setup", outbound: "configured_send_disabled", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_REAL_SEND: "TRUE" }, { status: "requires_setup", outbound: "configured_send_disabled", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "connected", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_REAL_SEND: "true", INBOUND_MAIL_SECRET: "s" }, { status: "connected", outbound: "connected", inbound: "webhook" }],
+    [{ ...SMTP, INBOUND_MAIL_SECRET: "s" }, { status: "requires_setup", outbound: "configured_send_disabled", inbound: "webhook" }],
+    [{ ...SMTP, MAIL_SMTP_PORT: "abc", MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_SMTP_PORT: "70000", MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_SMTP_HOST: "bad host!", MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
+    [{ ...SMTP, MAIL_SMTP_PORT: "465", MAIL_REAL_SEND: "true", INBOUND_MAIL_SECRET: "s" }, { status: "connected", outbound: "connected", inbound: "webhook" }],
+  ];
+  for (const [env, want] of cases) {
+    await withMailEnv(env, async () => {
+      const s = await imap.status();
+      assert.deepEqual({ status: s.status, outbound: s.outbound, inbound: s.inbound }, want, JSON.stringify(env));
+      assert.match(s.detail, /inbound polling not implemented/, "IMAP polling is never claimed");
+      assert.ok(!s.detail.includes("secret-value"), "never a secret in the status");
+    });
+  }
+  await withMailEnv({ MAIL_SMTP_PORT: "abc" }, async () => assert.match((await imap.status()).detail, /MAIL_SMTP_PORT/));
+});
