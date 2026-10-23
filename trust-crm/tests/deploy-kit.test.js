@@ -1,0 +1,238 @@
+// Task 20: static checks of the Hostinger deployment kit (deploy/hostinger) and the production image files.
+// Nothing here starts containers. `docker compose config` / shellcheck are used when installed, else skipped.
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawnSync } = require("child_process");
+const { checkEnv } = require("../utils/preflight");
+
+const ROOT = path.join(__dirname, "..");
+const KIT = path.join(ROOT, "..", "deploy", "hostinger");
+const read = (p) => fs.readFileSync(p, "utf8");
+const SCRIPTS = ["setup.sh", "create-admin.sh", "demo-seed.sh", "backup.sh", "restore.sh", "update.sh", "logs.sh", "status.sh"];
+const has = (cmd, args) => spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
+// a value that looks like a real secret: long hex / base64-ish token
+const SECRETISH = /(?:^|[=:\s"'])([A-Fa-f0-9]{24,}|[A-Za-z0-9+/_-]{32,}={0,2})(?:$|[\s"'])/m;
+
+function envTemplate() {
+  const entries = {};
+  for (const line of read(path.join(KIT, ".env.production.example")).split("\n")) {
+    const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (m) entries[m[1]] = m[2];
+  }
+  return entries;
+}
+
+test("kit: every file exists; scripts are executable", () => {
+  for (const f of ["docker-compose.yml", "Caddyfile", ".env.production.example", ".gitignore", ...SCRIPTS]) assert.ok(fs.existsSync(path.join(KIT, f)), f);
+  for (const f of SCRIPTS) assert.ok(fs.statSync(path.join(KIT, f)).mode & 0o100, `${f} not executable`);
+  assert.ok(fs.statSync(path.join(ROOT, "scripts", "docker-entrypoint.sh")).mode & 0o100);
+});
+
+test("kit scripts: bash -n clean, set -euo pipefail, no eval, no curl|sh, no secret echo; shellcheck clean when installed", (t) => {
+  for (const f of SCRIPTS) {
+    const p = path.join(KIT, f);
+    const src = read(p);
+    const r = spawnSync("bash", ["-n", p], { encoding: "utf8" });
+    assert.equal(r.status, 0, `${f}: ${r.stderr}`);
+    assert.match(src, /^#!\/usr\/bin\/env bash\n/, f);
+    assert.match(src, /^set -euo pipefail$/m, f);
+    assert.doesNotMatch(src, /^\s*eval\b|[;&|]\s*eval\b/m, `${f}: eval`);
+    assert.doesNotMatch(src, /curl[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b/, `${f}: curl | sh`);
+    // a secret may only be written into a pipe to the container (create-admin.sh), never to the terminal
+    const printed = src.split("\n").filter((l) => /(?:echo|printf)[^\n]*\$\{?(?:JWT_SECRET|STORAGE_URL_SECRET|DB_PASSWORD|JOBSEARCH_REPLY_SECRET|PASSWORD|PASSWORD2)\b/.test(l) && !/\| compose exec -T app node -e/.test(l));
+    assert.deepEqual(printed, [], `${f}: prints a secret`);
+  }
+  const entry = path.join(ROOT, "scripts", "docker-entrypoint.sh");
+  assert.equal(spawnSync("sh", ["-n", entry]).status, 0);
+  if (!has("shellcheck", ["--version"])) return t.skip("shellcheck not installed");
+  const sc = spawnSync("shellcheck", ["-x", ...SCRIPTS.map((f) => path.join(KIT, f)), entry], { encoding: "utf8" });
+  assert.equal(sc.status, 0, sc.stdout + sc.stderr);
+});
+
+test("setup.sh: secrets from openssl rand -hex 32, .env chmod 600 and never overwritten, sslip.io default, --domain, firewall only on request, official Docker install text", () => {
+  const s = read(path.join(KIT, "setup.sh"));
+  assert.match(s, /openssl rand -hex 32/);
+  assert.match(s, /for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD; do/);
+  assert.match(s, /chmod 600 \.env/);
+  assert.match(s, /umask 077/);
+  assert.match(s, /if \[ -f \.env \]; then\s+say "Keeping the existing \.env/);
+  assert.match(s, /https:\/\/api\.ipify\.org/);
+  assert.match(s, /\.sslip\.io/);
+  assert.match(s, /--domain\)/);
+  assert.match(s, /if \[ "\$FIREWALL" -eq 1 \]; then[\s\S]*sudo ufw allow OpenSSH[\s\S]*sudo ufw allow 443\/tcp/);
+  assert.match(s, /download\.docker\.com\/linux\/ubuntu/);
+  assert.match(s, /docker compose version|"\$\{DOCKER\[@\]\}" compose/);
+  assert.match(s, /compose up -d --build/);
+  assert.match(s, /\/healthz/);
+  assert.match(s, /\/vita\//);
+});
+
+test("create-admin.sh: hidden password (read -s), sent on stdin to a node script in the container, never on a command line", () => {
+  const s = read(path.join(KIT, "create-admin.sh"));
+  assert.match(s, /read -r -s -p "Password \(hidden\): " PASSWORD/);
+  assert.match(s, /printf '%s\\n%s\\n%s\\n' "\$FULL_NAME" "\$EMAIL" "\$PASSWORD" \| compose exec -T app node -e "\$NODE_SCRIPT"/);
+  assert.match(s, /\/auth\/bootstrap-super-admin/);
+  assert.match(s, /127\.0\.0\.1/);
+  assert.doesNotMatch(s, /curl[^\n]*PASSWORD|--data[^@\n]*PASSWORD|-d "\$/);
+  assert.match(s, /unset PASSWORD/);
+});
+
+test("demo-seed.sh: dev seed inside the container with NODE_ENV=development + VITA_SEED_ALLOW_REMOTE=1, explicit DEMO confirmation, documents down -v", () => {
+  const s = read(path.join(KIT, "demo-seed.sh"));
+  assert.match(s, /-e NODE_ENV=development/);
+  assert.match(s, /-e VITA_SEED_ALLOW_REMOTE=1/);
+  assert.match(s, /node scripts\/dev-seed-ui\.js/);
+  assert.doesNotMatch(s, /VITA_SEED_FORCE/, "never forces past the real-install guard");
+  assert.match(s, /docker compose down -v/);
+  assert.match(s, /Type DEMO/);
+});
+
+test("backup/restore/update: pg_dump custom format + storage tar, retention, checksums, restore confirmation, backup before update", () => {
+  const b = read(path.join(KIT, "backup.sh"));
+  assert.match(b, /pg_dump -U "\$DB_USER" -d "\$DB_NAME" -Fc/);
+  assert.match(b, /tar -C \/data -czf - storage/);
+  assert.match(b, /RETENTION="\$\{RETENTION:-14\}"/);
+  assert.match(b, /sha256sum/);
+  assert.match(b, /umask 077/);
+  assert.match(b, /crontab -e/);
+  const r = read(path.join(KIT, "restore.sh"));
+  assert.match(r, /Type RESTORE to continue/);
+  assert.match(r, /pg_restore -U "\$DB_USER" -d "\$DB_NAME" --clean --if-exists --no-owner --single-transaction/);
+  assert.match(r, /sha256sum --quiet -c SHA256SUMS/);
+  const u = read(path.join(KIT, "update.sh"));
+  assert.ok(u.indexOf("./backup.sh") < u.indexOf("git pull --ff-only"), "backup first");
+  assert.match(u, /compose build app/);
+});
+
+test("docker-compose.yml: only Caddy publishes ports (80/443); app 5000 and db never published; no secrets; db network internal; app read-only + non-root image", (t) => {
+  const yml = read(path.join(KIT, "docker-compose.yml"));
+  // no "- 5000:5000" / "- 127.0.0.1:5000:5000" / "- 5432:5432" style port mapping anywhere
+  assert.doesNotMatch(yml, /^\s*-\s*["']?(?:[\d.]+:)?\d*:?(?:5000|5432)(?::\d+)?["']?\s*$/m, "port 5000/5432 must not be published");
+  assert.equal((yml.match(/^\s*ports:/gm) || []).length, 1, "only one service (caddy) has ports");
+  assert.ok(!SECRETISH.test(yml.replace(/\$\{[^}]+\}/g, "")), "looks like a secret value");
+  assert.match(yml, /POSTGRES_PASSWORD: \$\{DB_PASSWORD:\?/);
+  assert.match(yml, /env_file: \.env/);
+  assert.match(yml, /image: postgres:16/);
+  assert.match(yml, /image: caddy:2/);
+  assert.match(yml, /context: \.\.\/\.\.\/trust-crm/);
+  assert.match(yml, /read_only: true/);
+  assert.match(yml, /tmpfs:\s*\n\s*- \/tmp/);
+  assert.match(yml, /condition: service_healthy/);
+  assert.match(yml, /restart: unless-stopped/);
+  assert.match(yml, /backend:\s*\n\s*internal: true/);
+  assert.match(yml, /SITE_ADDRESS: \$\{SITE_ADDRESS:\?/);
+  if (!has("docker", ["compose", "version"])) return t.skip("docker compose CLI not installed");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vita-kit-"));
+  try {
+    const envFile = path.join(tmp, "env");
+    fs.writeFileSync(envFile, "DB_USER=vita\nDB_NAME=vita\nDB_PASSWORD=test-only\nSITE_ADDRESS=203-0-113-10.sslip.io\n");
+    const r = spawnSync("docker", ["compose", "--project-directory", KIT, "-f", path.join(KIT, "docker-compose.yml"), "--env-file", envFile, "config", "--format", "json", "--no-env-resolution"], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, HOME: process.env.HOME || tmp, DOCKER_CONFIG: path.join(tmp, "docker") },
+    });
+    if (r.status !== 0 && /env_file|\.env/.test(r.stderr)) {
+      // env_file .env must exist for `config`; create an empty stand-in in a copy of the kit
+      const copy = path.join(tmp, "kit");
+      fs.mkdirSync(copy);
+      for (const f of ["docker-compose.yml", "Caddyfile"]) fs.copyFileSync(path.join(KIT, f), path.join(copy, f));
+      fs.writeFileSync(path.join(copy, ".env"), "");
+      const r2 = spawnSync("docker", ["compose", "--project-directory", copy, "-f", path.join(copy, "docker-compose.yml"), "--env-file", envFile, "config", "--format", "json", "--no-env-resolution"], { encoding: "utf8", env: { PATH: process.env.PATH, HOME: tmp, DOCKER_CONFIG: path.join(tmp, "docker") } });
+      assert.equal(r2.status, 0, r2.stderr);
+      return checkConfig(JSON.parse(r2.stdout));
+    }
+    assert.equal(r.status, 0, r.stderr);
+    checkConfig(JSON.parse(r.stdout));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+function checkConfig(cfg) {
+  assert.deepEqual(Object.keys(cfg.services).sort(), ["app", "caddy", "db"]);
+  assert.equal(cfg.services.app.ports, undefined, "app publishes no port");
+  assert.equal(cfg.services.db.ports, undefined, "db publishes no port");
+  const published = cfg.services.caddy.ports.map((p) => `${p.published}/${p.protocol || "tcp"}`).sort();
+  assert.deepEqual(published, ["443/tcp", "443/udp", "80/tcp"]);
+  assert.equal(cfg.services.app.environment.NODE_ENV, "production");
+  assert.equal(cfg.services.app.environment.DB_HOST, "db");
+  assert.equal(cfg.services.app.read_only, true);
+  assert.deepEqual(Object.keys(cfg.services.db.networks), ["backend"]);
+  assert.equal(cfg.networks.backend.internal, true);
+  assert.equal(cfg.services.app.depends_on.db.condition, "service_healthy");
+  assert.ok(cfg.services.db.healthcheck && cfg.services.db.healthcheck.test);
+}
+
+test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000, security headers, HSTS without includeSubDomains, / -> /vita/", () => {
+  const raw = read(path.join(KIT, "Caddyfile"));
+  const c = raw.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(/\s#.*$/gm, "");
+  assert.match(c, /^\{\$SITE_ADDRESS\} \{/m);
+  assert.match(c, /reverse_proxy app:5000/);
+  assert.match(c, /Strict-Transport-Security "max-age=31536000"/);
+  assert.doesNotMatch(c, /includeSubDomains/i, "sslip.io names are shared - never includeSubDomains");
+  for (const h of ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy", "-Server"]) assert.ok(c.includes(h), h);
+  assert.match(c, /redir @root \/vita\/ 302/);
+});
+
+test(".env.production.example: every variable preflight needs; safe sandbox defaults; no secret values; template + generated secrets passes the preflight", () => {
+  const env = envTemplate();
+  for (const k of ["NODE_ENV", "SITE_ADDRESS", "TRUST_PROXY", "JWT_SECRET", "STORAGE_URL_SECRET", "JOBSEARCH_REPLY_SECRET", "DB_HOST", "DB_PORT", "DB_USER", "DB_NAME", "DB_PASSWORD", "STORAGE_DIR", "MAIL_PROVIDER", "MAIL_REAL_SEND", "ALLOW_UNSCANNED_ATTACHMENTS", "INBOUND_AUTH_REQUIRED", "INBOUND_AUTO_ACK_EVIDENCE", "JOBSEARCH_SCHEDULER", "JOBSEARCH_WORKERS"]) {
+    assert.ok(k in env, `missing ${k}`);
+  }
+  assert.equal(env.NODE_ENV, "production");
+  assert.equal(env.MAIL_PROVIDER, "sandbox");
+  assert.equal(env.MAIL_REAL_SEND, "false");
+  assert.equal(env.ALLOW_UNSCANNED_ATTACHMENTS, "true");
+  assert.equal(env.TRUST_PROXY, "1");
+  assert.equal(env.INBOUND_AUTH_REQUIRED, "true");
+  assert.equal(env.INBOUND_AUTO_ACK_EVIDENCE, "false");
+  assert.equal(env.JOBSEARCH_SCHEDULER, "on");
+  assert.equal(env.JOBSEARCH_WORKERS, "on");
+  assert.equal(env.SITE_ADDRESS, "");
+  for (const [k, v] of Object.entries(env)) {
+    if (/SECRET|PASSWORD|PASS$|_KEY$|TOKEN/.test(k)) assert.equal(v, "", `${k} must be empty in the template`);
+    assert.ok(!SECRETISH.test(`=${v}`), `${k} looks like a secret value`);
+  }
+  const text = read(path.join(KIT, ".env.production.example"));
+  assert.match(text, /set it to false\s*\n?#?\s*before enabling real mail/i);
+  // every documented variable is a real one (.env.example lists every variable the code reads)
+  const known = read(path.join(ROOT, ".env.example")) + "\nSITE_ADDRESS";
+  const all = [...text.matchAll(/^#?\s?([A-Z][A-Z0-9_]{2,})=/gm)].map((m) => m[1]);
+  for (const k of all) assert.ok(known.includes(k), `${k} is not a known variable (.env.example)`);
+  // what setup.sh produces passes the production preflight
+  const filled = { ...env, JWT_SECRET: "a".repeat(64), STORAGE_URL_SECRET: "b".repeat(64), JOBSEARCH_REPLY_SECRET: "c".repeat(64), DB_PASSWORD: "d".repeat(64), SITE_ADDRESS: "203-0-113-10.sslip.io" };
+  for (const k of Object.keys(filled)) if (filled[k] === "") delete filled[k];
+  const r = checkEnv(filled, { storageWritable: () => true });
+  assert.deepEqual(r.problems, []);
+  const unfilled = checkEnv(Object.fromEntries(Object.entries(env).filter(([, v]) => v !== "")), { storageWritable: () => true });
+  assert.ok(unfilled.problems.some((p) => /^JWT_SECRET is not set/.test(p)), "the raw template is refused until secrets are generated");
+});
+
+test("Dockerfile: node:22-slim, npm ci --omit=dev, runtime files only, non-root USER, healthcheck on /healthz, entrypoint migrates then starts", () => {
+  const d = read(path.join(ROOT, "Dockerfile"));
+  const froms = [...d.matchAll(/^FROM (\S+)/gm)].map((m) => m[1]);
+  assert.ok(froms.length >= 1 && froms.every((f) => f === "node:22-slim"), froms.join(","));
+  assert.match(d, /npm ci --omit=dev/);
+  assert.doesNotMatch(d, /^COPY \. /m, "no blanket COPY . .");
+  assert.doesNotMatch(d, /^COPY[^\n]*\btests\b/m);
+  assert.doesNotMatch(d, /^COPY[^\n]*\.env\b/m);
+  const lastFrom = d.lastIndexOf("\nFROM ");
+  const user = /^USER (\S+)$/m.exec(d.slice(lastFrom));
+  assert.ok(user && user[1] !== "root" && user[1] !== "0", "final stage runs as a non-root user");
+  assert.match(d, /^HEALTHCHECK [\s\S]*\/healthz/m);
+  assert.match(d, /^ENTRYPOINT \["\/app\/scripts\/docker-entrypoint\.sh"\]/m);
+  const entry = read(path.join(ROOT, "scripts", "docker-entrypoint.sh"));
+  assert.ok(entry.indexOf("node /app/scripts/db-init.js") < entry.indexOf("exec node /app/server.js"));
+  assert.match(entry, /^set -eu$/m);
+  assert.doesNotMatch(d, /sandbox-ca|ccr|NODE_EXTRA_CA_CERTS/, "no sandbox/proxy CA in the real Dockerfile");
+});
+
+test(".dockerignore excludes .env, tests, node_modules, .storage, .git and docs; kit .gitignore keeps .env and backups out of git", () => {
+  const lines = read(path.join(ROOT, ".dockerignore")).split("\n").map((l) => l.trim());
+  for (const x of [".env", ".env.*", "tests", "node_modules", ".storage", ".git", "docs"]) assert.ok(lines.includes(x), x);
+  const gi = read(path.join(KIT, ".gitignore")).split("\n").map((l) => l.trim());
+  assert.ok(gi.includes(".env"));
+  assert.ok(gi.includes("backups/"));
+});

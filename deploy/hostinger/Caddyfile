@@ -1,0 +1,26 @@
+# Caddy reverse proxy for VITA (Task 20). Automatic HTTPS (Let's Encrypt / ZeroSSL) for SITE_ADDRESS:
+#   first run without a domain:  SITE_ADDRESS=203-0-113-10.sslip.io   (setup.sh derives it from the server IP)
+#   later, your own domain:      SITE_ADDRESS=vita.your-domain.com     (DNS A record -> server IP; then
+#                                                                       docker compose up -d)
+# Ports 80 and 443 must be open to the internet for the certificate to be issued.
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		# HTTPS only for this exact host (no includeSubDomains: sslip.io names are shared by everyone)
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+		-X-Powered-By
+	}
+
+	# The bare address opens the VITA web interface.
+	@root path /
+	redir @root /vita/ 302
+
+	reverse_proxy app:5000
+}

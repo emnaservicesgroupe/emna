@@ -1,0 +1,17 @@
+# Task 20: only runtime files reach the image (the Dockerfile also copies an explicit list).
+node_modules
+tests
+docs
+.storage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+coverage
+.nyc_output
+README.md
+Dockerfile
+.dockerignore

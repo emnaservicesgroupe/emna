@@ -1,0 +1,93 @@
+# VITA deployment for one VPS (Task 20): Postgres + the app + Caddy (automatic HTTPS).
+#   cd deploy/hostinger && ./setup.sh          (first time: creates .env with generated secrets)
+#   docker compose up -d --build               (later starts / after editing .env)
+# Only Caddy publishes ports (80/443). The app (5000) and the database (5432) are reachable only inside the
+# Docker networks; the database network has no internet access at all.
+# Variables like ${DB_USER} are read from ./.env (the same file the app reads); nothing secret is in this file.
+name: vita
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?DB_USER must be set in .env (run setup.sh)}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env (run setup.sh)}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME must be set in .env (run setup.sh)}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    shm_size: 128mb
+    networks: [backend]
+    logging: *logging
+
+  app:
+    build:
+      context: ../../trust-crm
+    image: vita-app:local
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      # fixed by this deployment (override whatever .env says)
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: "5432"
+      PORT: "5000"
+      STORAGE_DIR: /data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - app-storage:/data/storage
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 30s
+    expose: ["5000"]
+    networks: [backend, frontend]
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?SITE_ADDRESS must be set in .env (run setup.sh)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [frontend]
+    logging: *logging
+
+networks:
+  backend:
+    internal: true
+  frontend: {}
+
+volumes:
+  db-data:
+  app-storage:
+  caddy-data:
+  caddy-config:
