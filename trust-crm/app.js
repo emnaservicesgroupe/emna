@@ -20,8 +20,13 @@ const jobsearchInboxRoutes = require("./routes/jobsearchInbox");
 const jobsearchReportsRoutes = require("./routes/jobsearchReports");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 const { mountVita } = require("./routes/vitaStatic");
+const { trustProxySetting } = require("./utils/trustProxy");
 
 const app = express();
+
+// Opt-in (TRUST_PROXY): needed behind an HTTPS reverse proxy so per-IP rate limits see the client IP.
+const trustProxy = trustProxySetting(process.env.TRUST_PROXY);
+if (trustProxy !== null) app.set("trust proxy", trustProxy);
 
 app.use(cors());
 // /jobsearch parses its own JSON first so parser errors (which carry the raw body,
