@@ -70,12 +70,14 @@ test("setup.sh: secrets from openssl rand -hex 32, .env chmod 600 and never over
   // separate superuser file for the db container; never DB_USER=postgres
   assert.match(s, /printf 'POSTGRES_USER=postgres\\nPOSTGRES_PASSWORD=\\n' > \.env\.db/);
   assert.match(s, /set_env \.env\.db POSTGRES_PASSWORD "\$\(openssl rand -hex 32\)"/);
-  assert.match(s, /must be the unprivileged application role/);
+  assert.match(s, /DB_USER in .env is the Postgres superuser/);
+  assert.match(s, /grep -E .\^POSTGRES_USER=. \.env\.db/, "superuser name read from .env.db, not hard-coded");
   // an empty SITE_ADDRESS in an existing .env is detected again instead of a dead end
   assert.match(s, /elif \[ -z "\$\(get_env SITE_ADDRESS\)" \]; then\s+# an earlier run could not detect the IP/);
   // firewall: the real sshd port, refusal when unknown
   assert.match(s, /sshd -T/);
   assert.match(s, /NOT enabling the firewall/);
+  assert.match(s, /set POSTGRES_USER and POSTGRES_PASSWORD to the OLD DB_USER and DB_PASSWORD/, "old-install guidance");
   assert.match(s, /xn--\[a-z0-9-\]\{1,59\}/, "punycode TLDs accepted");
   assert.match(s, /chmod 600 \.env/);
   assert.match(s, /umask 077/);
@@ -129,13 +131,19 @@ test("backup/restore/update: pg_dump custom format + storage tar, retention, che
   assert.match(r, /trap restart_stack EXIT/);
   assert.ok(r.indexOf("trap restart_stack EXIT") < r.indexOf("compose stop app caddy"), "the trap is set before the stack is stopped");
   assert.match(r, /\.\/backup\.sh/);
+  // fix round 2: the uploads archive is validated before any change, extracted to a temp folder, then swapped
+  assert.ok(r.indexOf("tar -tzf") > 0 && r.indexOf("tar -tzf") < r.indexOf("compose stop app caddy"), "archive checked before anything changes");
+  assert.match(r, /contains paths outside storage\//);
+  assert.match(r, /tar -C \.restore-new -xzf -/);
+  assert.doesNotMatch(r, /find \/data\/storage -mindepth 1 -delete/, "never empties the storage first");
+  assert.ok(r.indexOf("tar -C .restore-new -xzf -") < r.indexOf("-exec mv -t .restore-old"), "extract before moving the current files aside");
   assert.match(r, /sha256sum --quiet -c SHA256SUMS/);
   const u = read(path.join(KIT, "update.sh"));
   assert.ok(u.indexOf("./backup.sh") < u.indexOf("git pull --ff-only"), "backup first");
   assert.match(u, /compose pull db caddy/);
   assert.match(u, /compose build --pull app/);
   assert.match(u, /^main\(\) \{$/m);
-  assert.match(u, /\nmain "\$@"\nexit \$\?\n$/, "read fully before running (self-modification safe)");
+  assert.match(u, /\nmain "\$@"; exit \$\?\n$/, "main and exit on the last line (self-modification safe)");
   assert.match(u, /git ls-remote --exit-code --heads/);
   assert.match(u, /git switch main/);
   const sm = read(path.join(KIT, "show-sandbox-mail.sh"));
@@ -228,6 +236,7 @@ test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no comp
   assert.match(c, /@healthz path \/healthz\s*\n\s*respond @healthz `\{"ok":true\}` 200/, "public /healthz never queries the DB");
   assert.match(c, /request_body \{\s*max_size \{\$CADDY_MAX_BODY:12MB\}\s*\}/);
   assert.match(c, /read_header 10s/);
+  assert.match(c, /read_body 120s/);
   assert.doesNotMatch(c, /\bwrite \d/, "no write timeout (SSE)");
   assert.match(c, /import \/tmp\/caddy-global\.d\/\*\.caddy/);
   // live events (SSE): flushed immediately and never compressed (verified through Caddy in the Task 20 sandbox run)

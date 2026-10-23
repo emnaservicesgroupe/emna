@@ -5,8 +5,9 @@
 #
 #   ./update.sh
 #
-# The whole script is read into memory before anything runs (main "$@" on the last line), so a `git pull`
-# that changes this very file cannot make bash execute half-old, half-new lines.
+# Everything is inside main(), called on the LAST line together with exit: bash has parsed the whole file
+# before the first command runs and never reads further, so a `git pull` that changes this very file cannot
+# make bash execute half-old, half-new lines.
 set -euo pipefail
 
 main() {
@@ -58,5 +59,4 @@ TXT
   ./status.sh
 }
 
-main "$@"
-exit $?
+main "$@"; exit $?

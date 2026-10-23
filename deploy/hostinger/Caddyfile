@@ -9,7 +9,8 @@
 	servers {
 		timeouts {
 			read_header 10s
-			read_body 60s
+			# slow mobile uploads of a CV (up to CADDY_MAX_BODY) must finish within this
+			read_body 120s
 			idle 2m
 			# no write timeout: live events (server-sent events) are long-lived responses
 		}

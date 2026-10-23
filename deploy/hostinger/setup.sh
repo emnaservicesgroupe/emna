@@ -72,6 +72,7 @@ fi
 if [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
   OS_ID="$(. /etc/os-release && printf '%s' "${ID:-unknown}")"
+  # shellcheck disable=SC1091
   OS_VERSION="$(. /etc/os-release && printf '%s' "${VERSION_ID:-}")"
 else
   OS_ID="unknown"; OS_VERSION=""
@@ -190,14 +191,19 @@ if [ -f .env.db ]; then
   chmod 600 .env.db
 else
   if "${DOCKER[@]}" volume inspect vita_db-data > /dev/null 2>&1; then
-    warn "a database volume (vita_db-data) already exists: its superuser password is NOT changed by a new .env.db."
+    warn "a database volume (vita_db-data) already exists, probably from an earlier version of this kit. A new .env.db does NOT change its superuser."
+    warn "  Demo/test install: wipe it (deletes ALL data): docker compose down -v, then ./setup.sh again."
+    warn "  Install with real data: edit .env.db and set POSTGRES_USER and POSTGRES_PASSWORD to the OLD DB_USER and DB_PASSWORD from .env (backup.sh/restore.sh use them); see SETUP-HOSTINGER.md section 16."
   fi
   printf 'POSTGRES_USER=postgres\nPOSTGRES_PASSWORD=\n' > .env.db
   chmod 600 .env.db
   set_env .env.db POSTGRES_PASSWORD "$(openssl rand -hex 32)"
   say "Created .env.db (permissions 600) with a generated Postgres superuser password (not shown)."
 fi
-[ "$(grep -E '^DB_USER=' .env | tail -n 1 | cut -d= -f2-)" != "postgres" ] || die "DB_USER in .env must be the unprivileged application role (vita_app), not postgres"
+PG_SUPER_NAME="$(grep -E '^POSTGRES_USER=' .env.db | tail -n 1 | cut -d= -f2- || true)"
+if [ "$(get_env DB_USER)" = "$PG_SUPER_NAME" ] || [ "$(get_env DB_USER)" = "postgres" ]; then
+  warn "DB_USER in .env is the Postgres superuser: the app runs with full database privileges. New installs use the unprivileged vita_app role (see SETUP-HOSTINGER.md section 16)."
+fi
 
 SITE="$(get_env SITE_ADDRESS)"
 [ -n "$SITE" ] || die "SITE_ADDRESS is empty in .env: run ./setup.sh --domain your.domain"

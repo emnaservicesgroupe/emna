@@ -9,7 +9,8 @@
 #   2. stop app + caddy; restore the dump into a NEW temporary database owned by the application role
 #      (one transaction, stops at the first error) - the current database is untouched until this succeeds;
 #   3. swap: current database -> vita_pre_restore_<time>, temporary -> the real name; drop the old one;
-#   4. replace the uploaded files (/data/storage);
+#   4. replace the uploaded files: the archive is validated before step 2, extracted into a temporary folder,
+#      and only then swapped in (the current files are never deleted first);
 #   5. ALWAYS (success or failure) start app + caddy again; the app re-applies newer migrations on start.
 # Test your backups: restore one on a spare VPS (or a fresh install) from time to time.
 set -euo pipefail
@@ -32,6 +33,14 @@ SRC="${1:-}"
 [ -f .env.db ] || die ".env.db not found (run ./setup.sh first)"
 if [ -f "$SRC/SHA256SUMS" ]; then
   ( cd "$SRC" && sha256sum --quiet -c SHA256SUMS ) || die "checksum mismatch: the backup is damaged"
+fi
+# The uploads archive is checked BEFORE anything changes: it must be readable and contain only storage/...
+LISTING="$(tar -tzf "$SRC/storage.tar.gz" 2> /dev/null)" || die "$SRC/storage.tar.gz is damaged (tar cannot read it); nothing was changed"
+if printf '%s\n' "$LISTING" | grep -v -E '^storage(/|$)' | grep -q .; then
+  die "$SRC/storage.tar.gz contains paths outside storage/; nothing was changed"
+fi
+if printf '%s\n' "$LISTING" | grep -q -E '(^|/)\.\.(/|$)'; then
+  die "$SRC/storage.tar.gz contains '..' paths; nothing was changed"
 fi
 SRC_ABS="$(cd "$SRC" && pwd)"
 
@@ -108,6 +117,21 @@ if ! psql_super -c "ALTER DATABASE \"${TMP_DB}\" RENAME TO \"${DB_NAME}\""; then
 fi
 psql_super -c "DROP DATABASE \"${OLD_DB}\" WITH (FORCE)"
 
-# 4. uploaded files: a one-off container with the app image and the storage volume (the app is stopped)
+# 4. uploaded files: a one-off container with the app image and the storage volume (the app is stopped).
+# Extract into a temporary folder inside the volume first; only when that worked, move the current files
+# aside, move the restored ones in, then delete the old ones. /data/storage is never emptied up front.
 printf 'Restoring uploaded files...\n'
-compose run --rm --no-deps -T --entrypoint sh app -c 'find /data/storage -mindepth 1 -delete && tar -C /data -xzf -' < "$SRC_ABS/storage.tar.gz"
+compose run --rm --no-deps -T --entrypoint sh app -c '
+  set -eu
+  cd /data/storage
+  rm -rf .restore-new .restore-old
+  mkdir .restore-new .restore-old
+  if ! tar -C .restore-new -xzf - || [ ! -d .restore-new/storage ]; then
+    rm -rf .restore-new .restore-old
+    echo "the uploads archive could not be extracted; the current files were kept" >&2
+    exit 3
+  fi
+  find . -mindepth 1 -maxdepth 1 ! -name .restore-new ! -name .restore-old -exec mv -t .restore-old {} +
+  find .restore-new/storage -mindepth 1 -maxdepth 1 -exec mv -t . {} +
+  rm -rf .restore-new .restore-old
+' < "$SRC_ABS/storage.tar.gz"

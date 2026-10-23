@@ -312,9 +312,11 @@ state first - say yes):
 ./restore.sh backups/vita-20261023-031700
 ```
 
-It restores into a **temporary** database first and only switches over when that fully succeeded, so a
-damaged backup leaves your current data untouched. Whatever happens, it starts the app and Caddy again at
-the end; the app then applies any newer database migrations itself.
+Before changing anything it checks the backup's checksums and that the uploads archive can be read. It
+then restores the database into a **temporary** database and only switches over when that fully
+succeeded, and unpacks the uploaded files into a temporary folder before swapping them in - so a damaged
+backup leaves your current data and files untouched. Whatever happens, it starts the app and Caddy again
+at the end; the app then applies any newer database migrations itself.
 
 **Test a restore** at least once: on a second (temporary) VPS, do sections 3–5, copy a backup folder there,
 run `./restore.sh …`, sign in and check a few candidates and files.
@@ -346,8 +348,10 @@ Only three ports need to be open: **22** (SSH), **80** and **443** (HTTPS; 443/u
      `PermitRootLogin no` and `PasswordAuthentication no`, check with `sudo sshd -t`, then
      `sudo systemctl restart ssh`.
   4. **Keep the old session open** and open a new one to confirm you can still log in.
-- **Database roles:** the app uses the unprivileged role `vita_app`; the Postgres superuser password is in
-  `.env.db` and is only used by the database container, `backup.sh` and `restore.sh`.
+- **Database roles:** the app uses the unprivileged role `vita_app`. The Postgres **superuser** is named in
+  `.env.db` (`POSTGRES_USER`, normally `postgres`) together with its password, which only the database
+  container reads. `backup.sh` and `restore.sh` use that superuser **name** inside the database container,
+  over its local socket, without a password.
 - Keep Ubuntu updated: `sudo apt-get update && sudo apt-get upgrade -y` (monthly; reboot when asked).
 - The app container runs as an unprivileged user with a read-only file system; only the storage volume
   is writable.
@@ -384,6 +388,8 @@ data or a test install.
 | Disk full | `./status.sh` (Disk) | Delete old backups after copying them elsewhere; `docker image prune -f` |
 | `update.sh` stops: "local changes" | `git status` | Undo the local edits (`git checkout -- <file>`) or ask your developer |
 | `update.sh` stops: branch "no longer exists" | the cloned branch was merged | Run the `git fetch` / `git switch main` lines it prints |
+| App keeps restarting with "password authentication failed for user vita_app" or "role vita_app does not exist" | the very first start of the database failed or was interrupted, so the role was never created | **Only on a fresh install without data:** `docker compose down -v`, then `./setup.sh` again (the role is created when the database volume is first initialised) |
+| `setup.sh` warns that a database volume already exists | the volume was created by an earlier version of this kit | Demo/test install: `docker compose down -v` (deletes all data) and run `./setup.sh` again. Install with real data: in `.env.db` set `POSTGRES_USER` and `POSTGRES_PASSWORD` to the old `DB_USER` / `DB_PASSWORD` from `.env` so backups and restores work, and ask your developer to move the app to an unprivileged role |
 | `restore.sh` failed | its last messages | The current data is kept when the failure happened before "Switching to the restored database"; the app and Caddy are started again either way |
 
 ## 17. What was and was not tested
@@ -396,7 +402,7 @@ All of this ran in the development container described at the top, **not** on a 
 | `docker compose` build step | **Bypassed**: the stack ran with a scratch override that uses the pre-built image (compose v5's builder needed extra privileges there). `docker compose up --build` / `build --pull` building the image itself: **not tested**. |
 | Stack: db + app + caddy healthy, migrations on an empty database, app connected as unprivileged `vita_app` (`\du`: no attributes; `COPY … TO PROGRAM`, `CREATE DATABASE`, `pg_read_file` refused) | Tested |
 | Only ports 80/443 published; app 5000 and database 5432 not reachable from outside | Tested |
-| HTTPS, `/` → `/vita/`, security headers, live events not buffered, 13 MB body refused (413), optional ACME e-mail snippet (invalid value ignored) | Tested with Caddy's **local** certificate after setting `SITE_ADDRESS=localhost` **by hand in `.env`** (setup.sh refuses localhost) |
+| HTTPS, `/` → `/vita/`, security headers, live events not buffered, 13 MB body refused (413; Caddy also allows 120 s to receive a request body, for slow uploads), optional ACME e-mail snippet (invalid value ignored) | Tested with Caddy's **local** certificate after setting `SITE_ADDRESS=localhost` **by hand in `.env`** (setup.sh refuses localhost) |
 | Bootstrap protection: `POST /auth/bootstrap-super-admin` through Caddy (6 path variants) → 404; directly from another container → 404; nothing created; `create-admin.sh` from inside the app container → created once | Tested |
 | `/auth/login` limits through Caddy: 5 failures → 429 with `Retry-After` | Tested |
 | `setup.sh` (new install; re-run keeps `.env`/`.env.db`; empty `SITE_ADDRESS` re-detected), `demo-seed.sh` (fresh DB / refused on a real one), candidate sign-in with an allow-listed demo address + `show-sandbox-mail.sh`, non-allow-listed address stores nothing, `backup.sh`, `restore.sh` over a database with **newer** FK-linked tables (succeeded, stack back up), `restore.sh` with a **damaged** dump (failed, data kept, stack back up), graceful stop (exit 0), preflight refusal, `update.sh` refusal on a dirty checkout | Run in the development container |
