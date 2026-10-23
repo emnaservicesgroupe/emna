@@ -181,7 +181,9 @@ locked account).
 
 - Staff console: `https://<your-address>/vita/admin.html` (the address `setup.sh` printed)
 - Candidate portal: `https://<your-address>/vita/portal.html`
-- `https://<your-address>/` opens `/vita/` automatically.
+- `https://<your-address>/` is the public VITA website (Arabic, English, French) for browsers; it links to the portal and the staff console. The same address still answers the JSON status for API clients.
+
+**Public website.** The public website is served at the domain root by the same app (no extra container). Everything about it is optional: the `SITE_*` variables in `.env` (phone, WhatsApp link, e-mail, postal address as `SITE_POSTAL_ADDRESS`, licence text, `SITE_BASE_URL`, `SITE_NAME`, lead limits, consent version) are hidden on the site until you set them, and `setup.sh` generates `SITE_IP_SALT` for you. In `.env`, `SITE_ADDRESS` stays the server host name for Caddy. See [../vita-website-crm/SETUP.md](../vita-website-crm/SETUP.md).
 
 The first visit can take up to a minute while the certificate is created.
 
@@ -402,7 +404,7 @@ All of this ran in the development container described at the top, **not** on a 
 | `docker compose` build step | **Bypassed**: the stack ran with a scratch override that uses the pre-built image (compose v5's builder needed extra privileges there). `docker compose up --build` / `build --pull` building the image itself: **not tested**. |
 | Stack: db + app + caddy healthy, migrations on an empty database, app connected as unprivileged `vita_app` (`\du`: no attributes; `COPY … TO PROGRAM`, `CREATE DATABASE`, `pg_read_file` refused) | Tested |
 | Only ports 80/443 published; app 5000 and database 5432 not reachable from outside | Tested |
-| HTTPS, `/` → `/vita/`, security headers, live events not buffered, 13 MB body refused (413; Caddy also allows 120 s to receive a request body, for slow uploads), optional ACME e-mail snippet (invalid value ignored) | Tested with Caddy's **local** certificate after setting `SITE_ADDRESS=localhost` **by hand in `.env`** (setup.sh refuses localhost) |
+| HTTPS, `/` → `/vita/` (this redirect was removed when the public website was added: `/` now reaches the app; **not re-run** on a stack), security headers, live events not buffered, 13 MB body refused (413; Caddy also allows 120 s to receive a request body, for slow uploads), optional ACME e-mail snippet (invalid value ignored) | Tested with Caddy's **local** certificate after setting `SITE_ADDRESS=localhost` **by hand in `.env`** (setup.sh refuses localhost) |
 | Bootstrap protection: `POST /auth/bootstrap-super-admin` through Caddy (6 path variants) → 404; directly from another container → 404; nothing created; `create-admin.sh` from inside the app container → created once | Tested |
 | `/auth/login` limits through Caddy: 5 failures → 429 with `Retry-After` | Tested |
 | `setup.sh` (new install; re-run keeps `.env`/`.env.db`; empty `SITE_ADDRESS` re-detected), `demo-seed.sh` (fresh DB / refused on a real one), candidate sign-in with an allow-listed demo address + `show-sandbox-mail.sh`, non-allow-listed address stores nothing, `backup.sh`, `restore.sh` over a database with **newer** FK-linked tables (succeeded, stack back up), `restore.sh` with a **damaged** dump (failed, data kept, stack back up), graceful stop (exit 0), preflight refusal, `update.sh` refusal on a dirty checkout | Run in the development container |

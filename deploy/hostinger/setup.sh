@@ -171,10 +171,15 @@ if [ -f .env ]; then
     set_env .env SITE_ADDRESS "$SITE"
     say "SITE_ADDRESS was empty; set to $SITE"
   fi
+  # An .env from an earlier version has no salt for the public-form rate limits: generate it once.
+  if [ -z "$(get_env SITE_IP_SALT)" ]; then
+    set_env .env SITE_IP_SALT "$(openssl rand -hex 32)"
+    say "SITE_IP_SALT was empty or missing; generated (not shown)."
+  fi
 else
   cp .env.production.example .env
   chmod 600 .env
-  for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD; do
+  for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD SITE_IP_SALT; do
     set_env .env "$key" "$(openssl rand -hex 32)"
   done
   if [ -n "$DOMAIN" ]; then

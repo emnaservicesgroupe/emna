@@ -11,7 +11,7 @@ const db = () => require("../../db");
 const STATUSES = ["draft", "published", "closed"];
 // apply_mode is either one of these keywords or an absolute http(s) URL (there is no separate link column).
 const APPLY_MODES = ["contact_staff", "register"];
-const MAX = { title: 160, description: 8000, requirements: 4000 };
+const MAX = { title: 160, description: 8000, requirements: 4000, evidence_note: 1000 };
 const TEXT_FIELDS = [
   "title",
   "employer_name",

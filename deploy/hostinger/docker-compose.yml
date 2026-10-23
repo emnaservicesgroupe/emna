@@ -51,6 +51,9 @@ services:
       DB_PORT: "5432"
       PORT: "5000"
       STORAGE_DIR: /data/storage
+      # In .env, SITE_ADDRESS is the public HOST NAME for Caddy. The app reads SITE_ADDRESS as the company's
+      # postal address for the website, so it gets that from SITE_POSTAL_ADDRESS instead (empty = not shown).
+      SITE_ADDRESS: ${SITE_POSTAL_ADDRESS:-}
     depends_on:
       db:
         condition: service_healthy

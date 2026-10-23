@@ -128,7 +128,7 @@
       return fieldBox(name, inputs[name], extra);
     };
     var area = function (name, hint) {
-      inputs[name] = h("textarea", { id: "sj-" + name, attrs: { rows: String(AREAS[name]), maxlength: name === "description" ? "8000" : name === "requirements" ? "4000" : "160" }, value: v[name], disabled: closed });
+      inputs[name] = h("textarea", { id: "sj-" + name, attrs: { rows: String(AREAS[name]), maxlength: name === "description" ? "8000" : name === "requirements" ? "4000" : name === "evidence_note" ? "1000" : "160" }, value: v[name], disabled: closed });
       return fieldBox(name, inputs[name], hint);
     };
 
@@ -141,7 +141,7 @@
     syncUrl();
 
     var closes = h("input", { id: "sj-closes_at", type: "datetime-local", value: v.closes_at, disabled: closed });
-    var evidence = fieldBox("evidence_note", (inputs.evidence_note = h("textarea", { id: "sj-evidence_note", attrs: { rows: "3", maxlength: "160" }, value: v.evidence_note, disabled: closed })), null);
+    var evidence = fieldBox("evidence_note", (inputs.evidence_note = h("textarea", { id: "sj-evidence_note", attrs: { rows: "3", maxlength: "1000" }, value: v.evidence_note, disabled: closed })), null);
     evidence.appendChild(h("p", { class: "notice info small", text: t("crm.sj.evidenceHelp") }));
 
     var err = h("p", { class: "form-error", attrs: { role: "alert" } });

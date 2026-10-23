@@ -49,9 +49,8 @@
 		-X-Powered-By
 	}
 
-	# The bare address opens the VITA web interface.
-	@root path /
-	redir @root /vita/ 302
+	# The bare address is served by the app: the public website for browsers (Accept: text/html), the JSON
+	# status for API clients. Staff and candidates reach the VITA web interface at /vita/ (linked from the site).
 
 	reverse_proxy app:5000 {
 		# flush immediately: needed for live events (GET /jobsearch/events)

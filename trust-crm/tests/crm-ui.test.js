@@ -186,6 +186,10 @@ test("siteJobPayload: trims, empty -> null, closes_at -> ISO, apply_mode built; 
   assert.deepEqual(U.siteJobPayload({ ...form, closes_at: "not a date" }), { ok: false, error: "closes_at" });
   // a long title is rejected client side with the server's limit
   assert.deepEqual(U.siteJobPayload({ ...form, title: "x".repeat(161) }), { ok: false, error: "title_long" });
+  // evidence_note allows 1000 characters (other short fields stay at 160)
+  assert.equal(U.siteJobPayload({ ...form, evidence_note: "e".repeat(1000) }).ok, true);
+  assert.deepEqual(U.siteJobPayload({ ...form, evidence_note: "e".repeat(1001) }), { ok: false, error: "evidence_note_long" });
+  assert.deepEqual(U.siteJobPayload({ ...form, city: "c".repeat(161) }), { ok: false, error: "city_long" });
   // datetime-local round trip
   assert.equal(U.toLocalInput(new Date("2031-05-06T07:08").toISOString()), "2031-05-06T07:08");
   assert.equal(U.toLocalInput(null), "");

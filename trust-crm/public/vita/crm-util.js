@@ -12,7 +12,7 @@
   var APPLY_MODES = ["contact_staff", "register"];
   var EVENTS = ["note", "status_changed", "assigned", "converted", "created_from_lead", "stage_changed", "created", "updated", "published", "closed"];
   var NOTE_MAX = 4000;
-  var SITE_MAX = { title: 160, description: 8000, requirements: 4000 };
+  var SITE_MAX = { title: 160, description: 8000, requirements: 4000, evidence_note: 1000 };
   var SITE_TEXT_FIELDS = ["title", "employer_name", "country", "city", "category", "description", "requirements", "language_requirements", "employment_type", "salary_text", "evidence_note"];
   var PUBLISH_REQUIRED = ["title", "country", "description", "evidence_note"];
 

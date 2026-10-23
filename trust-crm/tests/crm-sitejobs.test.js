@@ -85,7 +85,7 @@ test("create draft: validation, caps, text verbatim, created_by, timeline + audi
       w.full({ requirements: "x".repeat(4001) }),
       w.full({ country: "x".repeat(161) }),
       w.full({ city: "x".repeat(161) }),
-      w.full({ evidence_note: "x".repeat(161) }),
+      w.full({ evidence_note: "x".repeat(1001) }),
       w.full({ title: "a\u0000b" }),
       w.full({ apply_mode: "carrier_pigeon" }),
       w.full({ apply_mode: "javascript:alert(1)" }),
@@ -273,5 +273,18 @@ test("apply_mode: keywords and http(s) URLs accepted", async () => {
     for (const m of ["contact_staff", "register", "http://a.test/x", "https://a.test/x", null]) {
       assert.equal((await w.http("POST", "/crm/site-jobs", w.T.admin, w.full({ apply_mode: m }))).status, 201, String(m));
     }
+  });
+});
+
+test("evidence_note allows up to 1000 characters; other short text fields stay capped at 160", async () => {
+  await withWorld(async (w) => {
+    const ok = await w.http("POST", "/crm/site-jobs", w.T.admin, w.full({ evidence_note: "e".repeat(1000) }));
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.equal(ok.body.evidence_note.length, 1000);
+    assert.equal((await w.http("POST", "/crm/site-jobs", w.T.admin, w.full({ evidence_note: "e".repeat(1001) }))).status, 400);
+    assert.equal((await w.http("PATCH", `/crm/site-jobs/${ok.body.id}`, w.T.admin, { evidence_note: "e".repeat(1001) })).status, 400);
+    assert.equal((await w.http("PATCH", `/crm/site-jobs/${ok.body.id}`, w.T.admin, { evidence_note: "f".repeat(161) })).status, 200);
+    assert.equal((await w.http("POST", "/crm/site-jobs", w.T.admin, w.full({ city: "c".repeat(161) }))).status, 400);
+    assert.equal((await w.http("POST", "/crm/site-jobs", w.T.admin, w.full({ salary_text: "s".repeat(161) }))).status, 400);
   });
 });
