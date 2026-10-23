@@ -924,3 +924,42 @@ test("duplicate minors: other app in needs_staff blocks; employer missing on one
   assert.equal(r.code, "duplicate_submission");
   assert.equal(r.handoff, "staff_review");
 });
+
+// ---------------------------------------------------------------- fix round 2
+
+test("handoff corpus round 2 (reviewer probes): positives flagged with the right reason, duty/wage/benefit text not flagged", () => {
+  assert.ok(PHRASES.POS2.length >= 60 && PHRASES.NEG2.length >= 80);
+  for (const [text, reason] of PHRASES.POS2) {
+    const r = guard.detectHandoff({ description_text: text }, {});
+    assert.ok(r, `not flagged: ${text}`);
+    assert.equal(r.reason, reason, `${text} -> ${r.source}`);
+  }
+  for (const text of PHRASES.NEG2) {
+    const r = guard.detectHandoff({ description_text: text }, {});
+    assert.equal(r, null, `false positive: ${text} -> ${r && `${r.reason} ${r.source}`}`);
+  }
+  // Multi-item requests: every item must be held by the preferences.
+  const t = "Applicants must state their expected salary and notice period.";
+  assert.equal(guard.detectHandoff({ description_text: t }, { salary_min: 1000 }).reason, "custom_questions", "notice period not held");
+  assert.equal(guard.detectHandoff({ description_text: t }, { salary_min: 1000, availability: "2 weeks" }), null);
+  // A whole ordinary ad with duty text ("sign for deliveries", "fill out inventory forms", "process customer payments").
+  const ad = "Cashier — Acme Market. We pay competitive wages: $19.50-$23/hour. Duties: process customer payments, handle cash, sign for deliveries, fill out inventory forms. Benefits: medical, dental, paid vacation, signing bonus. Fees paid by employer. No account needed — email your resume and cover letter to jobs@acme.com. Please include your availability.";
+  assert.equal(guard.detectHandoff({ description_text: ad }, {}).reason, "custom_questions");
+  assert.equal(guard.detectHandoff({ description_text: ad }, { availability: "now" }), null);
+});
+
+test("long ads: head + tail + keyword windows of the middle are scanned; 200k-char inputs stay linear", () => {
+  const filler = (n) => "We are a friendly team in a busy warehouse. ".repeat(Math.ceil(n / 44)).slice(0, n);
+  assert.equal(guard.detectHandoff({ description_text: `${filler(25000)}Pay $200 to secure your placement.` }).reason, "payment", "beyond the old 20k cut-off");
+  assert.equal(guard.detectHandoff({ description_text: `${filler(60000)} Pay $200 to secure your placement. ${filler(60000)}` }).reason, "payment", "middle of a 120k ad");
+  assert.equal(guard.detectHandoff({ description_text: `${filler(60000)} Please confirm you are not a robot. ${filler(60000)}` }).reason, "captcha");
+  assert.equal(guard.detectHandoff({ description_text: `${filler(60000)} Je déclare sur l'honneur l'exactitude. ${filler(60000)}` }).reason, "legal_declaration");
+  assert.equal(guard.detectHandoff({ description_text: `${filler(100000)} Apply via our website only.` }).reason, "unsupported_channel", "tail");
+  assert.equal(guard.detectHandoff({ description_text: filler(150000) }), null);
+  for (const unit of ["pay ", "a a a $1 ", "no ", "sign ", "we pay ", "x. ", "1,", "$ ", "fee ", "sign the ", "send $1 ", "-", "please state your ", "reglement de "]) {
+    const text = unit.repeat(Math.ceil(200000 / unit.length));
+    const t0 = Date.now();
+    guard.detectHandoff({ description_text: text });
+    assert.ok(Date.now() - t0 < 2000, `${JSON.stringify(unit)} took ${Date.now() - t0} ms`);
+  }
+});
