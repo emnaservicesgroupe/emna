@@ -1451,12 +1451,19 @@
     return h("div", { class: "field" }, h("label", { for: id, text: t(labelKey) }), input, hintKey ? h("span", { class: "hint", text: t(hintKey) }) : null);
   }
   function initDirectory() {
-    $("#directory-refresh").addEventListener("click", loadDirectory);
+    $("#directory-refresh").addEventListener("click", function () {
+      // explicit refresh: rebuild the forms too (e.g. a candidate list loaded since)
+      dirForms = { manual: false, confirm: false, rules: false };
+      ["#manual-box", "#confirm-box", "#rules-box", "#emp-list"].forEach(function (sel) { V.clear($(sel)); });
+      loadDirectory();
+    });
     $("#emp-search").addEventListener("submit", function (e) { e.preventDefault(); loadEmployers(); });
   }
+  /** Called on tab open AND on every live refresh: forms are built once (typing is never wiped), lists are reloaded. */
+  var dirForms = { manual: false, confirm: false, rules: false };
   function loadDirectory() {
-    loadEmployers();
-    renderManualImport();
+    if (!$("#emp-list form")) loadEmployers(); // never wipe an open edit form
+    if (!dirForms.manual) { dirForms.manual = true; renderManualImport(); }
     $("#confirm-card").hidden = !isAdmin();
     $("#rules-card").hidden = !isAdmin();
     if (isAdmin()) { loadConfirmations(); loadRules(); }
@@ -1564,15 +1571,18 @@
     V.setContent(box, form);
   }
 
-  function loadConfirmations() {
+  function loadConfirmations(rebuildForm) {
     var box = $("#confirm-box");
-    V.setContent(box, V.loading());
-    Promise.all([
-      V.api("GET", "/jobsearch/employer-confirmations"),
-      V.api("GET", "/jobsearch/applications" + qs({ pageSize: 100 })),
-    ]).then(function (r) {
-      V.setContent(box, confirmationForm(r[1].applications), confirmationList(r[0].confirmations));
-    }).catch(function (err) { V.setContent(box, errorBox(err)); });
+    if (!box.firstChild) V.setContent(box, h("div", { id: "confirm-form-box" }), h("div", { id: "confirm-list-box" }, V.loading()));
+    if (rebuildForm || !dirForms.confirm) {
+      dirForms.confirm = true;
+      V.api("GET", "/jobsearch/applications" + qs({ pageSize: 100 })).then(function (r) {
+        V.setContent($("#confirm-form-box"), confirmationForm(r.applications));
+      }).catch(function (err) { dirForms.confirm = false; V.setContent($("#confirm-form-box"), errorBox(err)); });
+    }
+    V.api("GET", "/jobsearch/employer-confirmations").then(function (r) {
+      V.setContent($("#confirm-list-box"), confirmationList(r.confirmations));
+    }).catch(function (err) { V.setContent($("#confirm-list-box"), errorBox(err)); });
   }
 
   function confirmationForm(apps) {
@@ -1607,7 +1617,7 @@
         V.busy(b, function () {
           return V.api("POST", "/jobsearch/employer-confirmations", { body: payload }).then(function () {
             V.toast(t("conf.recorded"), "ok");
-            loadConfirmations();
+            loadConfirmations(true);
           });
         }).catch(function () {});
       });
@@ -1640,12 +1650,16 @@
   }
 
   var RULE_TYPES = ["auto_submit", "ack_reply"];
-  function loadRules() {
+  function loadRules(rebuildForm) {
     var box = $("#rules-box");
-    V.setContent(box, V.loading());
+    if (!box.firstChild) V.setContent(box, h("div", { id: "rules-form-box" }), h("div", { id: "rules-list-box" }, V.loading()));
+    if (rebuildForm || !dirForms.rules) {
+      dirForms.rules = true;
+      V.setContent($("#rules-form-box"), rulesForm());
+    }
     V.api("GET", "/jobsearch/automation-rules").then(function (r) {
-      V.setContent(box, rulesForm(), rulesList(r.rules));
-    }).catch(function (err) { V.setContent(box, errorBox(err)); });
+      V.setContent($("#rules-list-box"), rulesList(r.rules));
+    }).catch(function (err) { V.setContent($("#rules-list-box"), errorBox(err)); });
   }
 
   function rulesForm() {
@@ -1687,7 +1701,7 @@
       if (note.value.trim()) payload.note = note.value.trim();
       V.confirmDialog(t("rules.createConfirm"), t("rules.create")).then(function (ok) {
         if (!ok) return;
-        V.busy(b, function () { return V.api("POST", "/jobsearch/automation-rules", { body: payload }).then(function () { V.toast(t("rules.created"), "ok"); loadRules(); }); }).catch(function () {});
+        V.busy(b, function () { return V.api("POST", "/jobsearch/automation-rules", { body: payload }).then(function () { V.toast(t("rules.created"), "ok"); loadRules(true); }); }).catch(function () {});
       });
     });
     return form;

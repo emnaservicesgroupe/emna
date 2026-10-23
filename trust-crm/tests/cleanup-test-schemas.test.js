@@ -28,8 +28,10 @@ test("drops t_* schemas older than 1 h (by schema_migrations.applied_at) and hal
       await admin.query(`CREATE TABLE "${s}".schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
       await admin.query(`INSERT INTO "${s}".schema_migrations (name, applied_at) VALUES ('001.sql', now() - $1::interval)`, [age]);
     }
-    const r = await cleanupTestSchemas({ connectionString: URL });
+    // wait: other test processes run the same cleanup at start-up (advisory lock); never skip here
+    const r = await cleanupTestSchemas({ connectionString: URL, wait: true });
     assert.match(r.database, /test/);
+    assert.equal(r.skipped, undefined);
     const left = new Set((await admin.query("SELECT nspname FROM pg_namespace WHERE nspname = ANY($1)", [[old, fresh, deadHalf, liveHalf, foreign, odd]])).rows.map((x) => x.nspname));
     assert.ok(!left.has(old), "old schema dropped");
     assert.ok(!left.has(deadHalf), "half-created schema of a dead pid dropped");

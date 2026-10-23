@@ -20,7 +20,7 @@ on the code needs to see them.
 | Reading a mailbox (IMAP) | Not built | — | Use the inbound webhook |
 | Inbound mail webhook + bridge | Code ready, bridge not set up | A bridge (forwarding / inbound-parse service) and a shared secret | No employer replies are seen |
 | Delivery receipts | Code ready, bridge not set up | Provider delivery events sent to the webhook | Submissions stay "sent — awaiting confirmation" unless staff confirm |
-| ClamAV malware scan | Requires setup | A clamd server | Every CV shows "scan unavailable" and is still usable |
+| ClamAV malware scan | Requires setup | A clamd server | Every CV shows "Not scanned" and is **not attached** to applications (unless `ALLOW_UNSCANNED_ATTACHMENTS=true`) |
 | AI model (LLM) key | Not built | — | Rule-based extraction and template letters only |
 | WhatsApp / Meta | Out of scope | — | — |
 | External calendar (Google, Outlook) | Not built | — | Internal interview appointments only |
@@ -68,7 +68,8 @@ If a feed URL contains an access key, treat the whole URL as a secret.
 
 ### Manual import (`manual_import`)
 
-Works now. Staff with `jobsearch:write` add a vacancy in the admin console or with
+Works now. Staff with `jobsearch:write` add a vacancy in the admin console ("Employers & rules" → "Add a
+job manually"; the link must be https) or with
 `POST /jobsearch/jobs/manual` (`title` and `employerName` required; `url`, `location`, `country`,
 `publishedAt`, `closingAt`, `description` optional). Text is sanitized and stored as data. Staff should
 only enter vacancies they found through a legitimate channel, and keep the original URL.
@@ -85,11 +86,12 @@ Exists only when `NODE_ENV=test`. It is never registered on a real server.
 |---|---|
 | File | `modules/jobsearch/mail/imapSmtp.js` |
 | Status today | Sandbox in use (`MAIL_PROVIDER` unset). The SMTP adapter reports `requires_setup`. |
-| Owner provides | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS`, `MAIL_FROM`, `MAIL_REPLY_TO`; and, in this build, `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS` (checked but not used). Then `MAIL_REAL_SEND=true`. |
+| Owner provides | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS`, `MAIL_FROM`, `MAIL_REPLY_TO`. Then `MAIL_REAL_SEND=true`. The `MAIL_IMAP_*` variables are not needed (since Task 18). |
+| Status shown | Health: outbound `connected` only when the SMTP settings are valid and `MAIL_REAL_SEND=true` (configuration check, not a live connection test); inbound `webhook` when `INBOUND_MAIL_SECRET` is set, else `requires_setup`. |
 | Suitable accounts | A mailbox on your own domain at your mail host (e.g. a Hostinger mailbox, Google Workspace, or a transactional provider's SMTP relay). Use an app password if the provider offers one. Configure SPF, DKIM and DMARC for the domain. |
 | Not supported | OAuth sign-in (Gmail/Microsoft OAuth) is not implemented; SMTP with a password or app password only. |
 | Until then | Nothing leaves the server. Candidate sign-in codes and applications are recorded in `js_sandbox_mail` only. |
-| Tested? | Only the sandbox and the "refuses to send unless `MAIL_REAL_SEND=true`" path. **No real e-mail has been sent.** |
+| Tested? | The sandbox, the "refuses to send unless `MAIL_REAL_SEND=true`" path, and a send through a **local fake SMTP server** with only the SMTP settings (`tests/js-mail.test.js` "Task 18 imapSmtp: real sending needs ONLY the SMTP settings…"). **No real e-mail has been sent.** |
 
 Supported submission channel: **e-mail only**. Automatic mode sends only to the employer's verified
 contact address or an address at its verified domain. With human approval, the single address named in the
@@ -129,8 +131,8 @@ provider delivery notifications, because `action: "delivered"` confirms a submis
 | File | `modules/jobsearch/scan.js` |
 | Status today | Not configured: every upload is `scan_unavailable` |
 | Owner provides | A clamd daemon reachable over TCP (`CLAMAV_HOST`, `CLAMAV_PORT` default 3310), e.g. the `clamav-daemon` package on the same server listening on 127.0.0.1, with signature updates (`freshclam`) running |
-| Behaviour | `clean` → stored; `infected` → refused (422) and audited; scanner unreachable → `scan_unavailable`, stored, shown honestly |
-| Risk until then | CVs that were never scanned can be attached to applications |
+| Behaviour | `clean` → stored; `infected` → refused (422) and audited; scanner unreachable → `scan_unavailable`, stored, shown as "Not scanned" |
+| Until then | Unscanned CVs are **not attached** to any application: preparation, approval and the pre-send check stop with `attachment_unscanned`. `ALLOW_UNSCANNED_ATTACHMENTS=true` (exactly) lets them through; only set it if you accept forwarding unscanned files. Setup steps: SETUP.md section 8.1. |
 | Tested? | With a fake scanner only |
 
 ## AI model (LLM) key

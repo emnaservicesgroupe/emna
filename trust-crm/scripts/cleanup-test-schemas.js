@@ -35,7 +35,8 @@ function pidAlive(pid) {
 }
 
 /**
- * @param {{connectionString?: string, maxAgeMs?: number, log?: (msg: string) => void}} [opts]
+ * @param {{connectionString?: string, maxAgeMs?: number, wait?: boolean, log?: (msg: string) => void}} [opts]
+ *   wait: block until another cleanup finishes instead of skipping (the test helper skips)
  * @returns {Promise<{database: string, dropped: string[], kept: number, skipped?: string}>}
  */
 async function cleanupTestSchemas(opts = {}) {
@@ -47,8 +48,10 @@ async function cleanupTestSchemas(opts = {}) {
   try {
     const database = (await client.query("SELECT current_database() AS d")).rows[0].d;
     assertTestDatabase(database);
-    const locked = (await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS ok", [LOCK_KEY])).rows[0].ok;
-    if (!locked) return { database, dropped: [], kept: 0, skipped: "another cleanup is running" };
+    if (opts.wait === true) await client.query("SELECT pg_advisory_lock(hashtext($1))", [LOCK_KEY]);
+    else if (!(await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS ok", [LOCK_KEY])).rows[0].ok) {
+      return { database, dropped: [], kept: 0, skipped: "another cleanup is running" };
+    }
     try {
       const schemas = (await client.query("SELECT nspname FROM pg_namespace WHERE nspname LIKE 't\\_%' ORDER BY nspname")).rows.map((r) => r.nspname);
       const dropped = [];

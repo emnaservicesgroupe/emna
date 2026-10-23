@@ -14,7 +14,8 @@ jobs are those staff enter by hand, and no e-mail actually leaves the server.
 
 - Admin console: `https://YOUR-HOST/vita/admin.html` (log in with your staff e-mail and password).
 - Tabs: **Dashboard**, **Applications**, **Review**, **Interviews**, **Sources**, **Settings**,
-  **Reports**, **Health**, **Scheduler**.
+  **Reports**, **Health**, **Scheduler**, **Employers & rules** (employer directory, manual job import,
+  employer-support confirmations and automation rules).
 - You only see candidates assigned to you. Admins see everyone. Accountant and HR roles have no access to
   this module.
 - The page refreshes itself when something changes ("Live updates on"). If in doubt, press Refresh.
@@ -30,8 +31,11 @@ jobs are those staff enter by hand, and no e-mail actually leaves the server.
    country of residence, whether they need work-permit support).
 5. **Consent.** The candidate chooses what VITA may do: **search**, **prepare** applications, and
    **submit** applications. Each can be withdrawn at any time.
-6. **CV approval.** The candidate or a manager approves the CV version and its language. (No button yet:
-   use `POST /jobsearch/cv-files/:id/approve` with `{ "language": "en" }`.)
+6. **CV approval.** The candidate approves the CV version and its language in the portal (step 1: "Approve
+   this version for applications"). A manager or admin can do it for the candidate in the application
+   drawer ("CV versions"), only with a note saying who asked, when and how. Approving changes nothing in
+   the file: VITA attaches that exact version. A CV marked "Not scanned" (no malware scanner connected) is
+   not attached until an administrator connects scanning or explicitly allows unscanned files.
 7. **Search and matching.** The scheduler searches connected sources and staff-entered vacancies, and
    scores each open job. Each match shows reasons, missing items and uncertain items.
 8. **Preparation.** In "prepare" or "automatic" mode, good matches (score 60+) become applications with a
@@ -56,7 +60,7 @@ Only an admin can choose automatic mode or change caps. Caps of 0 mean no automa
 | Status (as shown) | Meaning | What you do |
 |---|---|---|
 | Matched | A job fits the profile. No application yet. | Nothing, or open an application. |
-| Preparing | The letter and documents are being put together, or something is missing. | Check the notes (e.g. no approved CV, sensitive document not authorized). |
+| Preparing | The letter and documents are being put together, or something is missing. | Check the notes (e.g. no approved CV, CV not scanned, sensitive document not authorized). Fix it, then press **Prepare** again. |
 | Ready for review | Prepared and waiting for a human decision. | Manager/Admin: read the job, the label and quoted text, the documents and **where it will be sent**; then approve, reject or cancel. |
 | Approved | A person (or the automatic rules) approved it. | Queue it (Manager/Admin). |
 | Queued | Waiting for the sender. | Nothing. It is checked again just before sending. |
@@ -121,6 +125,12 @@ document and sends the application back to preparing.
 - **Search now** queues a search; results appear after the next worker run.
 - Health shows failing sources, the queue and stuck items. Reports and CSV exports show only your
   candidates.
+- **Employers & rules**: search the employer directory; admins (and managers, for employers of their
+  candidates) set an employer's verified domain and contact address, which decide where automatic sends may
+  go. Any staff member with write access can add a job by hand (https links only). Admins record
+  employer-support confirmations (for this job only, or for every job of the employer, with the evidence)
+  and revoke them, and create or disable automation rules.
+- Your session lasts 12 hours. If an admin suspends your account, it ends at once.
 
 ---
 

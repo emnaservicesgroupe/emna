@@ -48,6 +48,7 @@ the meaning, the default, whether the value is a secret, and whether production 
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Postgres connection when `DATABASE_URL` is unset | see `.env.example` | `DB_PASSWORD` yes | yes (or `DATABASE_URL`) |
 | `TEST_DATABASE_URL` | Used by tests **and preferred by `db.js` over `DATABASE_URL`** | unset | yes | **must be unset in production** |
 | `JWT_SECRET` | Signs staff and candidate login tokens. Also the fallback for `JOBSEARCH_REPLY_SECRET`. | placeholder | **yes** | yes (long random value, new for this server) |
+| `JWT_EXPIRES_IN` | Lifetime of staff tokens from `/auth/login`: seconds, or a number with `s`/`m`/`h`/`d` (e.g. `12h`, `7d`). An invalid value falls back to the default. | `12h` (was `7d` before Task 18) | no | no (set `7d` only to keep the old lifetime) |
 | `TRUST_PROXY` | Behind an HTTPS reverse proxy: proxy hop count (usually `1`) or an address list such as `loopback`. `true` is refused. | unset | no | yes when behind a proxy |
 
 ### Storage and CV upload
@@ -60,7 +61,8 @@ the meaning, the default, whether the value is a secret, and whether production 
 | `JS_UPLOADS_PER_HOUR` | Max CV uploads per user per hour | `20` | no | no |
 | `EXTRACT_TIMEOUT_MS` | CV text-extraction timeout | `10000` | no | no |
 | `MAX_UNCOMPRESSED_MB` | Max total uncompressed size of a DOCX (zip-bomb guard) | `50` | no | no |
-| `CLAMAV_HOST`, `CLAMAV_PORT`, `CLAMAV_TIMEOUT_MS` | clamd INSTREAM over TCP. Unset = every upload is `scan_unavailable`. | unset, `3310`, `10000` | no | strongly recommended |
+| `CLAMAV_HOST`, `CLAMAV_PORT`, `CLAMAV_TIMEOUT_MS` | clamd INSTREAM over TCP. Unset (or unreachable) = every upload is `scan_unavailable`. | unset, `3310`, `10000` | no | **yes** (unscanned CVs are not attached by default) |
+| `ALLOW_UNSCANNED_ATTACHMENTS` | Exactly `true` = CVs marked `scan_unavailable` may be attached to applications. Anything else (default) = they are blocked with `attachment_unscanned` (preparation, approval and the pre-send check). `infected` is always blocked. | unset (= blocked) | no | leave unset; connect ClamAV instead (section 8.1) |
 
 ### Mail (outgoing)
 
@@ -68,11 +70,11 @@ the meaning, the default, whether the value is a secret, and whether production 
 |---|---|---|---|---|
 | `MAIL_PROVIDER` | `sandbox` (records mail in the database, sends nothing) or `imap_smtp` | `sandbox` | no | `imap_smtp` for real mail |
 | `MAIL_SANDBOX_ALLOWLIST` | Sandbox only: recipients it accepts (comma list, `*` wildcards) | `*@test.invalid` | no | no |
-| `MAIL_REAL_SEND` | Must be exactly `true` for `imap_smtp` to send | `false` | no | `true` only when you are ready |
+| `MAIL_REAL_SEND` | Must be exactly `true` for `imap_smtp` to send. Health shows outbound `connected` only when the SMTP settings are valid **and** this is `true` (it does not test the connection). | `false` | no | `true` only when you are ready |
 | `MAIL_FROM` | From address | SMTP user | no | yes for real mail |
 | `MAIL_REPLY_TO` | Reply-To mailbox; plus-addressed with a reply token | `MAIL_FROM` | no | recommended |
 | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` | SMTP account (port 465 = TLS, otherwise STARTTLS) | unset, `587` | `MAIL_SMTP_PASS` **yes** | yes for real mail |
-| `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS` | Not used for reading (IMAP is not implemented), **but the SMTP adapter refuses to send unless all three are set** | unset | `MAIL_IMAP_PASS` yes | yes for real mail (current build) |
+| `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS` | **Not used.** IMAP polling is not implemented; replies arrive through the webhook (10.2). Since Task 18 sending no longer needs them. | unset | `MAIL_IMAP_PASS` yes | no |
 | `JOBSEARCH_REPLY_SECRET` | HMAC key for the `[VITA-…]` reply token | `JWT_SECRET` | **yes** | recommended (separate from `JWT_SECRET`) |
 
 ### Mail (incoming webhook)
@@ -85,7 +87,7 @@ the meaning, the default, whether the value is a secret, and whether production 
 | `INBOUND_AUTH_REQUIRED` | `true`: a message without DKIM/DMARC results is never matched automatically | `true` outside tests | no | keep `true` |
 | `INBOUND_AUTHSERV_ID` | Only trust Authentication-Results from this server id (e.g. `mx.example.com`) | unset | no | recommended |
 | `INBOUND_BOUNCE_DOMAINS` | Domains whose MAILER-DAEMON/postmaster bounces open a staff task | `MAIL_FROM` domain | no | no |
-| `INBOUND_AUTO_ACK_EVIDENCE` | `true` = record employer acknowledgements as evidence automatically. **Risk-accepting** (see CHECKLIST limitation 2). | `false` | no | keep `false` |
+| `INBOUND_AUTO_ACK_EVIDENCE` | `true` = record employer acknowledgements as evidence automatically. **Risk-accepting** (see CHECKLIST limitation 1). | `false` | no | keep `false` |
 | `JOBSEARCH_INBOX_REVIEWER_ID` | User id that receives unmatched-reply tasks | first active Admin | no | no |
 
 ### Sources and matching
@@ -213,7 +215,9 @@ with `bootstrap.json` (create it on the server, delete it afterwards):
 { "full_name": "Mohamed Aloui", "email": "alouimohamed19840@gmail.com", "password": "<choose it yourself>" }
 ```
 
-Password guidance (the endpoint does **not** check strength, so this is up to you):
+The endpoint (and `/auth/register`) refuses a password shorter than 12 characters, one on a small list of
+common passwords, or one that contains the part of the e-mail address before `@`, with a clear 400 error.
+That is a floor, not a recommendation:
 
 - At least 16 characters; a passphrase of 4–5 unrelated words, or a password manager's random password.
 - Not used on any other site; never sent in chat or e-mail.
@@ -227,10 +231,17 @@ Log in:
 
 ```bash
 curl -sS -X POST https://YOUR-HOST/auth/login -H 'Content-Type: application/json' --data @login.json
-# -> {"token": "...", "role": "SuperAdmin", ...}   token valid 7 days
+# -> {"token": "...", "role": "SuperAdmin", ...}   token valid 12 hours (JWT_EXPIRES_IN)
 ```
 
 The admin console is at `https://YOUR-HOST/vita/admin.html` and uses the same login.
+
+Staff tokens carry a version claim (`tv`, from `users.token_version`): every request re-checks that the
+user is still active and has the same role and version. Suspending a user
+(`POST /jobsearch/admin/users/:id/suspend`) bumps the version, so that user's tokens stop working on the
+next request; reinstating does not revive old tokens. **Upgrade note:** tokens issued before this change
+have no `tv` and keep working until they expire (at most 7 days after they were issued). To end them at
+once, rotate `JWT_SECRET` (this signs everybody out, candidates included).
 
 ## 6. Staff and candidate accounts
 
@@ -244,7 +255,8 @@ POST /auth/register
 { "full_name": "…", "email": "…", "password": "…", "role": "Manager" }
 ```
 
-Do not create role `Candidate` here (see CHECKLIST limitation 4).
+The password rules of section 5 apply. Role `Candidate` is refused here (400): candidate logins are created
+only with `POST /jobsearch/admin/candidate-accounts` (below), which links them to a CRM candidate.
 
 Who can do what in the job-search module:
 
@@ -275,8 +287,12 @@ Who can do what in the job-search module:
 
 Creating an account grants nothing. The candidate still has to upload a CV, confirm the profile and
 preferences, and give consent. Before any application can be prepared, a CV version must also be
-approved with its language (`POST /jobsearch/cv-files/:id/approve { "language": "en" }`; the CV file id is
-in `GET /jobsearch/candidates/:id/profile`). There is no button for this yet.
+approved with its language. The candidate does it in the portal (step 1, "Approve this version for
+applications", language en/fr/ar or another 2-letter code). A Manager or Admin can do it for the candidate
+in the staff console (application drawer → "CV versions"), but only with a note of at least 10 characters
+saying who asked, when and how; the note is stored in the audit trail. API:
+`POST /jobsearch/cv-files/:id/approve { "language": "en" }` (candidate) or
+`{ "language": "en", "note": "…" }` (staff).
 
 ## 7. Starting the server, workers and scheduler
 
@@ -329,6 +345,32 @@ WantedBy=multi-user.target
 - CRM documents referenced by the existing `/documents` routes are separate (metadata with a `file_path`).
 - Back up `STORAGE_DIR` together with the database (section 11): rows point to files by hash.
 
+### 8.1 Malware scanning (ClamAV)
+
+Every upload is scanned when `CLAMAV_HOST` points to a `clamd` daemon (INSTREAM over TCP). Results:
+`clean`, `infected` (the upload is refused with 422 and not stored) or `scan_unavailable` (no scanner, or it
+did not answer in `CLAMAV_TIMEOUT_MS`).
+
+**Policy (Task 18):** a CV marked `scan_unavailable` is kept and shown as "Not scanned", but it is **not
+attached to any application** unless an administrator explicitly sets `ALLOW_UNSCANNED_ATTACHMENTS=true`.
+Preparation stops with the blocked reason `attachment_unscanned`, approval refuses, and the pre-send check
+fails with the code `attachment_unscanned`. The portal and the staff drawer say "Not scanned — an
+administrator must enable scanning or explicitly allow unscanned files". The Health tab shows the setting.
+
+Set up ClamAV (Debian/Ubuntu):
+
+```bash
+sudo apt install clamav-daemon clamav-freshclam
+sudo systemctl enable --now clamav-freshclam clamav-daemon
+# make clamd listen on TCP localhost:3310 (in /etc/clamav/clamd.conf: TCPSocket 3310, TCPAddr 127.0.0.1),
+# then: sudo systemctl restart clamav-daemon
+```
+
+Then set `CLAMAV_HOST=127.0.0.1` (and `CLAMAV_PORT=3310`), restart the app, upload a test CV and check that
+it shows "Clean". Files uploaded before ClamAV was connected stay `scan_unavailable`; ask the candidate to
+upload them again (a new version is scanned). Only set `ALLOW_UNSCANNED_ATTACHMENTS=true` if you knowingly
+accept forwarding files nobody scanned.
+
 ## 9. HTTPS and reverse proxy
 
 Run the app behind an HTTPS reverse proxy (Caddy, nginx). Keep port 5000 closed to the internet.
@@ -363,11 +405,15 @@ allow-listed recipients. Nothing leaves the server.
 To send real mail, all of these must be true:
 
 1. `MAIL_PROVIDER=imap_smtp`
-2. `MAIL_SMTP_HOST`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` (and `MAIL_SMTP_PORT` if not 587) set
-3. `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS` set (current build checks them even though it
-   does not read the mailbox)
-4. `MAIL_REAL_SEND=true`
-5. `MAIL_FROM` set to an address of your domain with SPF, DKIM and DMARC configured at your mail host
+2. `MAIL_SMTP_HOST`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` (and `MAIL_SMTP_PORT` if not 587; it must be
+   1–65535) set. The `MAIL_IMAP_*` variables are **not** needed (since Task 18).
+3. `MAIL_REAL_SEND=true`
+4. `MAIL_FROM` set to an address of your domain with SPF, DKIM and DMARC configured at your mail host
+
+The Health tab shows the mail adapter: outbound `connected` only when the SMTP settings are valid and
+`MAIL_REAL_SEND=true` (this is a configuration check, not a live connection test); `configured_send_disabled`
+when only `MAIL_REAL_SEND` is missing; `not_configured` otherwise. Inbound shows `webhook` when
+`INBOUND_MAIL_SECRET` is set, else `requires_setup`. The overall status is `connected` only when both are.
 
 Test first with `MAIL_PROVIDER=sandbox` and a `MAIL_SANDBOX_ALLOWLIST` of your own test address, then
 switch to real sending with one candidate whose account e-mail is yours. The sandbox allow-list does **not**
@@ -477,7 +523,12 @@ of distinct `js_cv_files.storage_key` values.
 | Health (sources, queue, stuck items, tasks) | Health | `GET /jobsearch/health` (Manager, Admin) |
 | Reports / CSV export | Reports | `GET /jobsearch/reports`, `GET /jobsearch/export.csv?type=applications\|matches\|submissions\|messages\|tasks` |
 | Withdraw consent for a candidate | Portal (candidate) | `POST /jobsearch/candidates/:id/consent/withdraw` `{ "scopeKey": "submit" }` (`search`, `prepare`, `submit` or `all`) |
-| Suspend / reinstate a user | — | `POST /jobsearch/admin/users/:id/suspend` · `/reinstate` (admin) |
+| Suspend / reinstate a user (staff or candidate; ends their sessions) | — | `POST /jobsearch/admin/users/:id/suspend` · `/reinstate` (admin) |
+| Approve a CV version | Portal step 1 (candidate) · drawer "CV versions" (Manager/Admin, note required) | `POST /jobsearch/cv-files/:id/approve` |
+| Employer directory: verified domain / contact, name | Employers & rules (Admin; Manager for employers of their candidates) | `GET /jobsearch/employers?q=` · `PUT /jobsearch/employers/:id` `{ "domain", "verifiedContactEmail", "name" }` |
+| Add a job by hand | Employers & rules (staff with write access) | `POST /jobsearch/jobs/manual` |
+| Record / revoke employer-support confirmation | Employers & rules (Admin) | `POST /jobsearch/employer-confirmations` · `GET` (list) · `DELETE /jobsearch/employer-confirmations/:id` |
+| Automation rules | Employers & rules (Admin) | `GET /jobsearch/automation-rules` · `POST` · `DELETE /jobsearch/automation-rules/:id` (disables) |
 | Audit trail | — | `GET /audit-logs` (existing) and the `js_audit_events`, `js_timeline` tables |
 
 A pause **holds** work: queued sends go back to "approved" and are re-queued once on resume. Consent
@@ -501,10 +552,10 @@ This happens when the mail provider did not answer clearly (timeout, crash durin
    `POST /jobsearch/applications/:id/manual-completion { "note": "Re-sent by hand from …", "channel": "email", "recipient": "jobs@employer.example" }`
 5. If you cannot tell, leave it in "Needs staff" and contact the employer.
 
-### 12.3 Automatic mode (admin, SQL needed for two items)
+### 12.3 Automatic mode (admin)
 
-Automatic sending needs **all** of the following. Items 4 and 5 have no screen or API yet; an admin does
-them with SQL.
+Automatic sending needs **all** of the following. Since Task 18 every item has a screen ("Employers &
+rules" tab) and an API; no SQL is needed.
 
 1. Candidate consent includes `submit` (given by the candidate, or recorded by staff with evidence).
 2. An admin sets the candidate's settings (`PUT /jobsearch/candidates/:id/settings`):
@@ -512,19 +563,23 @@ them with SQL.
    `allowed_professions` / `allowed_sources`, and `approved_doc_versions` listing the CV versions that may
    be sent, e.g. `[{ "cvFileId": 12, "version": 2 }]`. Leave `salary_limit` null (a salary limit blocks
    automatic approval because job salaries cannot be verified).
-3. The candidate's CV version is approved with its language:
-   `POST /jobsearch/cv-files/:id/approve { "language": "en" }` (the candidate, a Manager or an Admin; there
-   is no button for this yet, and **every** mode needs it before an application can be prepared).
-4. An approved automation rule:
-   ```sql
-   INSERT INTO js_automation_rules (candidate_id, rule, approved_by, approved_at, active)
-   VALUES (123, '{"type":"auto_submit","countries":["Canada"]}', <admin user id>, now(), true);
+3. The candidate's CV version is approved with its language (portal step 1, or a Manager/Admin in the
+   drawer with a note; **every** mode needs it before an application can be prepared). It must be scanned
+   clean (section 8.1).
+4. An approved automation rule (Admin, "Employers & rules" → Automation rules, or
+   `POST /jobsearch/automation-rules`):
+   ```json
+   { "candidateId": 123, "type": "auto_submit", "countries": ["Canada"], "professions": ["Electrician"], "employerIds": [45], "note": "…" }
    ```
-5. The employer's verified domain or contact address (automatic sends go only there):
-   ```sql
-   UPDATE js_employers SET domain = 'employer.example', verified_contact_email = 'jobs@employer.example'
-    WHERE id = <employer id>;   -- verify the address with the employer first
-   ```
+   `countries` is required; `professions`, `sources` and `employerIds` narrow it further (every rule must
+   allow the job). `type: "ack_reply"` with `employerIds` enables automatic acknowledgement replies to those
+   employers. The rule is recorded with your user id; `DELETE /jobsearch/automation-rules/:id` disables it
+   (history is kept).
+5. The employer's verified domain or contact address (automatic sends go only there): "Employers & rules"
+   → Employer directory → Edit, or `PUT /jobsearch/employers/:id { "domain": "employer.example",
+   "verifiedContactEmail": "jobs@employer.example" }`. Verify the address with the employer first. Free-mail
+   domains, addresses, ports and IP addresses are refused as a domain; internationalised domains are stored
+   in their `xn--` form.
 6. For a candidate who needs work-permit support and applies outside their country of residence: an
    employer-support confirmation recorded by an admin with evidence (`POST /jobsearch/employer-confirmations`),
    and the ad must explicitly accept overseas applicants. Otherwise the application waits for human approval.
@@ -555,7 +610,10 @@ the `demo.*@test.invalid` users and all rows labelled DEMO before going live.
 - [ ] No demo seed data (section 13).
 - [ ] HTTPS only; port 5000 and Postgres (5432) closed to the internet by the firewall.
 - [ ] `TRUST_PROXY` set to match the proxy; rate limiting also at the proxy/gateway.
-- [ ] ClamAV connected (`CLAMAV_HOST`), and an upload checked to show "clean".
+- [ ] ClamAV connected (`CLAMAV_HOST`), and an upload checked to show "clean"; `ALLOW_UNSCANNED_ATTACHMENTS`
+      unset (section 8.1).
+- [ ] Every staff member logged in again after the upgrade (tokens issued before Task 18 cannot be revoked
+      until they expire), or `JWT_SECRET` rotated.
 - [ ] `STORAGE_DIR` private, backed up, restore tested (section 11.3).
 - [ ] Logs: the app does not log OTP codes or request bodies on `/jobsearch`, but your proxy may log URLs
       and headers. Do not log `Authorization` headers or request bodies at the proxy.
@@ -566,4 +624,4 @@ the `demo.*@test.invalid` users and all rows labelled DEMO before going live.
       candidate's data is deleted on request. Decide retention periods; the module does not delete data on
       a timer.
 - [ ] Decide whether the existing unscoped `/candidates` and `/documents` routes are acceptable for your
-      staff (CHECKLIST limitation 5).
+      staff (CHECKLIST limitation 2).

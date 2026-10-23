@@ -22,7 +22,8 @@
 //   J5 sensitive documents: candidate-only, application-specific authorization; revocation after approval.
 //   J6 isolation (staff X/Y, candidates A/B, Accountant/HR, unauthenticated) + prompt injection.
 //   J7 reports/dashboard/CSV from real records equal independent SQL; drill-down ids exist.
-//   J8 disclaimer + candidate-facing responses carry no staff-only fields.
+//   J8 disclaimer + candidate-facing responses (GET and every candidate-callable write) carry no staff-only fields.
+//   J9 web-only path (Task 18): only calls the portal/console make; CV version approved in the portal.
 //
 // NOT covered here (by design): real job sources (Job Bank / partner feeds over the network), real SMTP
 // sending, real IMAP polling (inbox.pollAndStore is webhook-only in production), DKIM/DMARC verification by
