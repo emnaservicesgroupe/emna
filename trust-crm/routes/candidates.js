@@ -72,7 +72,10 @@ router.put("/:id", verifyToken, checkPermission("candidates:write"), async (req,
       return res.status(403).json({ error: ASSIGN_DENIED });
     }
 
-    const updated = await candidateModel.updateCandidate(req.params.id, req.body);
+    // Task 20: the assigned_to check is repeated by the model under the row lock (a reassignment that
+    // committed after the read above is never overwritten and never compared with a stale snapshot).
+    const updated = await candidateModel.updateCandidate(req.params.id, req.body, { canAssign: canAssign(req.user) });
+    if (!updated) return res.status(404).json({ error: "Candidate not found" });
 
     await logAudit({
       userId: req.user.id,
@@ -85,6 +88,7 @@ router.put("/:id", verifyToken, checkPermission("candidates:write"), async (req,
 
     return res.json(updated);
   } catch (err) {
+    if (err && err.code === "ASSIGN_DENIED") return res.status(403).json({ error: ASSIGN_DENIED });
     return res.status(500).json({ error: err.message });
   }
 });

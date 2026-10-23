@@ -80,57 +80,84 @@ exports.getCandidateById = async (id) => {
   return result.rows[0] || null;
 };
 
-exports.updateCandidate = async (id, data) => {
-  const currentResult = await db.query("SELECT * FROM candidates WHERE id=$1 AND is_deleted=false", [id]);
-  if (!currentResult.rows.length) return null;
+/**
+ * Updates a candidate. null/undefined fields keep their current value.
+ *
+ * Task 20 (race fix): the row is read with SELECT ... FOR UPDATE inside a transaction, so a concurrent edit
+ * can never write back a stale value (e.g. a staff edit of other fields overwriting an admin's reassignment),
+ * and assigned_to is written as COALESCE($n, assigned_to) - a caller that does not send it never touches it.
+ * opts.canAssign === false: a CHANGE of assigned_to (compared with the LOCKED row) is refused with
+ * err.status 403 / err.code ASSIGN_DENIED and nothing is written.
+ */
+exports.updateCandidate = async (id, data, opts = {}) => {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const currentResult = await client.query("SELECT * FROM candidates WHERE id=$1 AND is_deleted=false FOR UPDATE", [id]);
+    if (!currentResult.rows.length) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    const current = currentResult.rows[0];
+    const wantedAssignee = data.assigned_to ?? null;
+    if (opts.canAssign === false && wantedAssignee !== null && String(wantedAssignee) !== String(current.assigned_to)) {
+      const err = new Error("Changing assigned_to requires the users:write permission (Admin or SuperAdmin)");
+      err.status = 403;
+      err.code = "ASSIGN_DENIED";
+      throw err;
+    }
+    const merged = {
+      full_name: data.full_name ?? current.full_name,
+      nationality: data.nationality ?? current.nationality,
+      date_of_birth: data.date_of_birth ?? current.date_of_birth,
+      passport_number: data.passport_number ?? current.passport_number,
+      passport_expiry: data.passport_expiry ?? current.passport_expiry,
+      b3_expiry: data.b3_expiry ?? current.b3_expiry,
+      embassy_date: data.embassy_date ?? current.embassy_date,
+      visa_status: data.visa_status ?? current.visa_status,
+      work_company: data.work_company ?? current.work_company,
+      partner_company: data.partner_company ?? current.partner_company,
+    };
 
-  const current = currentResult.rows[0];
-  const merged = {
-    full_name: data.full_name ?? current.full_name,
-    nationality: data.nationality ?? current.nationality,
-    date_of_birth: data.date_of_birth ?? current.date_of_birth,
-    passport_number: data.passport_number ?? current.passport_number,
-    passport_expiry: data.passport_expiry ?? current.passport_expiry,
-    b3_expiry: data.b3_expiry ?? current.b3_expiry,
-    embassy_date: data.embassy_date ?? current.embassy_date,
-    visa_status: data.visa_status ?? current.visa_status,
-    work_company: data.work_company ?? current.work_company,
-    partner_company: data.partner_company ?? current.partner_company,
-    assigned_to: data.assigned_to ?? current.assigned_to,
-  };
-
-  const result = await db.query(
-    `UPDATE candidates
-     SET full_name=$1,
-         nationality=$2,
-         date_of_birth=$3,
-         passport_number=$4,
-         passport_expiry=$5,
-         b3_expiry=$6,
-         embassy_date=$7,
-         visa_status=$8,
-         work_company=$9,
-         partner_company=$10,
-         assigned_to=$11,
-         updated_at=NOW()
-     WHERE id=$12 AND is_deleted=false
-     RETURNING *`,
-    [
-      merged.full_name,
-      merged.nationality,
-      merged.date_of_birth,
-      merged.passport_number,
-      merged.passport_expiry,
-      merged.b3_expiry,
-      merged.embassy_date,
-      merged.visa_status,
-      merged.work_company,
-      merged.partner_company,
-      merged.assigned_to,
-      id,
-    ]
-  );
-  return result.rows[0] || null;
+    const result = await client.query(
+      `UPDATE candidates
+       SET full_name=$1,
+           nationality=$2,
+           date_of_birth=$3,
+           passport_number=$4,
+           passport_expiry=$5,
+           b3_expiry=$6,
+           embassy_date=$7,
+           visa_status=$8,
+           work_company=$9,
+           partner_company=$10,
+           assigned_to=COALESCE($11, assigned_to),
+           updated_at=NOW()
+       WHERE id=$12 AND is_deleted=false
+       RETURNING *`,
+      [
+        merged.full_name,
+        merged.nationality,
+        merged.date_of_birth,
+        merged.passport_number,
+        merged.passport_expiry,
+        merged.b3_expiry,
+        merged.embassy_date,
+        merged.visa_status,
+        merged.work_company,
+        merged.partner_company,
+        wantedAssignee,
+        id,
+      ]
+    );
+    await client.query("COMMIT");
+    return result.rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 exports.softDeleteCandidate = async (id) => {
