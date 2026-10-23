@@ -5,6 +5,12 @@
 //   POST  /leads/:id/notes {text}                                  leads:write
 //   POST  /leads/:id/convert {passport_number, full_name?, nationality?, createPortalLogin}  leads:write + candidates:write (201, or 200 when already converted)
 //   PATCH /candidates/:id/stage {stage}                            candidates:write (+ CRM staff), scope via assertCandidateAccess
+//   GET   /site-jobs      ?status&limit&offset                     sitejobs:write -> {rows,total}
+//   GET   /site-jobs/:id                                           sitejobs:write (with timeline)
+//   POST  /site-jobs      {title,...}                              sitejobs:write (201, draft)
+//   PATCH /site-jobs/:id  {fields}                                 sitejobs:write (409 when closed)
+//   POST  /site-jobs/:id/publish                                   sitejobs:write (draft only; needs evidence_note, title, country, description, future closes_at)
+//   POST  /site-jobs/:id/close                                     sitejobs:write (published only; final)
 //   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
@@ -12,6 +18,7 @@ const { checkPermission } = require("../middleware/role");
 const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/errorHandler");
 const leads = require("../modules/crm/leadsAdmin");
 const convert = require("../modules/crm/convert");
+const siteJobs = require("../modules/crm/siteJobsAdmin");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -63,6 +70,14 @@ router.get(
   checkPermission("candidates:read"),
   asyncHandler(async (req, res) => res.json(await convert.getCandidateTimeline(req.user, req.params.id)))
 );
+
+const SJ = checkPermission("sitejobs:write");
+router.get("/site-jobs", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.listSiteJobs(req.user, req.query))));
+router.get("/site-jobs/:id", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.getSiteJob(req.user, req.params.id))));
+router.post("/site-jobs", SJ, asyncHandler(async (req, res) => res.status(201).json(await siteJobs.createSiteJob(req.user, body(req)))));
+router.patch("/site-jobs/:id", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.updateSiteJob(req.user, req.params.id, body(req)))));
+router.post("/site-jobs/:id/publish", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.publishSiteJob(req.user, req.params.id))));
+router.post("/site-jobs/:id/close", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.closeSiteJob(req.user, req.params.id))));
 
 router.use(jobsearchErrorHandler);
 

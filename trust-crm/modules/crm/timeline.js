@@ -1,5 +1,5 @@
 // Insert-only CRM timeline (notes and stage/status history). The DB trigger forbids UPDATE/DELETE.
-const ENTITIES = ["lead", "candidate", "employer"];
+const ENTITIES = ["lead", "candidate", "employer", "site_job"];
 
 /** Inserts one timeline row on `client` (the caller's transaction). */
 async function add(client, { entity, entityId, actorId = null, event, detail = null }) {
