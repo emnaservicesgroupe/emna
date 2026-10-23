@@ -456,6 +456,38 @@ test("two simultaneous approvals of the same application: exactly one succeeds",
   });
 });
 
+test("Task 19 I-4: candidates see fixed reason codes only (never staff free text); staff/admin still see the full reason", async () => {
+  await withApp(async (t) => {
+    const hostile = "candidate lied about experience";
+    const a = await t.readyApp();
+    assert.equal((await t.call("POST", `/jobsearch/applications/${a.appId}/reject`, { token: t.tok.admin, body: { reason: hostile } })).status, 200);
+    const b = await t.readyApp({ candidate: a.c, job: { employer: "Second Co" } });
+    assert.equal((await t.call("POST", `/jobsearch/applications/${b.appId}/cancel`, { token: t.tok.admin, body: { reason: "Not serious, ignore her" } })).status, 200);
+    const c = await t.readyApp({ candidate: a.c, job: { employer: "Third Co" } });
+    assert.equal((await t.call("POST", `/jobsearch/applications/${c.appId}/cancel`, { token: a.c.token, body: { reason: "I accepted another offer" } })).status, 200);
+    const d = await t.readyApp({ candidate: a.c, job: { employer: "Fourth Co" } });
+    // a staff reason shaped like a code is still not passed through
+    assert.equal((await t.call("POST", `/jobsearch/applications/${d.appId}/reject`, { token: t.tok.admin, body: { reason: "candidate_lied_about_experience" } })).status, 200);
+    // a hand-written note-bearing row (e.g. a future event) never reaches the candidate
+    await t.pool.query("INSERT INTO js_timeline (application_id, actor, event, detail) VALUES ($1,'staff:1','status_changed',$2::jsonb)", [a.appId, JSON.stringify({ from: "cancelled", to: "cancelled", reason: "Staff opinion: weak profile", note: "do not tell her", code: "Weak candidate" })]);
+    const expected = { [a.appId]: "reviewer_rejected", [b.appId]: "cancelled_by_staff", [c.appId]: "cancelled_by_candidate", [d.appId]: "reviewer_rejected" };
+    for (const [id, code] of Object.entries(expected)) {
+      const r = await t.call("GET", `/jobsearch/applications/${id}`, { token: a.c.token });
+      assert.equal(r.status, 200);
+      const text = JSON.stringify(r.body.timeline);
+      for (const bad of ["lied", "experience", "serious", "ignore", "another offer", "opinion", "weak", "Weak", "do not tell"]) assert.ok(!text.includes(bad), `${id}: candidate timeline leaks '${bad}': ${text}`);
+      const ev = r.body.timeline.find((e) => e.event === "review_rejected" || e.event === "cancelled");
+      assert.deepEqual(ev.detail, { from: "ready_for_review", to: "cancelled", reason: code }, id);
+      for (const e of r.body.timeline) {
+        assert.equal(e.detail.note, undefined);
+        if (e.detail.reason !== undefined) assert.match(e.detail.reason, /^[a-z][a-z0-9_]*(:[a-z0-9_]+)?$/);
+      }
+    }
+    const staff = await t.call("GET", `/jobsearch/applications/${a.appId}`, { token: t.tok.admin });
+    assert.ok(staff.body.timeline.some((e) => e.event === "review_rejected" && e.detail.reason === hostile), "staff keep the full reason");
+  });
+});
+
 test("reject and cancel record reasons; cancel stops pending queue work", async () => {
   await withApp(async (t) => {
     const a = await t.readyApp();

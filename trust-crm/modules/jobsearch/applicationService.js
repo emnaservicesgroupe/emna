@@ -802,17 +802,47 @@ async function listApplications({ user, query = {} }) {
   };
 }
 
-// Candidates see only neutral timeline fields: never recipients, message ids, provider text, hashes or document lists.
-const CANDIDATE_TIMELINE_KEYS = ["from", "to", "status", "reason", "code", "handoff", "kind", "note", "awaiting"];
+// Candidates see only neutral timeline fields: never recipients, message ids, provider text, hashes or document
+// lists, and (Task 19 I-4) never staff free text. `reason` is a fixed code: staff-authored reasons (reject,
+// cancel, approve) are replaced by a code for the event; any other reason passes only when it is a system code
+// (snake_case, optionally "prefix:code"). Free-text `note` is never shown to the candidate.
+const CANDIDATE_TIMELINE_KEYS = ["from", "to", "status", "code", "handoff", "kind", "awaiting"];
 const SAFE_VALUE = /^[\p{L}\p{N} _.,:;'()-]{0,200}$/u;
-function candidateTimelineDetail(detail) {
+const REASON_CODE = /^[a-z][a-z0-9_]{1,63}(?::[a-z][a-z0-9_]{0,63})?$/;
+const CODE_KEYS = new Set(["from", "to", "status", "code", "handoff", "kind"]);
+const BY_USER = /^(staff|candidate):\d+$/;
+
+/** The fixed, candidate-safe reason code for one timeline row (or null). */
+function candidateReasonCode(e) {
+  const d = (e && e.detail) || {};
+  const actor = String((e && e.actor) || "");
+  const raw = typeof d.reason === "string" ? d.reason : "";
+  if (e.event === "review_rejected") return "reviewer_rejected";
+  if (e.event === "cancelled") {
+    if (BY_USER.test(actor)) return actor.startsWith("candidate:") ? "cancelled_by_candidate" : "cancelled_by_staff";
+    if (/consent/.test(raw)) return "consent_withdrawn";
+    if (/suspend/.test(raw)) return "account_suspended";
+    if (/candidate_deleted/.test(raw)) return "candidate_deleted";
+    return "cancelled";
+  }
+  // Staff (or candidate) actions never carry their typed words to the candidate.
+  if (BY_USER.test(actor) && d.to === "approved") return "approved_by_reviewer";
+  if (BY_USER.test(actor) && d.to === "cancelled") return actor.startsWith("candidate:") ? "cancelled_by_candidate" : "cancelled_by_staff";
+  return REASON_CODE.test(raw) ? raw : null;
+}
+
+function candidateTimelineDetail(detail, e = { detail }) {
   if (!detail || typeof detail !== "object") return {};
   const out = {};
   for (const k of CANDIDATE_TIMELINE_KEYS) {
     const v = detail[k];
     if (v === null || v === undefined) continue;
-    if (typeof v === "string" && SAFE_VALUE.test(v) && !/@|<|[a-f0-9]{32,}/i.test(v)) out[k] = v;
+    if (typeof v !== "string" || !SAFE_VALUE.test(v) || /@|<|[a-f0-9]{32,}/i.test(v)) continue;
+    if (CODE_KEYS.has(k) && !REASON_CODE.test(v)) continue;
+    out[k] = v;
   }
+  const reason = candidateReasonCode({ ...e, detail });
+  if (reason) out.reason = reason;
   return out;
 }
 
@@ -845,7 +875,7 @@ async function getApplication({ user, id }) {
         }
       : null,
     notice: NOTICE,
-    timeline: tl.map((e) => ({ id: e.id, actor: e.actor, event: e.event, detail: user.role === "Candidate" ? candidateTimelineDetail(e.detail) : e.detail, at: e.created_at })),
+    timeline: tl.map((e) => ({ id: e.id, actor: e.actor, event: e.event, detail: user.role === "Candidate" ? candidateTimelineDetail(e.detail, e) : e.detail, at: e.created_at })),
     // Candidates see which documents/versions are in their package, not hashes or which staff member approved.
     documents: docs.map((d) => ({
       id: d.id,
