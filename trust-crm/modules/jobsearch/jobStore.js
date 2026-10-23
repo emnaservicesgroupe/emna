@@ -201,20 +201,36 @@ async function upsertJob(raw, sourceId, opts = {}) {
  * leave the status unchanged. Updates status and last_checked_at.
  */
 async function recheckJob(jobId, opts = {}) {
+  return (await recheckJobDetailed(jobId, opts)).status;
+}
+
+/**
+ * recheckJob with provenance: `verified` is true only when the answer is definitive — the closing
+ * date passed, every sighting's adapter says the job is gone, or a live (non-manual) adapter
+ * returned it. When no source could confirm (unavailable / requires_setup / transient errors, or only
+ * staff-entered manual sightings that read back our own row) the stored status is kept and
+ * `verified` is false. Same writes as recheckJob (status + last_checked_at).
+ * @returns {Promise<{status: string, verified: boolean, reason: string}>}
+ */
+async function recheckJobDetailed(jobId, opts = {}) {
   const now = opts.now || new Date();
   const registry = opts.registry || require("./sources");
   const j = await db().query("SELECT id, status, closing_at FROM js_jobs WHERE id = $1", [jobId]);
   if (!j.rowCount) throw new HttpError(404, "Not found");
   const job = j.rows[0];
   let status;
+  let verified = true;
+  let reason;
   if (job.closing_at && new Date(job.closing_at) < now) {
     status = "expired";
+    reason = "closing_date_passed";
   } else {
     const sightings = await db().query(
       "SELECT s.source_job_id, src.key FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = $1 ORDER BY s.seen_at DESC",
       [jobId]
     );
     let open = false;
+    let liveOpen = false;
     let gone = 0;
     let unknown = 0;
     let closing = null;
@@ -228,6 +244,7 @@ async function recheckJob(jobId, opts = {}) {
         const d = await adapter.fetchDetail(s.source_job_id, opts.ctx || {});
         if (d) {
           open = true;
+          if (s.key !== "manual_import") liveOpen = true;
           if (d.closingAt && !Number.isNaN(new Date(d.closingAt).getTime())) closing = new Date(d.closingAt);
         } else gone += 1;
       } catch (err) {
@@ -235,14 +252,25 @@ async function recheckJob(jobId, opts = {}) {
         else unknown += 1;
       }
     }
-    if (closing && closing < now) status = "expired";
-    else if (open) status = "open";
-    else if (gone > 0 && unknown === 0) status = "closed";
-    else status = job.status; // could not verify: keep what we know, never guess
+    if (closing && closing < now) {
+      status = "expired";
+      reason = "closing_date_passed";
+    } else if (open) {
+      status = "open";
+      verified = liveOpen;
+      reason = liveOpen ? "source_confirmed_open" : "manual_only";
+    } else if (gone > 0 && unknown === 0) {
+      status = "closed";
+      reason = "all_sources_gone";
+    } else {
+      status = job.status; // could not verify: keep what we know, never guess
+      verified = false;
+      reason = "sources_unavailable";
+    }
     if (closing) await db().query("UPDATE js_jobs SET closing_at = $2 WHERE id = $1", [jobId, closing]);
   }
   await db().query("UPDATE js_jobs SET status = $2, last_checked_at = $3 WHERE id = $1", [jobId, status, now]);
-  return status;
+  return { status, verified, reason };
 }
 
 // ---------- manual import ----------
@@ -265,4 +293,4 @@ async function importManual(input, user, opts = {}) {
   return out;
 }
 
-module.exports = { upsertJob, recheckJob, importManual, sanitizeText, normalize, normalizeEmployer, normalizeCity, isoYearWeek, canonicalUrl, dedupeKey };
+module.exports = { upsertJob, recheckJob, recheckJobDetailed, importManual, sanitizeText, normalize, normalizeEmployer, normalizeCity, isoYearWeek, canonicalUrl, dedupeKey };
