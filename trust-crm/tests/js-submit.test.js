@@ -764,6 +764,8 @@ test("recordEvidence on an outcome_unknown submission (needs_staff) with manual 
   await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "  " }, actor: w.manager }), (e) => e.status === 400);
   await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "called hr" }, actor: w.manager }), (e) => e.status === 400, "< 10 chars");
   await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "long enough note", fileRef: { storageKey: "../../x" } }, actor: w.manager }), (e) => e.status === 400);
+  // Task 19 M-1: a valid key of ANOTHER candidate is refused as evidence
+  await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "long enough note", fileRef: { storageKey: `${w.candidateId + 1000}-${"a".repeat(64)}.pdf` } }, actor: w.manager }), (e) => e.status === 400 && /not a file of this candidate/.test(e.message));
   const out = await submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "Employer HR confirmed by phone they received the CV", fileRef: { storageKey: w.cvKey } }, actor: w.manager });
   assert.equal(out.applicationStatus, "confirmed_submitted");
   assert.equal((await tasksOf(w.appId)).find((t) => t.reason === "verify_delivery").status, "resolved");

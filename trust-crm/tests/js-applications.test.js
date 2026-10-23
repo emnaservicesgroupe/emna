@@ -872,6 +872,38 @@ test("cover letter: hostile job title cannot inject a claim; Arabic letter token
   assert.ok(letter.includes("كهربائي صناعي") && letter.includes("Karim Benali") && letter.includes("2016"));
 });
 
+test("Task 19 M-1: a CRM document whose file_path is another candidate's storage key is blocked (document_not_owned) at packaging and at re-validation", async () => {
+  await withApp(async (t) => {
+    const a = await t.newCandidate();
+    const b = await t.newCandidate();
+    const cvA = await t.uploadCv(a, "Karim Benali\nElectrician");
+    await t.approveCv(a, cvA, "en");
+    const cvB = await t.uploadCv(b, "Other Person\nWelder");
+    const keyA = (await t.pool.query("SELECT storage_key FROM js_cv_files WHERE id=$1", [cvA])).rows[0].storage_key;
+    const keyB = (await t.pool.query("SELECT storage_key FROM js_cv_files WHERE id=$1", [cvB])).rows[0].storage_key;
+    assert.ok(keyB.startsWith(`${b.candidateId}-`));
+    const foreign = (await t.pool.query("INSERT INTO documents (candidate_id, doc_type, file_path) VALUES ($1,'diploma',$2) RETURNING id", [a.candidateId, keyB])).rows[0].id;
+    const own = (await t.pool.query("INSERT INTO documents (candidate_id, doc_type, file_path) VALUES ($1,'diploma',$2) RETURNING id", [a.candidateId, keyA])).rows[0].id;
+    const j = await t.newJob(a, { employer: "Owner Check Co" });
+    const id = (await t.create(a, j.matchId)).body.application.id;
+    const p = await t.prepare(id, t.tok.agentA, { documents: [{ cvFileId: cvA }, { documentId: foreign }, { documentId: own }] });
+    assert.equal(p.status, 200, JSON.stringify(p.body));
+    const app = (await t.pool.query("SELECT * FROM js_applications WHERE id=$1", [id])).rows[0];
+    assert.ok(JSON.stringify(app.package_blocked).includes("document_not_owned"), JSON.stringify(app.package_blocked));
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_application_documents WHERE application_id=$1 AND document_id=$2 AND removed_at IS NULL", [id, foreign])).rows[0].n, 0, "the foreign file is never in the package");
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_application_documents WHERE application_id=$1 AND document_id=$2 AND removed_at IS NULL", [id, own])).rows[0].n, 1, "own storage key is fine");
+    // A stored package row whose document is re-pointed at another candidate's file is caught before send.
+    await t.pool.query("UPDATE documents SET file_path=$2 WHERE id=$1", [own, keyB]);
+    const codes = (await documentPolicy.revalidateStoredPackage(t.pool, app)).filter((x) => x.documentId === own).map((x) => x.code);
+    assert.ok(codes.includes("document_not_owned"), JSON.stringify(codes));
+    // malformed key-like paths with a foreign prefix are not storage keys at all (never loaded)
+    assert.equal(documentPolicy.ownedStorageKey(`${b.candidateId}-${"a".repeat(64)}.pdf`, a.candidateId), null);
+    assert.equal(documentPolicy.ownedStorageKey(keyA, a.candidateId), keyA);
+    assert.equal(documentPolicy.ownedStorageKey("/crm/diploma.pdf", a.candidateId), null);
+    assert.equal(documentPolicy.ownedStorageKey(`../${keyA}`, a.candidateId), null);
+  });
+});
+
 test("CV bytes or recorded sha256 changed after packaging, and an authorization revoked by a direct DB update, are caught", async () => {
   await withApp(async (t) => {
     const c = await t.newCandidate();

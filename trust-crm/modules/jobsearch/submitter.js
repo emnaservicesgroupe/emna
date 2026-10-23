@@ -29,6 +29,7 @@ const guard = require("./guard");
 const queue = require("./queue");
 const emailChannel = require("./channels/email");
 const mailAddress = require("./mail/address");
+const documentPolicy = require("./documentPolicy");
 const unsupported = require("./channels/unsupported");
 const { candidateScopeSql } = require("./scope");
 const { PERMISSIONS } = require("../../middleware/role");
@@ -387,7 +388,8 @@ async function prepareSend(client, job, applicationId, submissionId, deps) {
     sha256: r.sha256,
     docType: r.doc_type,
     sensitive: r.sensitive,
-    storageKey: r.cv_file_id ? r.cv_key : STORAGE_KEY_RE.test(String(r.doc_path || "")) ? r.doc_path : null,
+    // a CRM document is loaded only from a storage key owned by this candidate (Task 19 M-1)
+    storageKey: r.cv_file_id ? r.cv_key : documentPolicy.ownedStorageKey(String(r.doc_path || ""), app.candidate_id),
   }));
   const profile = (await client.query("SELECT confirmed FROM js_profiles WHERE candidate_id = $1", [app.candidate_id])).rows[0];
   const candidateName = (profile && profile.confirmed && profile.confirmed.name) || "";
@@ -619,6 +621,7 @@ async function checkEvidence(client, { app, sub }, kind, detail, actor) {
   const note = cleanText(detail.note);
   if (note.length < MIN_NOTE) throw new HttpError(400, `manual_confirmation needs a note (at least ${MIN_NOTE} characters) describing the evidence`);
   const fileRef = validFileRef(detail.fileRef);
+  if (fileRef && fileRef.storageKey && !documentPolicy.ownedStorageKey(fileRef.storageKey, app.candidate_id)) throw new HttpError(400, "fileRef.storageKey is not a file of this candidate");
   if (fileRef && fileRef.documentId) {
     const d = await client.query("SELECT 1 FROM documents WHERE id = $1 AND candidate_id = $2 AND is_deleted = false", [fileRef.documentId, app.candidate_id]);
     if (!d.rowCount) throw new HttpError(400, "fileRef.documentId is not a document of this candidate");
@@ -692,6 +695,7 @@ async function recordManualCompletion({ applicationId, actor, detail }) {
   const out = await inTx(async (client) => {
     const { app } = await lockApplication(client, scoped.id);
     if (app.status !== "needs_staff") throw new HttpError(409, `Application is ${app.status}; manual completion applies to needs_staff only`);
+    if (fileRef && fileRef.storageKey && !documentPolicy.ownedStorageKey(fileRef.storageKey, app.candidate_id)) throw new HttpError(400, "fileRef.storageKey is not a file of this candidate");
     const cand = (await client.query("SELECT is_deleted FROM candidates WHERE id = $1", [app.candidate_id])).rows[0];
     if (!cand || cand.is_deleted || !(await consentService.activeConsent(app.candidate_id, "submit", client))) throw new HttpError(409, "No active consent to submit applications for this candidate");
     if (fileRef && fileRef.documentId) {

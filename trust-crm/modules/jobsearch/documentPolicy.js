@@ -186,6 +186,22 @@ async function cvEntry(client, application, cvFileId) {
   return { included: { kind: "cv", cvFileId: cv.id, docType: "cv", version: cv.version, sha256: cv.sha256 || sha, language: normLang(cv.language), sensitive: false, sharingAuthorizationId: null } };
 }
 
+// Storage keys are "<candidateId>-<sha256>.<ext>" (storage/local.js). A CRM documents.file_path that is a
+// storage key may only be used for the candidate whose id prefixes it (Task 19 M-1).
+const STORAGE_KEY_RE = /^([0-9]+)-[a-f0-9]{64}\.(pdf|docx|png|jpg)$/;
+const isStorageKeyLike = (p) => typeof p === "string" && /^[0-9]+-[a-f0-9]{64}\./.test(p.trim());
+
+/** `filePath` when it is a storage key belonging to `candidateId`, else null. */
+function ownedStorageKey(filePath, candidateId) {
+  const m = typeof filePath === "string" ? STORAGE_KEY_RE.exec(filePath) : null;
+  return m && Number(m[1]) === Number(candidateId) ? filePath : null;
+}
+
+/** True when the path names a storage object (key-shaped) that is not this candidate's. */
+function foreignStorageKey(filePath, candidateId) {
+  return isStorageKeyLike(filePath) && !ownedStorageKey(filePath, candidateId);
+}
+
 /** Snapshot of a CRM document's identity + last modification; a change means re-review. */
 function sourceRef(d) {
   const stamp = d.updated_at instanceof Date ? d.updated_at.toISOString() : String(d.updated_at);
@@ -196,6 +212,7 @@ async function documentEntry(client, application, documentId) {
   const doc = { documentId };
   const d = (await client.query("SELECT * FROM documents WHERE id = $1 AND candidate_id = $2 AND is_deleted = false", [documentId, application.candidate_id])).rows[0];
   if (!d) return { blocked: { doc, reason: "not_found" } };
+  if (foreignStorageKey(d.file_path, application.candidate_id)) return { blocked: { doc, reason: "document_not_owned" } };
   const sensitive = sensitiveType(d.doc_type);
   let auth = null;
   if (sensitive) {
@@ -237,6 +254,7 @@ async function buildPackage({ application, requested, jobLanguage, client }) {
 }
 
 /**
+ * Codes also include document_not_owned (file_path is another candidate's storage key).
  * Re-validates the stored (non-removed) package rows of an application inside `client`'s transaction:
  * CVs still approved, not infected, scanned (or unscanned explicitly allowed), same version/sha256 and same stored bytes; CRM documents not
  * deleted and unchanged since packaging (source_ref + sha256 when present); sensitive documents still
@@ -266,6 +284,7 @@ async function revalidateStoredPackage(client, application) {
       problems.push({ code: "document_deleted", ...ref });
       continue;
     }
+    if (foreignStorageKey(d.file_path, application.candidate_id)) problems.push({ code: "document_not_owned", ...ref });
     if (r.source_ref !== sourceRef(d) || (r.sha256 && (await storedSha(d.file_path)) !== r.sha256)) problems.push({ code: "document_changed", ...ref });
     if (r.sensitive || sensitiveType(d.doc_type)) {
       // The exact authorization recorded in the package must still be valid (candidate-granted, need stated, not revoked).
@@ -284,4 +303,4 @@ async function revalidateStoredPackage(client, application) {
 
 const formatProblems = (ps) => ps.map((p) => `${p.code}${p.cvFileId ? `:cv${p.cvFileId}` : p.documentId ? `:doc${p.documentId}` : ""}`).join(", ");
 
-module.exports = { formatProblems, normDocType, buildPackage, pickCv, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, unscannedAllowed, SENSITIVE_TYPES };
+module.exports = { formatProblems, normDocType, buildPackage, pickCv, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, unscannedAllowed, ownedStorageKey, SENSITIVE_TYPES };
