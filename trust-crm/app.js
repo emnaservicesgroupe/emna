@@ -23,6 +23,7 @@ const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler"
 const publicRoutes = require("./routes/public");
 const crmRoutes = require("./routes/crm");
 const employerPortalRoutes = require("./routes/employerPortal");
+const agencyPortalRoutes = require("./routes/agencyPortal");
 const { mountVita } = require("./routes/vitaStatic");
 const { mountSite, siteHome } = require("./routes/siteStatic");
 const { trustProxySetting } = require("./utils/trustProxy");
@@ -44,6 +45,7 @@ app.use("/jobsearch", express.json({ limit: "10mb" }), jobsearchBodyErrorHandler
 app.use("/public", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/crm", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use("/employer", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
+app.use("/agency", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 // Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
@@ -79,6 +81,7 @@ app.get("/", siteHome, (_req, res) => {
 app.use("/public", publicRoutes);
 app.use("/crm", crmRoutes);
 app.use("/employer", employerPortalRoutes);
+app.use("/agency", agencyPortalRoutes);
 app.use("/auth", authRoutes);
 app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);

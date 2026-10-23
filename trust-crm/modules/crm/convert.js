@@ -94,9 +94,9 @@ async function convertLead(user, rawLeadId, input) {
     let candidate;
     try {
       const ins = await client.query(
-        `INSERT INTO candidates (full_name, nationality, passport_number, email, phone, assigned_to, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING ${CANDIDATE_COLUMNS}`,
-        [fullName, nationality, passport, lead.email, lead.phone, assignedTo, user.id]
+        `INSERT INTO candidates (full_name, nationality, passport_number, email, phone, assigned_to, created_by, agency_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,(SELECT agency_id FROM crm_leads WHERE id = $8)) RETURNING ${CANDIDATE_COLUMNS}`,
+        [fullName, nationality, passport, lead.email, lead.phone, assignedTo, user.id, leadId]
       );
       candidate = ins.rows[0];
       await client.query("INSERT INTO visa_applications (candidate_id, stage, status, updated_by) VALUES ($1,'Documents','Pending',$2)", [candidate.id, user.id]);
