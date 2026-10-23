@@ -1,6 +1,6 @@
 # Sitemap and screen inventory
 
-Routes are hash-based (`#/…`) so the static host needs no rewrites. Status: ✅ built in Phase 1 (verified by the browser run in docs/DEMO.md) · 🕒 later phase (not shown in the UI) · 🔒 blocked on a decision/credential.
+Routes are hash-based (`#/…`) so the static host needs no rewrites. Status: ✅ built in Phase 1 (structurally verified by the browser run in DEMO.md; not every screen is driven — see its limits) · 🕒 later phase (not shown in the UI) · 🔒 blocked on a decision/credential.
 
 ## A. Public website
 | Screen | Route | Status |

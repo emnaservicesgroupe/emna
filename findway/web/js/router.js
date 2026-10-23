@@ -1,6 +1,6 @@
 import { state, homeFor } from './store.js';
 import { errorState, loading } from './ui.js';
-import { ApiError } from './api.js';
+import { ApiError, takeExpired } from './api.js';
 
 const routes = [];
 let shell = null; let renderId = 0;
@@ -32,7 +32,7 @@ export async function render() {
   const mount = (area, node) => { if (id === renderId) shell.mount(area, node, path); };
   if (!m) { mount('public', errorState(new ApiError(404, { error: { code: 'not_found', message: 'Not found' } }))); return; }
   const { opts } = m.r; const me = state.me;
-  if (opts.auth && !me) { go(`/login?next=${encodeURIComponent(path)}`, { replace: true }); return; }
+  if (opts.auth && !me) { go(`/login?next=${encodeURIComponent(path)}${takeExpired() ? '&expired=1' : ''}`, { replace: true }); return; }
   if (me && me.status.mfa.required && !me.status.mfa.verified && path !== '/mfa-setup' && opts.auth) { go('/mfa-setup', { replace: true }); return; }
   if (opts.roles && (!me || !opts.roles.includes(me.role))) { mount(opts.area || 'public', errorState(new ApiError(403, { error: { code: 'permission_denied' } }))); return; }
   if (opts.perm && !(me && (me.permissions.includes('*') || me.permissions.includes(opts.perm)))) { mount(opts.area || 'public', errorState(new ApiError(403, { error: { code: 'permission_denied' } }))); return; }

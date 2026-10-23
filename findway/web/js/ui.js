@@ -114,7 +114,7 @@ export function field({ label, name, type = 'text', value = '', required = false
   const hintEl = hint ? h('span', { class: 'hint', id: `${fid}-hint` }, hint) : null;
   if (hintEl) input.setAttribute('aria-describedby', `${fid}-hint`);
   if (type === 'email' || type === 'tel' || type === 'url' || type === 'password' || type === 'text') input.setAttribute('dir', type === 'text' && !name?.match(/email|code/) ? 'auto' : 'ltr');
-  const el = h('div', { class: 'field' }, h('label', { for: fid }, label, required ? h('span', { 'aria-hidden': 'true' }, ' *') : null), hintEl, input, err);
+  const el = h('div', { class: 'field' }, h('label', { for: fid, class: required ? 'req' : null }, label), hintEl, input, err);
   return { el, input };
 }
 export function checkbox({ label, name, checked = false, id }) {
@@ -169,7 +169,7 @@ export const num = (input) => { const v = String(input.value).trim(); return v =
 // ── tag input & repeater ──
 export function tagInput({ label, value = [], id, hint }) {
   const fid = id || uid('tags'); let items = [...value];
-  const list = h('ul', { class: 'tags', 'aria-label': label });
+  const list = h('ul', { class: 'tags' });
   const input = h('input', { id: fid, type: 'text', dir: 'auto', maxlength: 60 });
   const paint = () => { clear(list); items.forEach((it, i) => list.append(h('li', {}, h('span', { dir: 'auto' }, it), h('button', { type: 'button', 'aria-label': `${t('common.remove')} ${it}`, onclick: () => { items.splice(i, 1); paint(); } }, '×')))); };
   const add = () => { const v = input.value.trim(); if (v && !items.includes(v)) { items.push(v); paint(); } input.value = ''; };

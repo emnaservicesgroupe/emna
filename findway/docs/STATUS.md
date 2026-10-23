@@ -159,7 +159,7 @@ In-app notifications **T**; transactional e-mail with honest states (`queued →
 | Prompt injection in CV cannot authorise actions | **D** Phase 3 (control design in MCP_DESIGN §5; today no endpoint interprets free text as instructions) |
 | Unauthorised pricing changes rejected | **D** (no pricing yet) |
 | Email drafts remain unsent until approved | draft state exists and no send path exists **I**; approval workflow **D** Phase 2/3 |
-| Arabic mobile workflows work | browser run at 390×844 in Arabic — see DEMO.md for exactly what was exercised |
+| Arabic mobile workflows work | **Pass** (partial scope) — Chromium at 390×844: RTL + no horizontal overflow on home, jobs, job detail, login, register, profile, applications; live language switch; keyboard menu. Exactly what was exercised: [DEMO.md](DEMO.md) |
 | Backup restoration succeeds | **Pass** [backup] |
 Synthetic data only: every record created by tests/seed is fictional.
 
@@ -176,4 +176,9 @@ Source + migrations ✔ · architecture/data model ✔ · screen inventory + per
 7. trust-crm date handling depends on its server time zone (keep UTC).
 
 ## Results
-See the "Results" section appended by the final verification run (test counts, browser run) below.
+
+## Results (verified 2026-10-23, re-run independently of the agent that wrote the UI)
+* `npm test`: **74 tests, 74 pass** (auth 13, jobs 8, recruitment 12, workflows 9, integration 13 against the real trust-crm app, security 8, backup 1, docs 1, i18n 9).
+* `npm run test:e2e` (real Chromium, throw-away DB, synthetic data): **21/21 steps pass**, zero console errors, zero CSP violations. Details and the honest limits: [DEMO.md](DEMO.md).
+* Not covered by any automated check: colour-contrast measurement, screen-reader behaviour, the lead duplicate-merge panel, employer applicant actions and the full job-editor field set in the *browser* (their APIs are tested), webhook subscription forms.
+* Known small API gaps found while building the UI: internal notes cannot be attached to a *lead* (application notes are used); `/api/me` has no profile-completion breakdown for non-candidates; an edit-after-publication reason is a raw code string the UI maps.

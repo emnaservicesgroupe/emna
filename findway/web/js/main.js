@@ -1,7 +1,7 @@
 import { LANGS, detectLang, setLang, t, lang } from './i18n.js';
 import { h, clear, link, toast } from './ui.js';
 import { loadMe, state, role, can, isCrm, homeFor, clearMe } from './store.js';
-import { onSessionExpired, post, patch, setToken, hasToken } from './api.js';
+import { onSessionExpired, takeExpired, post, patch, setToken, hasToken } from './api.js';
 import { route, start, go, render, current } from './router.js';
 import { registerPublic } from './views/public.js';
 import { registerAuth } from './views/auth.js';
@@ -96,7 +96,7 @@ async function boot() {
   headerEl = h('header'); mainEl = h('main', { id: 'main', tabindex: '-1' }); const foot = h('footer', { id: 'footer-host' });
   app.append(headerEl, mainEl, foot);
   registerPublic(route); registerAuth(route); registerCandidate(route); registerEmployer(route); registerAgency(route); registerStaff(route); registerAdmin(route); registerShared(route);
-  onSessionExpired(() => { clearMe(); toast(t('auth.session_expired'), 'bad'); go('/login?expired=1'); });
+  onSessionExpired(() => { takeExpired(); clearMe(); toast(t('auth.session_expired'), 'bad'); go('/login?expired=1'); });
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvt = e; paintChrome(current().path); });
   window.addEventListener('fw:me-changed', () => paintChrome(current().path));
   await start(shell);

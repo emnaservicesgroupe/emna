@@ -130,7 +130,7 @@ async function companyDetail({ params }) {
   const mode = can('orgs:view_all') ? h('div', { class: 'btn-row' }, ['managed', 'direct'].map((m) => h('button', { class: 'btn secondary small', type: 'button', disabled: o.recruitment_mode === m, onclick: async () => { await post(`/staff/companies/${o.id}/mode`, { mode: m }); toast(t('common.saved')); render(); } }, `${t('emp.mode')}: ${tEnum('mode', m)}`))) : null;
   return h('div', { class: 'stack' }, back('/crm/companies', t('crm.companies')), h('h1', { dir: 'auto' }, o.name),
     h('section', { class: 'card' }, dl([[t('emp.verification'), enumBadge('verification', o.verification_status)], [t('prof.country'), userText('span', [o.city, o.country].filter(Boolean).join(', '))], [t('company.website'), userText('span', o.website)], [t('crm.source'), userText('span', o.source)],
-      [t('crm.claimed'), o.claimed ? t('common.yes') : t('crm.not_claimed')], [t('crm.relationship'), tEnum('relationship', o.relationship_status)], [t('emp.mode'), tEnum('mode', o.recruitment_mode)], [t('crm.last_contact'), o.last_contact_at ? fmtDateTime(o.last_contact_at) : '—'], [t('crm.next_action'), userText('span', o.next_action)]]), mode),
+      [t('crm.has_account'), o.claimed ? t('common.yes') : t('crm.not_claimed')], [t('crm.relationship'), tEnum('relationship', o.relationship_status)], [t('emp.mode'), tEnum('mode', o.recruitment_mode)], [t('crm.last_contact'), o.last_contact_at ? fmtDateTime(o.last_contact_at) : '—'], [t('crm.next_action'), userText('span', o.next_action)]]), mode),
     h('section', { class: 'card' }, h('h2', {}, t('crm.log_contact')), log));
 }
 

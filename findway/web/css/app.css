@@ -172,3 +172,9 @@ th{background:var(--blue-50);font-size:.85rem;color:var(--blue-900)}
 .codes{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;list-style:none;padding:0;margin:0}
 .codes li{background:var(--gold-50);border:1px solid var(--gold);border-radius:6px;padding:6px 10px}
 .sticky-actions{position:sticky;inset-block-end:0;background:#fff;border-block-start:1px solid var(--line);padding-block:10px;z-index:5}
+
+.req::after{content:" *";color:var(--bad)}
+/* later rules so they win over .btn */
+@media(min-width:900px){.btn.nav-toggle,.btn.crm-toggle{display:none}}
+h1[tabindex="-1"]:focus,main:focus{outline:none}
+.main-nav a,.main-nav button.linklike{white-space:nowrap}

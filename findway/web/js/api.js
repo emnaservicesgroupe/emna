@@ -9,6 +9,8 @@ export class ApiError extends Error {
 let token = null;
 try { token = localStorage.getItem('fw_token'); } catch (_) { /* no storage: session lives in memory */ }
 const listeners = new Set();
+let expired = false;
+export const takeExpired = () => { const e = expired; expired = false; return e; };
 export const onSessionExpired = (fn) => listeners.add(fn);
 export function setToken(t) {
   token = t || null;
@@ -34,7 +36,7 @@ export async function api(method, path, { body, headers = {}, timeout = 15000, q
   const text = await res.text(); let json = null; try { json = text ? JSON.parse(text) : null; } catch (_) { /* non-json */ }
   if (!res.ok) {
     const err = new ApiError(res.status, json);
-    if (res.status === 401 && token && !path.startsWith('/auth/login')) { setToken(null); listeners.forEach((f) => f()); }
+    if (res.status === 401 && token && !path.startsWith('/auth/login')) { expired = true; setToken(null); listeners.forEach((f) => f()); }
     throw err;
   }
   return json;
