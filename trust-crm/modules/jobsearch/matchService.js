@@ -1,7 +1,7 @@
 // Computes and stores explainable matches. Reads only: confirmed profile, preferences, settings and
 // OPEN jobs. Never creates or changes applications. A match is a review aid, not an eligibility claim.
 const consentService = require("./consentService");
-const { scoreMatch, country, neutralize, detectEmployerSupport } = require("./matching");
+const { scoreMatch, country, neutralize } = require("./matching");
 const { normalize } = require("./jobStore");
 
 const db = () => require("../../db");
@@ -143,29 +143,37 @@ async function matchCandidate(candidateId, opts = {}) {
   });
 }
 
-const CONFLICT_NOTE = "Staff confirmation recorded; the advertisement itself says sponsorship is not available \u2014 verify";
-
 /**
- * Re-evaluates the employer-support LABEL of EXISTING matches on the given jobs (after a confirmation is
- * recorded or revoked) so labels are never stale. Labels only: score, reasons, missing and created_at are
- * untouched (the next matchCandidate run recomputes the score). Candidate rows are locked in id order,
- * like matchCandidate/consent changes, before anything is written. Never creates or deletes matches.
+ * Re-scores EXISTING matches on the given jobs (after a confirmation is recorded or revoked) so the
+ * label, score, reasons and notes never go stale. Candidate rows are locked in id order first and the
+ * match rows are read after the lock. Never creates or deletes matches; created_at is untouched
+ * (pruning below the threshold still happens only in matchCandidate).
  */
 async function relabelJobs(client, jobIds) {
   if (!jobIds.length) return 0;
-  const rows = (await client.query("SELECT id, candidate_id, job_id, uncertain FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id, job_id", [jobIds])).rows;
-  if (!rows.length) return 0;
-  await client.query("SELECT id FROM candidates WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [[...new Set(rows.map((r) => r.candidate_id))]]);
+  const cands = (await client.query("SELECT DISTINCT candidate_id FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id", [jobIds])).rows.map((r) => r.candidate_id);
+  if (!cands.length) return 0;
+  await client.query("SELECT id FROM candidates WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [cands]);
+  const rows = (await client.query("SELECT candidate_id, job_id FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id, job_id", [jobIds])).rows;
   const confirmationFor = await loadConfirmations(client);
-  const jobs = new Map((await client.query("SELECT id, employer_id, description_text FROM js_jobs WHERE id = ANY($1::int[])", [jobIds])).rows.map((j) => [j.id, j]));
-  for (const row of rows) {
-    const job = jobs.get(row.job_id);
-    const es = detectEmployerSupport(job.description_text, { confirmation: confirmationFor(job) });
-    const uncertain = (Array.isArray(row.uncertain) ? row.uncertain : []).filter((u) => u !== CONFLICT_NOTE);
-    if (es.conflict) uncertain.push(CONFLICT_NOTE);
+  const jobs = new Map((await client.query("SELECT * FROM js_jobs WHERE id = ANY($1::int[])", [jobIds])).rows.map((j) => [j.id, j]));
+  const cache = new Map();
+  for (const { candidate_id: cid, job_id: jid } of rows) {
+    if (!cache.has(cid)) {
+      cache.set(cid, {
+        profile: (await client.query("SELECT confirmed FROM js_profiles WHERE candidate_id = $1", [cid])).rows[0]?.confirmed || {},
+        prefs: (await client.query("SELECT * FROM js_preferences WHERE candidate_id = $1", [cid])).rows[0] || {},
+      });
+    }
+    const job = jobs.get(jid);
+    const { profile, prefs } = cache.get(cid);
+    const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job) });
     await client.query(
-      "UPDATE js_matches SET employer_support = $2, employer_support_evidence = $3, employer_support_conflict = $4, uncertain = $5::jsonb WHERE id = $1",
-      [row.id, es.label, es.evidence, es.conflict === true, JSON.stringify(uncertain)]
+      `UPDATE js_matches SET score = $3, reasons = $4::jsonb, missing = $5::jsonb, uncertain = $6::jsonb,
+         employer_support = $7, employer_support_evidence = $8, employer_support_conflict = $9,
+         overseas_accepted = $10, overseas_applicants_evidence = $11
+       WHERE candidate_id = $1 AND job_id = $2`,
+      upsertParams(cid, job, r).slice(0)
     );
   }
   return rows.length;

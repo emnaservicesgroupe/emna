@@ -38,7 +38,7 @@ test("employer support: explicit phrases -> stated_in_ad with quoted evidence (E
   const a = detectEmployerSupport("Great team. LMIA approved position. Apply today.");
   assert.equal(a.label, "stated_in_ad");
   assert.equal(a.evidence, "LMIA approved position");
-  for (const t of ["Visa sponsorship available for the right candidate", "We sponsor work permits for qualified workers", "Soutien à l'immigration offert", "Permis de travail fourni par l'employeur", "Poste avec EIMT"]) {
+  for (const t of ["Visa sponsorship available for the right candidate", "We sponsor work permits for qualified workers", "Soutien à l'immigration offert", "Permis de travail fourni par l'employeur"]) {
     const r = detectEmployerSupport(t);
     assert.equal(r.label, "stated_in_ad", t);
     assert.ok(r.evidence && t.toLowerCase().includes(r.evidence.toLowerCase().slice(0, 12)), t);
@@ -66,7 +66,8 @@ test("overseas: stays null without explicit wording; explicit yes/no carry a quo
   const y = detectOverseas("We are open to international applicants.");
   assert.equal(y.accepted, true);
   assert.match(y.evidence, /open to international applicants/i);
-  assert.equal(detectOverseas("Relocation provided.").accepted, true);
+  assert.equal(detectOverseas("Relocation provided.").accepted, null, "relocation alone is not overseas wording");
+  assert.equal(detectOverseas("Relocation provided for overseas hires.").accepted, true);
   for (const t of ["Canadian residents only", "Must reside in Canada", "Must be currently in Canada", "Candidats locaux seulement"]) {
     const r = detectOverseas(t);
     assert.equal(r.accepted, false, t);
@@ -417,7 +418,8 @@ test("employer support: negated sentences never become stated_in_ad", () => {
   ];
   for (const t of unavailable) assert.equal(detectEmployerSupport(t).label, "unavailable", t);
   for (const t of ["Previous LMIA was refused", "This position is LMIA exempt", "unLMIAted role", "lmiamarket job"]) assert.equal(detectEmployerSupport(t).label, "unknown", t);
-  for (const t of ["LMIA", "Visa sponsorship available", "Sponsorship available", "soutien à l'immigration", "LMIA approved position, apply now"]) assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+  for (const t of ["Visa sponsorship available", "Sponsorship available", "Soutien à l'immigration offert", "LMIA approved position, apply now"]) assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+  for (const t of ["LMIA", "visa sponsorship", "Visa sponsorship?", "LMIA:", "soutien à l'immigration"]) assert.equal(detectEmployerSupport(t).label, "unknown", `bare mention: ${t}`);
   assert.equal(detectEmployerSupport("We don't sponsor local events").label, "unknown");
   assert.equal(detectEmployerSupport("Visa sponsorship available, no problem").label, "stated_in_ad");
 });
@@ -592,7 +594,90 @@ test("label detection stays linear on 200k chars of joined-line patterns", () =>
   }
 });
 
-test("relabel (confirm/revoke) changes labels only: score, reasons and created_at stay; migration 006 backfills application-scoped rows", async () => {
+test("natural multi-paragraph ads and positive-control rate", () => {
+  const bad = [];
+  for (const ad of corpus.ads) {
+    const sup = detectEmployerSupport(ad.text).label;
+    const ov = String(detectOverseas(ad.text).accepted);
+    if (sup !== ad.support || ov !== ad.overseas) bad.push(`${JSON.stringify(ad.text.slice(0, 40))} support ${ad.support}/${sup} overseas ${ad.overseas}/${ov}`);
+  }
+  assert.deepEqual(bad, []);
+  assert.ok(corpus.ads.length >= 15);
+  const controls = corpus.support.filter((x) => x.expect === "stated_in_ad");
+  const hit = controls.filter((x) => detectEmployerSupport(x.text).label === "stated_in_ad").length;
+  assert.ok(controls.length >= 40 && hit / controls.length >= 0.85, `positive-control hit rate ${hit}/${controls.length}`);
+});
+
+// affirmative allowlist phrases x veto cue categories: neither order may ever be stated_in_ad
+const AFFIRMATIVES = [
+  "We offer visa sponsorship", "We sponsor work permits", "LMIA approved", "Visa sponsorship is available", "Sponsorship available", "Employer will apply for an LMIA",
+  "Immigration support provided", "We provide work permit sponsorship", "Nous offrons le parrainage du permis de travail", "EIMT approuvée", "Permis de travail fourni", "Soutien à l'immigration offert",
+];
+const VETO_CUES = {
+  negation: ["not", "no", "never", "cannot", "isn't", "without", "pas", "non", "nope", "excluded"],
+  hedge: ["subject to approval", "may", "might", "if possible", "pending", "to be discussed", "TBD", "case by case", "at our discretion", "depending on the profile", "negotiable", "en cours", "pourrait", "selon le profil"],
+  time: ["after 6 months", "next year", "after probation", "once you have worked here two years", "in the future", "was approved in 2019", "previously", "expired", "après un an", "eventually"],
+  scope: ["for senior roles only", "for other positions", "elsewhere", "listed separately", "current employees only", "sister company", "internal transfers", "this role does not qualify", "US offices"],
+  duties: ["for our clients", "you will process LMIA applications", "responsible for the files", "immigration consultant", "for employers", "paralegal"],
+  responsibility: ["at your own expense", "candidate pays all fees", "is the candidate's responsibility", "for a fee of $5,000", "at your cost"],
+};
+test("allowlisted affirmatives x veto cues are never stated_in_ad (both orders)", () => {
+  const t0 = Date.now();
+  const bad = [];
+  for (const aff of AFFIRMATIVES) {
+    assert.equal(detectEmployerSupport(`${aff}.`).label, "stated_in_ad", `control: ${aff}`);
+    for (const [cat, cues] of Object.entries(VETO_CUES)) {
+      for (const cue of cues) {
+        for (const text of [`${aff} ${cue}.`, `${cue} ${aff}.`, `${aff}, ${cue}.`, `${cue}: ${aff}.`]) {
+          if (detectEmployerSupport(text).label === "stated_in_ad") bad.push(`${cat}: ${text}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(bad, []);
+  assert.ok(Date.now() - t0 < 2000, "combinatorial test must stay fast");
+});
+
+test("unicode obfuscation inside not/sponsorship does not create stated_in_ad or accepted:true", () => {
+  const ZW = "​", SH = "­", WJ = "⁠", NB = " ";
+  const neg = [
+    `Visa spon${ZW}sorship is n${ZW}ot available.`, `Visa spon${SH}sorship is n${SH}ot available.`, `Visa sponsorship is n${WJ}ot available.`, `Visa${NB}sponsorship${NB}not${NB}available.`,
+    "Visa sponsorship is ＮＯＴ available.", "Visa sponsorship is nоt available.", "Visa sponsorship is ноt available.", "Ｖisa sponsorship: Ｎo",
+    "Visa sponsorship is not available", "Visa sponsorship\u0085No", "Visa sponsorship\rNo", "Visa sponsorship\r\nNot available", `We d${ZW}o not offer visa sponsorship`, "We do nоt sponsor",
+  ];
+  for (const x of neg) assert.notEqual(detectEmployerSupport(x).label, "stated_in_ad", JSON.stringify(x));
+  assert.equal(detectEmployerSupport(`We of${ZW}fer visa spon${SH}sorship`).label, "stated_in_ad", "invisible characters inside a positive phrase are ignored");
+  assert.notEqual(detectOverseas(`Interna${ZW}tional applicants n${SH}ot considered`).accepted, true);
+  assert.notEqual(detectOverseas("International applicants welcome. Must be in Canada​.").accepted, true);
+});
+
+test("label detection stays linear on 200k chars (joined lines, tables, chains)", () => {
+  const cases = ["Visa sponsorship:\n".repeat(11000), "Visa sponsorship\nNo\n".repeat(10000), "LMIA:\nN\n".repeat(20000), "International applicants:\n".repeat(8000), "**_".repeat(66000), "~~".repeat(100000), "Work permit provided?\n".repeat(9000), "a\nNo\n".repeat(50000), "| Visa sponsorship | No |\n".repeat(8000), "LMIA?\n".repeat(33000), "not visa sponsorship may ".repeat(8000), "­".repeat(200000), "n'".repeat(100000), "ne a b c ".repeat(22000)];
+  for (const s of cases) {
+    const t0 = Date.now();
+    detectEmployerSupport(s);
+    detectOverseas(s);
+    scoreMatch(PROFILE, PREFS, { ...JOB, description_text: s });
+    assert.ok(Date.now() - t0 < 3000, `slow: ${Date.now() - t0}ms`);
+  }
+});
+
+test("a negation beyond the 20k storage cap still turns the label unavailable", () => {
+  const pad = "We are hiring welders for our shop. ".repeat(700);
+  assert.equal(detectEmployerSupport(`LMIA approved. ${pad} Correction: no LMIA, must be a Canadian citizen.`).label, "unavailable");
+});
+
+test("overseas: restriction text next to overseas wording is never true and is explained in uncertain", () => {
+  const d = "Open to international applicants. Must be eligible to work in Canada.";
+  const o = detectOverseas(d);
+  assert.equal(o.accepted, null);
+  const r = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: d });
+  assert.ok(r.uncertain.some((u) => /restriction/.test(u)));
+  assert.equal(detectOverseas("Relocation provided for overseas hires.").accepted, true);
+  assert.equal(detectOverseas("Relocation provided.").accepted, null);
+});
+
+test("relabel (confirm/revoke) re-scores the match; created_at stays; migration 006 backfills application-scoped rows", async () => {
   await withApp(async (t) => {
     const c = await t.newCandidate({ assignedTo: t.agentA, withAccount: true });
     const job = await t.addJob({ description_text: `${JOB.description_text} Must be eligible to work in Canada.` });
@@ -602,15 +687,24 @@ test("relabel (confirm/revoke) changes labels only: score, reasons and created_a
     assert.equal(ok.status, 201);
     const mid = (await t.pool.query("SELECT * FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
     assert.equal(mid.employer_support, "confirmed");
-    assert.equal(mid.score, before.score);
-    assert.deepEqual(mid.reasons, before.reasons);
     assert.equal(mid.created_at.toISOString(), before.created_at.toISOString());
+    assert.equal(mid.id, before.id);
     assert.equal(mid.uncertain.filter((u) => /verify/.test(u)).length, 1);
+    // identical to what a fresh match run produces for the same state: score and reasons are re-scored
+    const fresh = (await matchService.matchCandidate(c.cid))[0];
+    assert.equal(mid.score, fresh.score);
+    assert.deepEqual(mid.reasons, fresh.reasons);
+    assert.deepEqual(mid.missing, fresh.missing);
+    assert.deepEqual(mid.uncertain, fresh.uncertain);
     await t.call("DELETE", `/jobsearch/employer-confirmations/${ok.body.id}`, { token: t.adminToken });
     const after = (await t.pool.query("SELECT * FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
     assert.equal(after.employer_support, "unavailable");
     assert.equal(after.employer_support_conflict, false);
+    assert.equal(after.score, before.score, "score returns to the unconfirmed value");
+    assert.deepEqual(after.reasons, before.reasons);
+    assert.deepEqual(after.missing, before.missing);
     assert.equal(after.uncertain.filter((u) => /verify/.test(u)).length, 0);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_matches")).rows[0].n, 1, "no rows created or deleted");
     // backfill: a pre-005 style application-only row gains job_id/employer_id
     const app = (await t.pool.query("INSERT INTO js_applications (candidate_id, job_id, status) VALUES ($1,$2,'preparing') RETURNING id", [c.cid, job.id])).rows[0].id;
     const row = (await t.pool.query("INSERT INTO js_employer_confirmations (application_id, kind, evidence_text) VALUES ($1,'staff','old') RETURNING id", [app])).rows[0].id;

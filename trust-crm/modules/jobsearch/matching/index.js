@@ -345,7 +345,7 @@ function scoreMatch(profile, prefs, job, opts = {}) {
 
   // 7. overseas / work-authorisation text (5). Never an eligibility claim.
   // Label detection reads the sanitized text BEFORE any sentence dropping: the injection filter must never hide a negative.
-  const rawDesc = sanitizeUntrusted(job.description_text ?? job.description);
+  const rawDesc = job.description_text ?? job.description; // detectors sanitize (uncapped) themselves
   const overseas = detectOverseas(rawDesc);
   const employerSupport = detectEmployerSupport(rawDesc, { confirmation: opts.confirmation });
   if (employerSupport.conflict) uncertain.push("Staff confirmation recorded; the advertisement itself says sponsorship is not available \u2014 verify");
@@ -354,6 +354,7 @@ function scoreMatch(profile, prefs, job, opts = {}) {
     const residence = country(prefs.residence_country);
     const local = residence && jobCountry && residence === jobCountry;
     let o;
+    if (overseas.blocked && overseas.accepted === null) uncertain.push(`The ad mentions overseas candidates but also states a restriction (${overseas.blocked}); it is not treated as open to overseas applicants`);
     if (local) o = 1;
     else if (overseas.accepted === true) {
       o = 1;

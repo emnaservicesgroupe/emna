@@ -41,11 +41,11 @@
    "expect": "unavailable"
   },
   {
-   "text": "Le soutien à l'immigration n'est pas offert",
+   "text": "Le soutien \u00e0 l'immigration n'est pas offert",
    "expect": "unavailable"
   },
   {
-   "text": "Ce poste n'est pas admissible à une EIMT",
+   "text": "Ce poste n'est pas admissible \u00e0 une EIMT",
    "expect": "unavailable"
   },
   {
@@ -77,11 +77,11 @@
    "expect": "unavailable"
   },
   {
-   "text": "Réservé aux citoyens canadiens et résidents permanents seulement",
+   "text": "R\u00e9serv\u00e9 aux citoyens canadiens et r\u00e9sidents permanents seulement",
    "expect": "unavailable"
   },
   {
-   "text": "Réservé aux citoyens canadiens et résidents permanents",
+   "text": "R\u00e9serv\u00e9 aux citoyens canadiens et r\u00e9sidents permanents",
    "expect": "unavailable"
   },
   {
@@ -125,7 +125,7 @@
    "expect": "unavailable"
   },
   {
-   "text": "aucun soutien à l'immigration",
+   "text": "aucun soutien \u00e0 l'immigration",
    "expect": "unavailable"
   },
   {
@@ -137,7 +137,7 @@
    "expect": "unavailable"
   },
   {
-   "text": "Aucune EIMT ne sera demandée",
+   "text": "Aucune EIMT ne sera demand\u00e9e",
    "expect": "unavailable"
   },
   {
@@ -193,11 +193,11 @@
    "expect": "unavailable"
   },
   {
-   "text": "Citoyens canadiens et résidents permanents seulement",
+   "text": "Citoyens canadiens et r\u00e9sidents permanents seulement",
    "expect": "unavailable"
   },
   {
-   "text": "Vous devez être autorisé à travailler au Canada",
+   "text": "Vous devez \u00eatre autoris\u00e9 \u00e0 travailler au Canada",
    "expect": "unavailable"
   },
   {
@@ -294,7 +294,7 @@
   },
   {
    "text": "LMIA",
-   "expect": "stated_in_ad"
+   "expect": "unknown"
   },
   {
    "text": "LMIA approved position",
@@ -306,7 +306,7 @@
   },
   {
    "text": "visa sponsorship",
-   "expect": "stated_in_ad"
+   "expect": "unknown"
   },
   {
    "text": "VISA SPONSORSHIP AVAILABLE",
@@ -321,15 +321,15 @@
    "expect": "stated_in_ad"
   },
   {
-   "text": "soutien à l'immigration",
-   "expect": "stated_in_ad"
+   "text": "soutien \u00e0 l'immigration",
+   "expect": "unknown"
   },
   {
    "text": "LMIA in process",
-   "expect": "stated_in_ad"
+   "expect": "unknown"
   },
   {
-   "text": "LMÏA approved",
+   "text": "LM\u00cfA approved",
    "expect": "stated_in_ad"
   },
   {
@@ -338,14 +338,14 @@
   },
   {
    "text": "Poste avec EIMT",
-   "expect": "stated_in_ad"
+   "expect": "unknown"
   },
   {
    "text": "Visa sponsorship available for the right candidate",
    "expect": "stated_in_ad"
   },
   {
-   "text": "Soutien à l'immigration offert",
+   "text": "Soutien \u00e0 l'immigration offert",
    "expect": "stated_in_ad"
   },
   {
@@ -365,11 +365,11 @@
    "expect": "stated_in_ad"
   },
   {
-   "text": "EIMT approuvée.",
+   "text": "EIMT approuv\u00e9e.",
    "expect": "stated_in_ad"
   },
   {
-   "text": "Nous offrons un soutien à l'immigration.",
+   "text": "Nous offrons un soutien \u00e0 l'immigration.",
    "expect": "stated_in_ad"
   },
   {
@@ -505,11 +505,11 @@
    "expect": "unavailable"
   },
   {
-   "text": "Le candidat doit être autorisé à travailler au Canada.",
+   "text": "Le candidat doit \u00eatre autoris\u00e9 \u00e0 travailler au Canada.",
    "expect": "unavailable"
   },
   {
-   "text": "EIMT approuvée, mais les candidats doivent être autorisés à travailler au Canada.",
+   "text": "EIMT approuv\u00e9e, mais les candidats doivent \u00eatre autoris\u00e9s \u00e0 travailler au Canada.",
    "expect": "unavailable"
   },
   {
@@ -517,7 +517,7 @@
    "expect": "unavailable"
   },
   {
-   "text": "Soutien à l'immigration : non.",
+   "text": "Soutien \u00e0 l'immigration : non.",
    "expect": "unavailable"
   },
   {
@@ -533,7 +533,7 @@
    "expect": "unavailable"
   },
   {
-   "text": "Visa sponsorship — not available",
+   "text": "Visa sponsorship \u2014 not available",
    "expect": "unavailable"
   },
   {
@@ -713,7 +713,7 @@
    "expect": "unavailable"
   },
   {
-   "text": "LMIA – ✗",
+   "text": "LMIA \u2013 \u2717",
    "expect": "unavailable"
   },
   {
@@ -801,12 +801,966 @@
    "expect": "stated_in_ad"
   },
   {
-   "text": "EIMT approuvée pour ce poste.",
+   "text": "EIMT approuv\u00e9e pour ce poste.",
    "expect": "stated_in_ad"
   },
   {
    "text": "Work permit sponsorship for qualified applicants.",
+   "expect": "unknown"
+  },
+  {
+   "text": "Benefits:\n- Dental\n- Visa sponsorship: No\n- Parking",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "What we offer:\n* Competitive pay\n* Visa sponsorship \u2014 N/A",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "| Perk | Offered |\n|---|---|\n| Visa sponsorship | No |",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship | No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Sponsorship \u2014 N/A. LMIA \u2014 N/A.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA: TBD",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: TBD",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship subject to approval.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Depending on the candidate's profile we may offer visa sponsorship.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available after 6 months of employment.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship offered after probation, at management's discretion.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "This role is LMIA-exempt; we provide no LMIA.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA-exempt position (Francophone Mobility). Candidates arrange their own permit.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Open work permit holders only. Visa sponsorship is not part of this offer.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Ideal for IEC/PVT participants. We do not sponsor.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Spousal open permit holders welcome. Sponsorship: none.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Salary: $22/h, no tips. Visa sponsorship unavailable.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Q: Do you sponsor visas?\nA: No.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "FAQ \u2014 Do you offer LMIA? \u2014 Nope, sorry.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Q: Visa sponsorship?\nA: Unfortunately we can't.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "VISA SPONSORSHIP: NOT OFFERED",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa spon\u200bsorship is n\u200bot available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa\u00a0sponsorship\u00a0not\u00a0available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\u00a0: non disponible",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage de visa : non offert.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage disponible ? Non.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "EIMT : \u00e0 confirmer.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "EIMT possible selon le profil.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Une EIMT pourrait \u00eatre envisag\u00e9e.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Nous offrons le parrainage de visa uniquement aux employ\u00e9s apr\u00e8s un an.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We offer visa sponsorship to current employees only (internal transfers).",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is available for senior roles only; this junior role does not qualify.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA approved positions are listed separately; this one is not one of them.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We previously offered LMIA, discontinued in 2025.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA application was rejected.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA withdrawn.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: unlikely.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is rarely offered.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship would be considered for exceptional candidates.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship to be discussed.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship negotiable.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: ask HR.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We're hoping to offer visa sponsorship next year.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA planned for Q3.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA expected.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA applied for, decision awaited.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship (limited) \u2014 not guaranteed.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\n\nNo",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\n\n\nNot provided",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship:\n\n- No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship \u274c",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: \ud83d\udeab",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: 0",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: false",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: no; relocation: yes.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Relocation: yes, visa sponsorship: no",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship, relocation and housing are not provided.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We offer relocation but visa sponsorship is out of scope.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is beyond what we can offer.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is off the table.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA? Nope.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Sponsorship of foreign workers: declined.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Applicants who need a visa will be rejected.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Must hold PR status. Visa sponsorship available for spouses' insurance plans.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Must be a Canadian PR. LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Permanent residency required. Visa sponsorship available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Security clearance (Secret) required; visa sponsorship available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Candidats : statut de r\u00e9sident permanent exig\u00e9. EIMT approuv\u00e9e.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Seuls les d\u00e9tenteurs d'un permis de travail valide seront consid\u00e9r\u00e9s. Parrainage disponible.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Avoir d\u00e9j\u00e0 un permis de travail valide. EIMT approuv\u00e9e.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "You must already have a work permit. LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Valid work permit required at start date. Visa sponsorship available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Proof of work eligibility in Canada required. LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "This employer is not LMIA-approved but visa sponsorship available through an agency at your cost.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available at the candidate's own expense.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available \u2014 candidate pays all fees.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We help with visa paperwork for a fee of $5,000.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA available for sale.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Not a remote position; visa sponsorship available.",
    "expect": "stated_in_ad"
+  },
+  {
+   "text": "Not only do we sponsor visas, we also relocate you.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We are an LMIA-approved employer hiring cooks for our Banff kitchen.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Benefits:\n- Dental\n- Visa sponsorship\n- Parking",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "What we offer: visa sponsorship, housing, and a signing bonus.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship | Yes",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: yes",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved position for a long-haul truck driver.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Positive LMIA in hand for 3 welders.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We sponsor work permits for qualified candidates.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Immigration support provided for successful hires.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "EIMT approuv\u00e9e pour ce poste de boucher.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Nous parrainons les travailleurs \u00e9trangers qualifi\u00e9s.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Soutien \u00e0 l'immigration offert.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Parrainage disponible pour les candidats retenus.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Full-time, 40 hours/week, $24/hr. LMIA approved. No experience necessary, training provided.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Join our team! We offer visa sponsorship and relocation support.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "The employer will provide visa sponsorship for this role.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Work permit sponsorship available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Our company sponsors work visas for international hires.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Company offers visa sponsorship to the selected candidate.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA has been approved for this job.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is n\u00adot available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is n\u2060ot available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is \uff2e\uff2f\uff34 available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is n\u043et available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is not\u2028available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\u2028No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\r\nNo",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\rNo",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\u0085No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Sponsorship\u2014No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\u00a0: N/A",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: N.A.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: n.a",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: -",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: Non applicable",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: Nein",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship (no)",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship [No]",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship = no",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship \u2192 No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship >> No",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship...no",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship? No!",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship?\n\nUnfortunately, this is a no.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship, sadly, isn\u2019t something we do.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is something we cannot do.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA support: out of the question.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\n\u2014 not this time.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available? Absolutely not.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available: never",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship \u2014 zero.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship, relocation: neither offered.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We can offer relocation, but visa sponsorship, LMIA or any immigration support are excluded from this offer.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship excluded.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is not, and will not be, available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA approved (expired 2024).",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA approved in 2019 for a different role.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Our sister company is LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Ask us about LMIA after your first year.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA possible later on.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA eventually, maybe.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship for exceptional candidates at our discretion.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship case by case.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship on a case-by-case basis.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship upon request and approval by head office.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship upon successful completion of probation.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship once you've worked for us for 2 years.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Applicants must be Canadian permanent residents. LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Open to PR holders. LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "PR card required. Visa sponsorship available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Requirements:\n- 2 years experience\n- Canadian work permit\nWhat we offer:\n- Visa sponsorship",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Requirements: valid work visa.\nBenefits: visa sponsorship.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Requirement: Status in Canada (PR/Citizen). Benefits: LMIA approved.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Exigences : statut de RP ou citoyen. Avantages : EIMT approuv\u00e9e.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Vous devez d\u00e9tenir un permis de travail ouvert. EIMT approuv\u00e9e.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Exig\u00e9 : permis de travail. Parrainage disponible.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Le parrainage n\u2019est malheureusement pas offert, EIMT non plus.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "EIMT approuv\u00e9e ? Pas pour ce poste.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage de visa : \u00e0 discuter.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage de visa : selon le profil.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage de visa apr\u00e8s 6 mois.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Parrainage : peut-\u00eatre.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship / Parrainage: No / Non",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Sponsorship: Yes for US roles, No for Canada roles. This role is in Canada.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available for the Dublin office only. This role is based in Toronto.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available in our US offices; not for this Canadian posting.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "International applicants require LMIA which we will not provide.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA: \u2713 (other positions), \u2717 (this one)",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA is the candidate\u2019s responsibility.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship is the employee's responsibility.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Responsible for visa sponsorship files of our clients (immigration paralegal role).",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Immigration consultant: you will prepare LMIA applications for clients.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Job duties: process LMIA applications and visa sponsorship requests for employers.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Coordinate visa sponsorship for our clients' employees.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Not a remote position, visa sponsorship available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "No remote work, but visa sponsorship is available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "No weekends! Visa sponsorship offered.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Never a dull day \u2014 and yes, we offer visa sponsorship.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We don't just hire, we sponsor work permits too.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We will sponsor your work permit.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Employer will apply for an LMIA on your behalf.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We'll handle the LMIA process for you.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA support provided by the employer.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "This job comes with an approved LMIA.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Approved LMIA.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Positive LMIA issued.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA-supported position.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We assist with work permit applications.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Help with immigration paperwork (LMIA) is included.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Nous offrons le parrainage du permis de travail.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "L'employeur fera la demande d'EIMT.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "EIMT positive obtenue.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Poste avec EIMT approuv\u00e9e, logement fourni.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Cook \u2014 Banff, AB\n\nWe are hiring 4 cooks. $19/h, 40h/week.\nBenefits:\n- Staff accommodation\n- LMIA approved\n- Meals on shift\n\nApply with your resume.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "About us: family-run trucking company.\nWhat we offer:\n\u2022 Visa sponsorship\n\u2022 Paid training\n\u2022 Health benefits",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Welder (Red Seal not required). Full-time. Positive LMIA obtained. Relocation assistance provided. No experience with our software needed.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We offer visa sponsorship to qualified candidates.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "LMIA approved position for a line cook.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Our company is an LMIA approved employer.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We sponsor work permits for skilled trades.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Visa sponsorship is available for the right candidate.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "The employer will provide visa sponsorship and relocation help.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We provide immigration support to our new hires.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We handle the work permit application for you.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Immigration assistance is included in the package.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Positive LMIA obtained for 2 positions.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Visa sponsorship offered to successful applicants.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Work permit sponsorship available for foreign workers.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Nous parrainons les permis de travail des candidats retenus.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "L'employeur fera la demande d'EIMT pour vous.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Permis de travail fourni par l'employeur.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Soutien \u00e0 l'immigration offert aux candidats retenus.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Sponsorship available for the selected candidate.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We cover the cost of your work permit.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Company will sponsor your visa after hiring.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We are able to provide LMIA support.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Our employer can arrange a work permit for you.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Approved LMIA in place.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Benefits:\n- Health plan\n- Visa sponsorship\n- Paid vacation",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "What we offer: LMIA approved job, housing, and training.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Cook wanted. Meals provided. LMIA approved. Start in January.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Hiring forklift operators! We offer visa sponsorship and paid training.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "No experience required. We sponsor work permits.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Not a remote job. We offer visa sponsorship.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Parrainage disponible pour les candidats qualifi\u00e9s.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Our company sponsors work visas for international hires.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We also provide visa sponsorship for qualified candidates.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "LMIA-approved employer hiring drivers.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "Employer provides work permit support.",
+   "expect": "stated_in_ad",
+   "control": true
+  },
+  {
+   "text": "We will gladly offer visa sponsorship to the right person.",
+   "expect": "stated_in_ad",
+   "control": true
   }
  ],
  "overseas": [
@@ -851,11 +1805,11 @@
    "expect": "false"
   },
   {
-   "text": "Les candidats internationaux ne sont pas acceptés.",
+   "text": "Les candidats internationaux ne sont pas accept\u00e9s.",
    "expect": "false"
   },
   {
-   "text": "Ouvert aux candidats internationaux, mais doit résider au Canada.",
+   "text": "Ouvert aux candidats internationaux, mais doit r\u00e9sider au Canada.",
    "expect": "false"
   },
   {
@@ -891,7 +1845,7 @@
    "expect": "false"
   },
   {
-   "text": "Résidents canadiens seulement.",
+   "text": "R\u00e9sidents canadiens seulement.",
    "expect": "false"
   },
   {
@@ -919,7 +1873,7 @@
    "expect": "false"
   },
   {
-   "text": "Les candidats de l'étranger ne sont pas acceptés",
+   "text": "Les candidats de l'\u00e9tranger ne sont pas accept\u00e9s",
    "expect": "false"
   },
   {
@@ -971,7 +1925,7 @@
    "expect": "false"
   },
   {
-   "text": "Les candidats de l'étranger:\nNon",
+   "text": "Les candidats de l'\u00e9tranger:\nNon",
    "expect": "false"
   },
   {
@@ -1035,12 +1989,12 @@
    "expect": "true"
   },
   {
-   "text": "Ouvert aux candidats de l'étranger.",
+   "text": "Ouvert aux candidats de l'\u00e9tranger.",
    "expect": "true"
   },
   {
    "text": "Relocation assistance available.",
-   "expect": "true"
+   "expect": "null"
   },
   {
    "text": "Candidates from overseas are encouraged to apply!",
@@ -1056,7 +2010,7 @@
   },
   {
    "text": "Relocation provided",
-   "expect": "true"
+   "expect": "null"
   },
   {
    "text": "Relocation provided for overseas hires",
@@ -1089,6 +2043,311 @@
   {
    "text": "Overseas applicants: considered.",
    "expect": "null|true"
+  },
+  {
+   "text": "International applicants welcome.\nRequirements: must be based in Toronto.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international applicants. Requirements: valid Canadian work permit.",
+   "expect": "!true"
+  },
+  {
+   "text": "Overseas candidates welcome \u2014 subject to approval.",
+   "expect": "!true"
+  },
+  {
+   "text": "International candidates: TBD",
+   "expect": "!true"
+  },
+  {
+   "text": "International applicants | No",
+   "expect": "!true"
+  },
+  {
+   "text": "Q: Do you accept candidates from abroad?\nA: No.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation provided for candidates already living in Ontario.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation assistance provided for moves within the province.",
+   "expect": "!true"
+  },
+  {
+   "text": "International applicants welcome only if already in Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "Foreign applicants are welcome once they have landed in Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international applicants holding an open work permit in Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "We welcome international students currently studying in Montreal.",
+   "expect": "!true"
+  },
+  {
+   "text": "Applicants from abroad accepted after 6 months.",
+   "expect": "!true"
+  },
+  {
+   "text": "Overseas candidates may be considered.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation provided. In-person interview in Calgary required, at your own cost; we do not fly candidates in.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation package offered. Candidates must be in the GTA.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation available. Candidates must live within 50 km of Halifax.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation offered. You must be in Vancouver on day one, no remote onboarding, no visa support.",
+   "expect": "!true"
+  },
+  {
+   "text": "Candidats internationaux bienvenus? Non.",
+   "expect": "!true"
+  },
+  {
+   "text": "Ouvert aux candidats internationaux : non.",
+   "expect": "!true"
+  },
+  {
+   "text": "D\u00e9m\u00e9nagement pris en charge pour les candidats r\u00e9sidant au Qu\u00e9bec.",
+   "expect": "!true"
+  },
+  {
+   "text": "Overseas candidates welcome. Canadian citizenship required.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation provided. Citizens or permanent residents only.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international candidates. Must be eligible to work in Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "Not a remote job. International applicants welcome.",
+   "expect": "true"
+  },
+  {
+   "text": "We welcome international applicants and provide relocation support.",
+   "expect": "true"
+  },
+  {
+   "text": "Relocation assistance is provided.",
+   "expect": "null"
+  },
+  {
+   "text": "International applicants welcome. Interview in person in Montreal, travel at your expense. Must be on site from day one.",
+   "expect": "!true"
+  },
+  {
+   "text": "We welcome overseas applicants. Relocation provided. Only applicants who already hold a Canadian work permit will be considered.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international candidates who are already in the country.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international candidates residing in Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international candidates; Ontario residents only.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to international candidates. Must live in Quebec.",
+   "expect": "!true"
+  },
+  {
+   "text": "Applicants from outside Canada welcome? No.",
+   "expect": "!true"
+  },
+  {
+   "text": "Overseas applicants welcome (Canada-based only).",
+   "expect": "!true"
+  },
+  {
+   "text": "Ouvert aux candidats internationaux r\u00e9sidant d\u00e9j\u00e0 au Qu\u00e9bec.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation offered for internal candidates only.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation provided \u2014 local candidates preferred.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation is available within Canada.",
+   "expect": "!true"
+  },
+  {
+   "text": "Relocation provided to successful local applicants.",
+   "expect": "!true"
+  },
+  {
+   "text": "Candidates from abroad welcome after obtaining PR.",
+   "expect": "!true"
+  },
+  {
+   "text": "Applicants from abroad: welcome if you have a valid work permit.",
+   "expect": "!true"
+  },
+  {
+   "text": "Open to overseas candidates.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "International candidates are welcome to apply.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "We hire foreign workers and offer relocation to overseas hires.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "Candidates from abroad are encouraged to apply.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "Ouvert aux candidats internationaux.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "Relocation package provided for candidates from abroad.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "Applicants from outside Canada are welcome.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "We accept applications from international candidates.",
+   "expect": "true",
+   "control": true
+  },
+  {
+   "text": "Open to international applicants. Relocation provided for overseas hires.",
+   "expect": "true",
+   "control": true
+  }
+ ],
+ "ads": [
+  {
+   "text": "Line Cook - Banff, AB\n\nWe are hiring 4 line cooks for our busy hotel kitchen. $19/hr, 40 hours/week.\n\nBenefits:\n- Staff accommodation\n- LMIA approved\n- Meals on shift\n\nApply with your resume.",
+   "support": "stated_in_ad",
+   "overseas": "null"
+  },
+  {
+   "text": "Truck Driver\n\nAbout us: family-run trucking company in Winnipeg.\nWhat we offer:\n- Visa sponsorship\n- Paid training\n- Health benefits\n\nRequirements:\n- Class 1 licence\n- 2 years experience",
+   "support": "stated_in_ad",
+   "overseas": "null"
+  },
+  {
+   "text": "Welder\n\nWe are looking for welders. Our company sponsors work permits for qualified candidates and we welcome international applicants. Relocation assistance is provided for overseas hires.",
+   "support": "stated_in_ad",
+   "overseas": "true"
+  },
+  {
+   "text": "Poste de boucher\n\nNous offrons un soutien \u00e0 l'immigration et l'EIMT est approuv\u00e9e pour ce poste. Ouvert aux candidats internationaux.",
+   "support": "stated_in_ad",
+   "overseas": "true"
+  },
+  {
+   "text": "Electrician\n\nRequirements:\n- Red Seal\n- Must be eligible to work in Canada\n\nBenefits:\n- Dental\n- Visa sponsorship",
+   "support": "unavailable",
+   "overseas": "null"
+  },
+  {
+   "text": "Office Administrator\n\nVisa sponsorship: No\nRelocation: No\nApplicants must live in Toronto.",
+   "support": "unavailable",
+   "overseas": "false"
+  },
+  {
+   "text": "Warehouse Associate\n\nCanadian citizens and permanent residents only. LMIA approved positions are listed on our other page.",
+   "support": "unavailable",
+   "overseas": "false"
+  },
+  {
+   "text": "Cashier\n\nWe do not sponsor work permits. International applicants are not considered.\nPart-time, $16/hr.",
+   "support": "unavailable",
+   "overseas": "false"
+  },
+  {
+   "text": "Immigration Consultant\n\nYou will prepare LMIA applications and visa sponsorship files for our clients. Licensed RCIC required. International applicants welcome.",
+   "support": "unknown",
+   "overseas": "true"
+  },
+  {
+   "text": "Marketing Coordinator\n\nWe sponsor local events and the Toronto marathon. Join our team of 12. Salary $55,000.",
+   "support": "unknown",
+   "overseas": "null"
+  },
+  {
+   "text": "Server\n\nVisa sponsorship may be available after 6 months of employment, at management's discretion. Evenings and weekends.",
+   "support": "unknown",
+   "overseas": "null"
+  },
+  {
+   "text": "Plumber\n\nLMIA pending. We are an equal opportunity employer. Overseas candidates may be considered.",
+   "support": "unknown",
+   "overseas": "null"
+  },
+  {
+   "text": "Software Developer\n\nBenefits: flexible hours, remote work.\nRequirements: valid work permit required, 3 years experience.\nVisa sponsorship available.",
+   "support": "unavailable",
+   "overseas": "null"
+  },
+  {
+   "text": "Farm Worker\n\nSeasonal. Employer is LMIA approved and provides housing. International applicants welcome. Must be on site from day one.",
+   "support": "stated_in_ad",
+   "overseas": "false"
+  },
+  {
+   "text": "Janitor\n\nNo experience needed. We offer visa sponsorship and training. Not a remote position.",
+   "support": "stated_in_ad",
+   "overseas": "null"
+  },
+  {
+   "text": "Chef de cuisine\n\nExigences : permis de travail valide exig\u00e9.\nAvantages : EIMT approuv\u00e9e.",
+   "support": "unavailable",
+   "overseas": "null"
+  },
+  {
+   "text": "Accountant\n\nFull-time. Competitive salary. Relocation assistance is provided. Visa sponsorship is not available.",
+   "support": "unavailable",
+   "overseas": "null"
+  },
+  {
+   "text": "Care Aide\n\nWe provide LMIA support and immigration assistance. Candidates from abroad are encouraged to apply. Subject to approval, relocation costs are covered.",
+   "support": "stated_in_ad",
+   "overseas": "true"
   }
  ]
 }
