@@ -86,8 +86,8 @@ Exists only when `NODE_ENV=test`. It is never registered on a real server.
 |---|---|
 | File | `modules/jobsearch/mail/imapSmtp.js` |
 | Status today | Sandbox in use (`MAIL_PROVIDER` unset). The SMTP adapter reports `requires_setup`. |
-| Owner provides | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS`, `MAIL_FROM`, `MAIL_REPLY_TO`. Then `MAIL_REAL_SEND=true`. The `MAIL_IMAP_*` variables are not needed (since Task 18). |
-| Status shown | Health: outbound `connected` only when the SMTP settings are valid and `MAIL_REAL_SEND=true` (configuration check, not a live connection test); inbound `webhook` when `INBOUND_MAIL_SECRET` is set, else `requires_setup`. |
+| Owner provides | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS`, `MAIL_FROM` (**required**, a plain address of your domain; Task 19), `MAIL_REPLY_TO`. Then `MAIL_REAL_SEND=true`. The `MAIL_IMAP_*` variables are not needed (since Task 18). |
+| Status shown | Health: with the sandbox, "Sandbox — no real mail is sent" (`mode: "sandbox"`). With SMTP, outbound `connected` only when the SMTP settings and `MAIL_FROM` are valid and `MAIL_REAL_SEND=true` (configuration check, not a live connection test), otherwise the names of the missing variables are listed; inbound `webhook` when `INBOUND_MAIL_SECRET` is set, else `requires_setup`. |
 | Suitable accounts | A mailbox on your own domain at your mail host (e.g. a Hostinger mailbox, Google Workspace, or a transactional provider's SMTP relay). Use an app password if the provider offers one. Configure SPF, DKIM and DMARC for the domain. |
 | Not supported | OAuth sign-in (Gmail/Microsoft OAuth) is not implemented; SMTP with a password or app password only. |
 | Until then | Nothing leaves the server. Candidate sign-in codes and applications are recorded in `js_sandbox_mail` only. |

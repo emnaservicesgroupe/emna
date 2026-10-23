@@ -16,8 +16,8 @@ jobs are those staff enter by hand, and no e-mail actually leaves the server.
 - Tabs: **Dashboard**, **Applications**, **Review**, **Interviews**, **Sources**, **Settings**,
   **Reports**, **Health**, **Scheduler**, **Employers & rules** (employer directory, manual job import,
   employer-support confirmations and automation rules).
-- You only see candidates assigned to you. Admins see everyone. Accountant and HR roles have no access to
-  this module.
+- You only see candidates assigned to you. Admins see everyone and are the only ones who can assign or
+  reassign a candidate (or delete one). Accountant and HR roles have no access to this module.
 - The page refreshes itself when something changes ("Live updates on"). If in doubt, press Refresh.
 
 ### A.2 How a candidate moves through the system
@@ -69,7 +69,7 @@ Only an admin can choose automatic mode or change caps. Caps of 0 mean no automa
 | Delivery unknown | The provider did not answer clearly. It may or may not have arrived. Never re-sent automatically. | Follow the "verify delivery" task (A.6). |
 | Needs staff | The system stopped and needs a person (portal, CAPTCHA, payment, login, declaration, custom question, unclear delivery). | Open the task (A.6). |
 | Not sent | The send failed (e.g. the recipient was refused). | Check the task; fix and prepare again if appropriate. |
-| Cancelled | A reviewer rejected it, consent was withdrawn, or the account was suspended. | Nothing. It is never revived. |
+| Cancelled | A reviewer rejected it, consent was withdrawn, or the account was suspended. The candidate sees only a short fixed reason (e.g. "reviewer rejected"), never the reviewer's own words. | Nothing. It is never revived. |
 | Closed | The job expired or closed. | Nothing. |
 | Interview / Offer / Rejected by employer | Outcome from the employer, set by staff after reading the reply. | Book or update the interview; record the outcome. |
 
@@ -125,9 +125,9 @@ document and sends the application back to preparing.
 - **Search now** queues a search; results appear after the next worker run.
 - Health shows failing sources, the queue and stuck items. Reports and CSV exports show only your
   candidates.
-- **Employers & rules**: search the employer directory; admins (and managers, for employers of their
-  candidates) set an employer's verified domain and contact address, which decide where automatic sends may
-  go. Any staff member with write access can add a job by hand (https links only). Admins record
+- **Employers & rules**: search the employer directory; only admins set an employer's verified domain and
+  contact address, which decide where automatic sends may go (managers may rename employers of their
+  candidates). Any staff member with write access can add a job by hand (https links only). Admins record
   employer-support confirmations (for this job only, or for every job of the employer, with the evidence)
   and revoke them, and create or disable automation rules.
 - Your session lasts 12 hours. If an admin suspends your account, it ends at once.
