@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <title>VITA</title>
+  <link rel="stylesheet" href="vita.css">
+  <link rel="stylesheet" href="print.css" media="print">
+  <script src="i18n.js" defer></script>
+  <script src="vita.js" defer></script>
+  <script src="admin.js" defer></script>
+</head>
+<body data-page="admin" data-title-key="admin.title">
+  <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="index.html"><img src="logo.webp" alt="VITA" width="120" height="40"></a>
+      <div class="header-tools">
+        <span class="live-status" id="live-status" aria-live="polite"></span>
+        <span class="who" id="who"></span>
+        <label for="lang-switch" data-i18n="common.language">Language</label>
+        <select id="lang-switch" data-lang-switch>
+          <option value="ar" lang="ar">العربية</option>
+          <option value="en" lang="en">English</option>
+          <option value="fr" lang="fr">Français</option>
+        </select>
+        <button type="button" class="btn secondary small" id="logout" hidden data-i18n="common.logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+  <div class="title-band">
+    <div class="title-inner">
+      <h1 class="section-title">البحث الآلي عن عمل / AI Job Search &amp; Applications</h1>
+      <p class="subtitle" data-i18n="admin.subtitle">Staff console: candidates, matches, applications, replies and interviews.</p>
+      <span class="accent" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <main id="main" tabindex="-1">
+    <!-- ============================================================ login -->
+    <section id="login-view" class="card login-card" aria-labelledby="login-h" hidden>
+      <h2 id="login-h" data-i18n="login.staffTitle">Staff sign in</h2>
+      <form id="login-form" novalidate>
+        <div class="field">
+          <label for="login-email" data-i18n="login.email">Email</label>
+          <input id="login-email" type="email" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="login-password" data-i18n="login.password">Password</label>
+          <input id="login-password" type="password" autocomplete="current-password" required>
+        </div>
+        <p class="form-error" id="login-error" role="alert"></p>
+        <button type="submit" class="btn" data-i18n="login.submit">Sign in</button>
+      </form>
+    </section>
+
+    <!-- ============================================================ console -->
+    <div id="app-view" hidden>
+      <div class="tabs" role="tablist" id="tabs" data-i18n-aria-label="admin.sections">
+        <button type="button" role="tab" id="tab-dashboard" aria-controls="panel-dashboard" data-tab="dashboard" data-i18n="tab.dashboard">Dashboard</button>
+        <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
+        <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
+        <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
+        <button type="button" role="tab" id="tab-sources" aria-controls="panel-sources" data-tab="sources" data-i18n="tab.sources">Sources</button>
+        <button type="button" role="tab" id="tab-settings" aria-controls="panel-settings" data-tab="settings" data-i18n="tab.settings">Consent &amp; settings</button>
+        <button type="button" role="tab" id="tab-reports" aria-controls="panel-reports" data-tab="reports" data-i18n="tab.reports">Reports</button>
+        <button type="button" role="tab" id="tab-health" aria-controls="panel-health" data-tab="health" data-i18n="tab.health">Health</button>
+        <button type="button" role="tab" id="tab-scheduler" aria-controls="panel-scheduler" data-tab="scheduler" data-i18n="tab.scheduler">Scheduler</button>
+      </div>
+
+      <!-- ---------------------------------------------------------- dashboard -->
+      <section id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard" tabindex="-1">
+        <div class="card">
+          <div class="card-head">
+            <h2 data-i18n="dash.title">Dashboard</h2>
+            <span class="spacer"></span>
+            <label for="dash-candidate" class="sr-only" data-i18n="dash.candidate">Candidate</label>
+            <select id="dash-candidate"></select>
+            <button type="button" class="btn secondary small" id="dash-refresh" data-i18n="common.refresh">Refresh</button>
+          </div>
+          <div id="dash-module" class="btn-row"></div>
+          <div id="dash-totals" aria-live="polite"></div>
+        </div>
+        <div class="card" id="dash-candidate-card" hidden>
+          <div class="card-head">
+            <h2 id="dash-candidate-name"></h2>
+            <span class="spacer"></span>
+            <div class="btn-row" id="dash-candidate-actions"></div>
+          </div>
+          <p class="small muted" id="dash-search-status" aria-live="polite"></p>
+          <div id="dash-lanes" class="lanes"></div>
+        </div>
+        <div class="card">
+          <h2 data-i18n="dash.candidates">Candidates</h2>
+          <div id="dash-candidates"></div>
+        </div>
+        <div class="card">
+          <h2 data-i18n="dash.attention">Needs staff attention</h2>
+          <div id="dash-attention"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- applications -->
+      <section id="panel-applications" role="tabpanel" aria-labelledby="tab-applications" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="apps.title">Applications</h2>
+          <form id="app-filters" class="filters" novalidate>
+            <div class="field"><label for="f-candidate" data-i18n="filter.candidate">Candidate</label><select id="f-candidate" name="candidateId"></select></div>
+            <div class="field"><label for="f-country" data-i18n="filter.country">Country</label><input id="f-country" name="country" type="text" list="country-list" autocomplete="off"></div>
+            <div class="field"><label for="f-profession" data-i18n="filter.profession">Profession</label><input id="f-profession" name="profession" type="text" autocomplete="off"></div>
+            <div class="field"><label for="f-staff" data-i18n="filter.staff">Responsible staff (user ID)</label><input id="f-staff" name="staffId" type="number" min="1" inputmode="numeric"></div>
+            <div class="field"><label for="f-employer" data-i18n="filter.employer">Employer</label><select id="f-employer" name="employerId"></select></div>
+            <div class="field"><label for="f-source" data-i18n="filter.source">Source</label><select id="f-source" name="sourceKey"></select></div>
+            <div class="field"><label for="f-status" data-i18n="filter.status">Status</label><select id="f-status" name="status"></select></div>
+            <div class="field"><label for="f-from" data-i18n="filter.from">Created from</label><input id="f-from" name="from" type="date"></div>
+            <div class="field"><label for="f-to" data-i18n="filter.to">Created before</label><input id="f-to" name="to" type="date"></div>
+            <div class="field btn-row">
+              <button type="submit" class="btn" data-i18n="filter.apply">Apply filters</button>
+              <button type="reset" class="btn secondary" data-i18n="filter.reset">Reset</button>
+            </div>
+          </form>
+          <datalist id="country-list">
+            <option value="Canada"></option><option value="Albania"></option><option value="Romania"></option><option value="Italy"></option>
+          </datalist>
+        </div>
+        <div class="card">
+          <p class="small muted" id="apps-summary" aria-live="polite"></p>
+          <div id="apps-table"></div>
+          <div class="pager" id="apps-pager"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- review queues -->
+      <section id="panel-review" role="tabpanel" aria-labelledby="tab-review" tabindex="-1" hidden>
+        <div class="grid two">
+          <div class="card">
+            <div class="card-head"><h2 data-i18n="review.unmatched">Unmatched replies</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="review-refresh" data-i18n="common.refresh">Refresh</button></div>
+            <p class="small muted" data-i18n="review.unmatchedHint">Replies we could not link to an application with certainty. Read them and assign them to the right application.</p>
+            <div id="review-unmatched"></div>
+          </div>
+          <div class="card">
+            <h2 data-i18n="review.acks">Suggested acknowledgements</h2>
+            <p class="notice info small" data-i18n="review.acksHint">Staff confirmation required: an employer acknowledgement only counts as submission evidence after a staff member confirms it.</p>
+            <div id="review-acks"></div>
+          </div>
+          <div class="card">
+            <h2 data-i18n="review.tasks">Tasks needing a human</h2>
+            <p class="small muted" data-i18n="review.tasksHint">CAPTCHA, payment, login, legal declarations, delivery checks and duplicates are never handled automatically.</p>
+            <div id="review-tasks"></div>
+          </div>
+          <div class="card">
+            <h2 data-i18n="review.replies">Matched replies, drafts and interview requests</h2>
+            <div id="review-matched"></div>
+          </div>
+        </div>
+        <div class="card" id="message-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="message-title" data-i18n="msg.title">Message</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="message-close" data-i18n="common.close">Close</button></div>
+          <div id="message-body"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- interviews -->
+      <section id="panel-interviews" role="tabpanel" aria-labelledby="tab-interviews" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="interviews.title">Interviews</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="interviews-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <p class="small muted" data-i18n="interviews.hint">Times are shown in the interview time zone, in UTC and in your own time zone. Tentative until the candidate confirms availability.</p>
+          <div id="interviews-list"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- sources -->
+      <section id="panel-sources" role="tabpanel" aria-labelledby="tab-sources" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="sources.title">Job sources</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="sources-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <p class="notice info small" data-i18n="sources.hint">Only connected sources return live jobs. Sources that require setup show what is missing; nothing is shown as live until it is configured.</p>
+          <div id="sources-list"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- settings -->
+      <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="-1" hidden>
+        <div class="card">
+          <div class="field">
+            <label for="settings-candidate" data-i18n="settings.candidate">Candidate</label>
+            <select id="settings-candidate"></select>
+          </div>
+          <div class="notice warn">
+            <p><strong data-i18n="settings.warnCv">Uploading a CV never authorizes sending.</strong></p>
+            <p data-i18n="settings.warnCaps">A daily or weekly cap of 0 means no automatic sends at all.</p>
+            <p data-i18n="settings.warnAuto">Only an administrator may choose automatic mode; automatic sends still need submit consent, an approved rule, allowed countries and caps above 0.</p>
+          </div>
+        </div>
+        <div class="grid two">
+          <div class="card"><h2 data-i18n="settings.consentTitle">Consent (read only)</h2><div id="settings-consent"></div></div>
+          <div class="card"><h2 data-i18n="settings.title">Mode, caps and allow-lists</h2><div id="settings-form-box"></div></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- reports -->
+      <section id="panel-reports" role="tabpanel" aria-labelledby="tab-reports" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="reports.title">Reports</h2>
+          <form id="report-form" class="filters" novalidate>
+            <div class="field"><label for="r-from" data-i18n="filter.from">Created from</label><input id="r-from" name="from" type="date"></div>
+            <div class="field"><label for="r-to" data-i18n="reports.to">Up to and including</label><input id="r-to" name="to" type="date"></div>
+            <div class="field"><label for="r-group" data-i18n="reports.groupBy">Group by</label><select id="r-group" name="groupBy"></select></div>
+            <div class="field"><label for="r-period" data-i18n="reports.period">Period</label><select id="r-period" name="period"></select></div>
+            <div class="field btn-row"><button type="submit" class="btn" data-i18n="reports.run">Run report</button></div>
+          </form>
+        </div>
+        <div class="card"><div id="report-out" aria-live="polite"></div></div>
+        <div class="card">
+          <h2 data-i18n="export.title">CSV export</h2>
+          <form id="export-form" class="filters" novalidate>
+            <div class="field"><label for="x-type" data-i18n="export.type">What to export</label><select id="x-type" name="type"></select></div>
+            <div class="field btn-row"><button type="submit" class="btn" data-i18n="export.download">Download CSV</button></div>
+          </form>
+          <p class="small muted" data-i18n="export.hint">The export uses the report date range above, is limited to what you are allowed to see, and is audited.</p>
+          <p class="small" id="export-status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- health -->
+      <section id="panel-health" role="tabpanel" aria-labelledby="tab-health" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="health.title">System health</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="health-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <div id="health-out"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- scheduler -->
+      <section id="panel-scheduler" role="tabpanel" aria-labelledby="tab-scheduler" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="scheduler.title">Scheduler</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="scheduler-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <div id="scheduler-out"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden tabindex="-1">
+    <div class="drawer-head">
+      <h2 id="drawer-title" data-i18n="drawer.title">Application</h2>
+      <button type="button" class="btn secondary small" id="drawer-print" data-i18n="common.print">Print</button>
+      <button type="button" class="btn secondary small" id="drawer-close" data-i18n="common.close">Close</button>
+    </div>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <div id="live" class="sr-only" aria-live="polite"></div>
+  <div id="toasts" class="toasts"></div>
+</body>
+</html>

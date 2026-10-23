@@ -3,6 +3,7 @@
 //   POST /applications/:id/manual-completion  {note, channel?, recipient?, fileRef?} jobsearch:approve + scope; needs_staff -> sent
 //   POST /submissions/:id/evidence            {kind: manual_confirmation|employer_acknowledgement, detail} jobsearch:approve + scope; delivery_receipt -> 400 (system-only)
 //   GET  /submissions?applicationId=          scope; Candidate sees status + timestamps only
+//   GET  /applications/:id/recipient         staff jobsearch:read + scope; read-only recipient preview (Candidate 403)
 //   POST /queue/run                           {kinds?, max?} jobsearch:admin; processes due submit/search items now (cap 50)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
@@ -12,6 +13,7 @@ const { HttpError } = require("../modules/jobsearch/httpError");
 const applicationService = require("../modules/jobsearch/applicationService");
 const submitter = require("../modules/jobsearch/submitter");
 const workers = require("../modules/jobsearch/workers");
+const guard = require("../modules/jobsearch/guard");
 const { logAudit } = require("../utils/audit");
 
 const router = express.Router();
@@ -28,6 +30,24 @@ router.post("/applications/:id/queue", verifyToken, asyncHandler(async (req, res
   const out = await submitter.queueSubmission(app.id, req.user);
   if (!out.queued) return res.status(409).json({ error: out.detail || out.reason, code: out.reason, ...(out.handoff ? { handoff: out.handoff } : {}) });
   return res.json(out);
+}));
+
+// Read-only recipient preview for the human approver (Task 15 UI): where a send of this application
+// would go and where that address came from. Staff with jobsearch:read in scope; candidates 403
+// (recipients are never shown to candidates); 404 outside scope. Nothing is sent or changed.
+router.get("/applications/:id/recipient", verifyToken, asyncHandler(async (req, res) => {
+  const app = await applicationService.loadScoped(req.user, req.params.id); // 404 outside scope
+  if (req.user.role === "Candidate") throw new HttpError(403, "Staff access required");
+  if (!hasPerm(req.user, "jobsearch:read")) throw new HttpError(403, "Permission denied: jobsearch:read");
+  const r = await guard.resolveRecipient(app.id);
+  res.set("Cache-Control", "no-store").json({
+    applicationId: app.id,
+    recipient: r ? r.recipient : null,
+    recipientSource: r ? r.source : null,
+    verified: Boolean(r && r.source === "verified_contact"),
+    domainMatchesEmployer: Boolean(r && r.domainMatchesEmployer),
+    ambiguous: Boolean(r && r.ambiguous),
+  });
 }));
 
 router.post("/applications/:id/manual-completion", verifyToken, asyncHandler(async (req, res) => {

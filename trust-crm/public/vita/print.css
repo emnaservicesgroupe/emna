@@ -1,0 +1,16 @@
+/* VITA printable pages: logo + content, no navigation or controls. */
+@media print {
+  @page { margin: 15mm; }
+  body { background: #fff; color: #000; font-size: 11pt; }
+  .tabs, .header-tools, .btn, .btn-row, .pager, .toasts, .skip-link, .no-print, .drawer-backdrop, form.filters, .live-status, dialog { display: none !important; }
+  .site-header { border: 0; box-shadow: none; }
+  .brand img { block-size: 32px; }
+  .title-band { background: #fff; color: #0b2a5b; border-block-end: 2px solid #0b2a5b; }
+  .section-title, .subtitle { color: #0b2a5b; }
+  .card, .stat, .lane, .table-wrap { box-shadow: none; border-color: #999; break-inside: avoid; }
+  .drawer { position: static; inline-size: auto; box-shadow: none; border: 0; overflow: visible; padding: 0; }
+  a { color: #000; text-decoration: none; }
+  .disclaimer details { display: block; }
+  .disclaimer details > *:not(summary) { display: block !important; }
+  .table-wrap { overflow: visible; }
+}

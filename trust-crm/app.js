@@ -19,6 +19,7 @@ const jobsearchAdminRoutes = require("./routes/jobsearchAdmin");
 const jobsearchInboxRoutes = require("./routes/jobsearchInbox");
 const jobsearchReportsRoutes = require("./routes/jobsearchReports");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
+const { mountVita } = require("./routes/vitaStatic");
 
 const app = express();
 
@@ -57,6 +58,9 @@ app.use("/jobsearch", jobsearchSubmissionsRoutes);
 app.use("/jobsearch", jobsearchAdminRoutes);
 app.use("/jobsearch", jobsearchInboxRoutes);
 app.use("/jobsearch", jobsearchReportsRoutes);
+
+// VITA web UI (static, strict CSP): GET /vita -> /vita/
+mountVita(app);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);
