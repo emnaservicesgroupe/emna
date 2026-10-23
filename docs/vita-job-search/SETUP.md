@@ -206,11 +206,21 @@ nothing half-applied; earlier files stay applied, which is harmless (they are ad
 
 ## 5. First SuperAdmin
 
-`POST /auth/bootstrap-super-admin` works **only while the `users` table is empty**. After the first user
-exists it returns 403.
+`POST /auth/bootstrap-super-admin` works **only while the `users` table is empty** (after the first user
+exists it returns 403; two simultaneous calls create at most one account - the check and the insert run
+under one lock). It is unauthenticated by nature, so it is protected by **where it can be called from**
+(Task 20):
+
+- **With `NODE_ENV=production` the app answers it only for a caller on its own loopback interface**
+  (`127.0.0.1` / `::1`) **and without proxy headers** (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `Via`...).
+  A request relayed by Caddy/nginx - i.e. anything from the internet - gets `404`, like an unknown route.
+- The Docker kit's Caddyfile also answers `404` for this path (any case, extra slashes).
+- So the order of steps is: start the server, then **on the server** run `deploy/hostinger/create-admin.sh`
+  (Docker kit: it posts from inside the app container) - or, without Docker, call it on the server itself:
 
 ```bash
-curl -sS -X POST https://YOUR-HOST/auth/bootstrap-super-admin \
+# on the server, to the app's own port (not through the proxy); production refuses any other caller
+curl -sS -X POST http://127.0.0.1:5000/auth/bootstrap-super-admin \
   -H 'Content-Type: application/json' \
   --data @bootstrap.json
 ```
@@ -230,8 +240,8 @@ That is a floor, not a recommendation:
 - Type it into the file or prompt on the server yourself. Shell history keeps `--data '{"password":…}'`,
   so use a file as above, or a client such as an HTTP tool that does not log bodies.
 
-Do the bootstrap **immediately after** the first start, before the server is reachable by others: until a
-user exists, anyone who reaches the endpoint can create the SuperAdmin.
+Still do the bootstrap **right after** the first start. Outside production (`NODE_ENV` not `production`)
+the loopback rule does not apply: never expose a development server with an empty `users` table.
 
 Log in:
 
@@ -241,6 +251,14 @@ curl -sS -X POST https://YOUR-HOST/auth/login -H 'Content-Type: application/json
 ```
 
 The admin console is at `https://YOUR-HOST/vita/admin.html` and uses the same login.
+
+Sign-in protection (Task 20): an unknown e-mail, a wrong password and an inactive account all get the same
+`400 {"error":"Invalid email or password"}` (unknown e-mails also pay a bcrypt comparison, so timing does not
+reveal which accounts exist). After 5 failures for one e-mail, or 10 failures (or 100 attempts) from one IP
+address, within 15 minutes, `/auth/login` answers `429` with `Retry-After`, even for the right password.
+These counters are kept in memory per app process (reset on restart; not shared between processes - see
+CHECKLIST limitation 3); tune them with `LOGIN_EMAIL_FAILURES`, `LOGIN_IP_FAILURES`, `LOGIN_IP_ATTEMPTS`.
+Behind a proxy they need `TRUST_PROXY` to see client addresses.
 
 Staff tokens carry a version claim (`tv`, from `users.token_version`): every request re-checks that the
 user is still active and has the same role and version. Suspending a user
