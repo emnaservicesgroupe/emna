@@ -543,6 +543,33 @@ test("Task 19 I-2: POST /candidates/add by staff forces assigned_to to the calle
   await q("UPDATE candidates SET is_deleted = true WHERE passport_number LIKE 'PP-T19-%'");
 });
 
+test("Task 20 fix: assigned_to must be a user id or null - '' / non-integers / unknown ids are 400 for everyone; explicit null clears only for an admin (staff null keeps the value)", async () => {
+  const c = await send("POST", "/candidates/add", "admin", { full_name: "Assign Validation", passport_number: "PP-T20-AV", assigned_to: s.users.Y });
+  assert.equal(c.status, 201, JSON.stringify(c.body));
+  const id = c.body.id;
+  for (const who of ["admin", "Y"]) {
+    for (const bad of ["", "abc", "12x", 1.5, -3, 0, true, [s.users.Y], { id: s.users.Y }]) {
+      const r = await send("PUT", `/candidates/${id}`, who, { assigned_to: bad, work_company: "Nope" });
+      assert.equal(r.status, 400, `${who} ${JSON.stringify(bad)} -> ${r.status}`);
+      assert.match(r.body.error, /assigned_to must be/);
+    }
+  }
+  assert.equal((await send("PUT", `/candidates/${id}`, "admin", { assigned_to: 99999999 })).status, 400, "unknown user id");
+  assert.equal(await assignedTo(id), s.users.Y);
+  assert.notEqual((await q("SELECT work_company FROM candidates WHERE id=$1", [id])).rows[0].work_company, "Nope");
+  assert.equal((await send("PUT", `/candidates/${id}`, "Y", { assigned_to: null, work_company: "Kept" })).status, 200);
+  assert.equal(await assignedTo(id), s.users.Y, "staff null keeps the assignee");
+  const cleared = await send("PUT", `/candidates/${id}`, "admin", { assigned_to: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.assigned_to, null, "admin null unassigns");
+  assert.equal((await send("POST", "/candidates/add", "admin", { full_name: "Bad", passport_number: "PP-T20-AV2", assigned_to: "abc" })).status, 400);
+  assert.equal((await send("POST", "/candidates/add", "admin", { full_name: "Bad", passport_number: "PP-T20-AV4", assigned_to: 99999999 })).status, 400, "unknown user id on add");
+  const blank = await send("POST", "/candidates/add", "Y", { full_name: "Blank", passport_number: "PP-T20-AV3", assigned_to: "" });
+  assert.equal(blank.status, 201, "add: '' means not supplied (unchanged)");
+  assert.equal(blank.body.assigned_to, null);
+  await q("UPDATE candidates SET is_deleted = true WHERE passport_number LIKE 'PP-T20-%'");
+});
+
 test("Task 19 I-2: DELETE /candidates/:id is Admin/SuperAdmin only (Manager/Agent/Receptionist 403, row untouched)", async () => {
   const c = await send("POST", "/candidates/add", "admin", { full_name: "Delete Me", passport_number: "PP-T19-DEL", assigned_to: s.users.Y });
   for (const who of ["X", "Y", "receptionist"]) {

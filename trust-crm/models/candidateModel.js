@@ -87,7 +87,8 @@ exports.getCandidateById = async (id) => {
  * can never write back a stale value (e.g. a staff edit of other fields overwriting an admin's reassignment),
  * and assigned_to is written as COALESCE($n, assigned_to) - a caller that does not send it never touches it.
  * opts.canAssign === false: a CHANGE of assigned_to (compared with the LOCKED row) is refused with
- * err.status 403 / err.code ASSIGN_DENIED and nothing is written.
+ * err.status 403 / err.code ASSIGN_DENIED and nothing is written. opts.clearAssignee === true (admins only, decided
+ * by the route): sets assigned_to to NULL.
  */
 exports.updateCandidate = async (id, data, opts = {}) => {
   const client = await db.connect();
@@ -131,7 +132,7 @@ exports.updateCandidate = async (id, data, opts = {}) => {
            visa_status=$8,
            work_company=$9,
            partner_company=$10,
-           assigned_to=COALESCE($11, assigned_to),
+           assigned_to=CASE WHEN $13::boolean THEN NULL ELSE COALESCE($11, assigned_to) END,
            updated_at=NOW()
        WHERE id=$12 AND is_deleted=false
        RETURNING *`,
@@ -148,6 +149,7 @@ exports.updateCandidate = async (id, data, opts = {}) => {
         merged.partner_company,
         wantedAssignee,
         id,
+        opts.clearAssignee === true,
       ]
     );
     await client.query("COMMIT");

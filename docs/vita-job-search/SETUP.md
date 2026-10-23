@@ -308,7 +308,9 @@ What each permission allows (always limited to the candidates the user may see):
   candidate to **that staff member only when the request sends `assigned_to`** (any value they send is
   replaced by their own id); when `assigned_to` is not sent the candidate is created **unassigned**, no
   staff member sees it in the job-search module, and only an admin can assign it later
-  (`PUT /candidates/:id`). `DELETE /candidates/:id` is admin-only.
+  (`PUT /candidates/:id`). `DELETE /candidates/:id` is admin-only. `assigned_to` must be a user id or `null`
+  (anything else, or an unknown id, is 400); an admin sending `null` unassigns the candidate, a staff member's
+  `null` keeps the current value (Task 20).
 
 Outside the module: the original routes `GET /candidates/all`, `GET /candidates/:id`, `PUT /candidates/:id`
 (every field except `assigned_to`), `POST /candidates/:id/stage` (`visa:write`: Admin, Manager, Agent),
