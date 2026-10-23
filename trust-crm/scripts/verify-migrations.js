@@ -4,11 +4,14 @@
 //   2. on existing data: a schema loaded with sql/schema.sql and sample rows in every original table
 //      keeps every original row and column value byte-for-byte after all migrations are applied.
 //
-//   node scripts/verify-migrations.js            (uses TEST_DATABASE_URL, else DATABASE_URL, else DB_*)
+//   TEST_DATABASE_URL=postgres://user:pass@host:5432/db node scripts/verify-migrations.js
 //
+// The database must be named explicitly with TEST_DATABASE_URL (preferred) or DATABASE_URL in the
+// environment. Task 19: there is no fallback to .env / DB_* (a forgotten variable must not silently point
+// the check at whatever database a local .env names).
 // It never touches existing tables: it creates schemas named vm_<random>, pins search_path to them and
-// drops them at the end (also on failure). Exit code 0 = all checks passed, 1 = a check failed.
-require("dotenv").config();
+// drops them at the end (also on failure). Exit code 0 = all checks passed, 1 = a check failed,
+// 2 = no database URL given.
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -22,7 +25,9 @@ const ORIGINAL_TABLES = ["users", "candidates", "visa_applications", "documents"
 function connectionConfig() {
   const url = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
   if (url) return { connectionString: url };
-  return { host: process.env.DB_HOST, user: process.env.DB_USER, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, port: process.env.DB_PORT };
+  const err = new Error("Set TEST_DATABASE_URL or DATABASE_URL (e.g. TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/trustcrm_test); DB_* / .env values are not used by this check");
+  err.code = "NO_DATABASE_URL";
+  throw err;
 }
 
 async function withScratchSchema(fn) {
@@ -148,6 +153,12 @@ async function verifyMigrations(opts = {}) {
 module.exports = { verifyMigrations, verifyFromScratch, verifyOnExistingData };
 
 if (require.main === module) {
+  try {
+    connectionConfig();
+  } catch (err) {
+    console.error(`verify-migrations: ${err.message}`);
+    process.exit(2);
+  }
   verifyMigrations()
     .then((r) => {
       console.log(`OK from scratch: ${r.scratch.applied} migrations applied, ${r.scratch.jsTables} js_* tables, second run applied 0`);
