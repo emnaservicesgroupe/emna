@@ -45,6 +45,7 @@ async function send({ to, subject, text, html, attachments, headers } = {}) {
     filename: a && a.filename,
     contentType: a && a.contentType,
     size: a && a.content ? Buffer.byteLength(a.content) : 0,
+    sha256: a && a.content ? crypto.createHash("sha256").update(a.content).digest("hex") : null,
   }));
   await db().query(
     `INSERT INTO js_sandbox_mail (to_addr, from_addr, subject, body, message_id, headers, attachments)

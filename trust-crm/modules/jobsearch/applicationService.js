@@ -31,7 +31,9 @@ const TRANSITIONS = Object.freeze({
   outcome_unknown: ["sent", "confirmed_submitted", "failed", "needs_staff", "interview", "offer", "rejected", "cancelled", "closed"],
   confirmed_submitted: ["interview", "offer", "rejected", "closed"],
   failed: ["preparing", "needs_staff", "cancelled", "closed"],
-  needs_staff: ["preparing", "failed", "cancelled", "closed"],
+  // sent: ONLY via submitter.recordManualCompletion (staff finished it by hand, evidence required);
+  // confirmed_submitted: ONLY via submitter.recordEvidence (stored evidence record).
+  needs_staff: ["preparing", "sent", "confirmed_submitted", "failed", "cancelled", "closed"],
   interview: ["offer", "rejected", "closed"],
   offer: ["rejected", "closed"],
   rejected: ["closed"],
@@ -45,6 +47,8 @@ const CANCELLABLE_QUEUE_KINDS = consentService.CANCELLABLE_QUEUE_KINDS;
 // Internal capability for non-human approve/queue transitions (autoApprove here; the submitter in
 // Task 11). Exported only as `_internal`; routes never pass it.
 const SYSTEM_GRANT = Symbol("jobsearch.systemSendGrant");
+// Internal capability for needs_staff -> sent (staff-recorded manual completion, Task 11).
+const MANUAL_COMPLETION = Symbol("jobsearch.manualCompletion");
 
 const LABEL_NOTICE = "Employer-support labels are read from the job ad and are informational only. Always verify with the employer before relying on them.";
 const MAX_REASON = 500;
@@ -190,6 +194,14 @@ async function transition(applicationId, to, actor, opts = {}) {
     if (to === "ready_for_review" || (to === "preparing" && ["matched", "failed", "needs_staff"].includes(from))) {
       const blockers = await sendBlockers(client, app.candidate_id, "prepare");
       if (blockers.length) throw new HttpError(409, `Cannot prepare: ${blockers.join(", ")}`);
+    }
+    if (from === "needs_staff" && to === "sent") {
+      // 'manual_completion': staff finished the submission by hand. Needs the internal grant, a user
+      // with jobsearch:approve, and the stored manual-completion evidence row.
+      if (opts[MANUAL_COMPLETION] !== true) throw new HttpError(409, "needs_staff -> sent is only possible as a recorded manual completion");
+      if (!actor || typeof actor !== "object" || !hasPerm(actor, "jobsearch:approve")) throw new HttpError(403, "Manual completion requires a manager or administrator");
+      const ev = await client.query("SELECT 1 FROM js_submissions WHERE application_id = $1 AND status = 'sent' AND evidence->>'phase' = 'manual' AND jsonb_typeof(evidence->'manualCompletion') = 'object'", [id]);
+      if (!ev.rowCount) throw new HttpError(409, "Manual completion requires a stored evidence record");
     }
     if (to === "confirmed_submitted") {
       const ev = await client.query("SELECT 1 FROM js_submissions WHERE application_id = $1 AND status = 'confirmed_submitted' AND evidence IS NOT NULL", [id]);
@@ -802,7 +814,7 @@ module.exports = {
   revokeSharing,
   autoApproveEligibility,
   autoApprove,
-  _internal: { SYSTEM_GRANT },
+  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION },
   approveCvVersion,
   listApplications,
   getApplication,
