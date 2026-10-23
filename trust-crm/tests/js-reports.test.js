@@ -350,6 +350,29 @@ test("health: staff (Agent/Receptionist), Candidate, Accountant 403; Manager and
   }
 });
 
+test("Task 19 I-1/M-3 health mail: sandbox reports mode 'sandbox'; imap_smtp without MAIL_FROM shows outbound not_configured and names MAIL_FROM (no values)", async () => {
+  const sb = (await get("/jobsearch/health", tk.admin)).body.mail;
+  assert.equal(sb.mode, "sandbox");
+  assert.equal(sb.realSend, false);
+  const keys = ["MAIL_PROVIDER", "MAIL_SMTP_HOST", "MAIL_SMTP_USER", "MAIL_SMTP_PASS", "MAIL_FROM", "MAIL_REAL_SEND"];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { MAIL_PROVIDER: "imap_smtp", MAIL_SMTP_HOST: "smtp.example.test", MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "S3cretPass", MAIL_REAL_SEND: "true" });
+  delete process.env.MAIL_FROM;
+  try {
+    const r = await get("/jobsearch/health", tk.admin);
+    assert.equal(r.body.mail.mode, "smtp");
+    assert.equal(r.body.mail.outbound, "not_configured");
+    assert.equal(r.body.mail.status, "requires_setup");
+    assert.deepEqual(r.body.mail.problems, ["MAIL_FROM"]);
+    assert.ok(!r.text.includes("S3cretPass"));
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
 // ---------------------------------------------------------------- CSV
 
 function parseCsv(text) {

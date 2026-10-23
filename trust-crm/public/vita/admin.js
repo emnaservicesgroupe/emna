@@ -1413,6 +1413,14 @@
   }
 
   // ================================================================ health + scheduler
+  // Sandbox mail is never shown as "Connected": it sends nothing (Task 19 M-3).
+  function mailHealthText(m) {
+    if (!m) return "—";
+    if (m.mode === "sandbox") return t("health.mailSandbox");
+    var txt = tc("srcStatus", m.status) + (m.realSend ? " · " + t("health.realSend") : "");
+    if (m.problems && m.problems.length) txt += " · " + t("health.mailMissing", { names: m.problems.join(", ") });
+    return txt;
+  }
   function initHealth() { $("#health-refresh").addEventListener("click", loadHealth); }
   function loadHealth() {
     var box = $("#health-out");
@@ -1429,7 +1437,7 @@
           [t("health.generated"), V.fmtDateTime(hl.generatedAt)],
           [t("health.module"), h("span", { class: "badge " + (hl.modulePaused ? "bad" : "ok"), text: hl.modulePaused ? t("module.paused") : t("module.running") })],
           [t("health.lastTick"), hl.scheduler.lastTickAt ? V.fmtDateTime(hl.scheduler.lastTickAt) + (hl.scheduler.errors ? " · " + t("health.tickErrors", { n: V.fmtNumber(hl.scheduler.errors) }) : "") : t("sources.never")],
-          [t("health.mail"), tc("srcStatus", hl.mail.status) + (hl.mail.realSend ? " · " + t("health.realSend") : " · " + t("health.sandbox"))],
+          [t("health.mail"), mailHealthText(hl.mail)],
           [t("health.scan"), tc("scan", hl.storage.malwareScan)],
           [t("health.unscanned"), hl.storage.unscannedAttachments === "allowed" ? t("health.unscannedAllowed") : t("health.unscannedBlocked")],
         ]),

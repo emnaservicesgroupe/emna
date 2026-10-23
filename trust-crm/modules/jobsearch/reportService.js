@@ -431,7 +431,16 @@ async function health({ user }) {
   let mailStatus;
   try {
     const st = await require("./mail").status();
-    mailStatus = { status: st.status, outbound: st.outbound || null, inbound: st.inbound || null, realSend: process.env.MAIL_REAL_SEND === "true" };
+    // mode 'sandbox' = nothing leaves the server (status 'connected' there means only "the sandbox works");
+    // problems = NAMES of missing/invalid settings (e.g. MAIL_FROM), never values.
+    mailStatus = {
+      status: st.status,
+      mode: st.mode || "smtp",
+      outbound: st.outbound || null,
+      inbound: st.inbound || null,
+      realSend: st.mode !== "sandbox" && process.env.MAIL_REAL_SEND === "true",
+      problems: Array.isArray(st.problems) ? st.problems.map((x) => String(x).slice(0, 120)) : [],
+    };
   } catch (err) {
     mailStatus = { status: "unavailable", error: redactSecrets(err && err.message) };
   }

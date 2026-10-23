@@ -239,8 +239,13 @@ async function checkSend(client, { app, draft, parent, emp, auto }) {
 }
 
 function messageIdForDraft(draftId) {
-  const from = guard.normalizeEmail(process.env.MAIL_FROM || "") || "vita@test.invalid";
-  return `<vita-fu-${draftId}-${crypto.randomBytes(8).toString("hex")}@${from.split("@")[1]}>`;
+  let domain;
+  try {
+    domain = require("./mail/address").messageIdDomain();
+  } catch (err) {
+    throw httpErr(503, err.message, "mail_from_required");
+  }
+  return `<vita-fu-${draftId}-${crypto.randomBytes(8).toString("hex")}@${domain}>`;
 }
 
 /**

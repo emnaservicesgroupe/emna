@@ -31,7 +31,8 @@ function toList(to) {
 }
 
 async function status() {
-  return { status: "connected", detail: `sandbox (recorded in js_sandbox_mail; allow-list: ${allowPatterns().join(", ")})` };
+  // 'connected' is kept for API compatibility; mode 'sandbox' tells every screen that NO real mail is sent.
+  return { status: "connected", mode: "sandbox", detail: `sandbox - no real mail is sent (recorded in js_sandbox_mail; allow-list: ${allowPatterns().join(", ")})` };
 }
 
 async function send({ to, subject, text, html, attachments, headers } = {}) {

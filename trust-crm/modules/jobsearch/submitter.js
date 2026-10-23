@@ -28,6 +28,7 @@ const consentService = require("./consentService");
 const guard = require("./guard");
 const queue = require("./queue");
 const emailChannel = require("./channels/email");
+const mailAddress = require("./mail/address");
 const unsupported = require("./channels/unsupported");
 const { candidateScopeSql } = require("./scope");
 const { PERMISSIONS } = require("../../middleware/role");
@@ -172,18 +173,16 @@ async function findByReplyToken(token, client) {
   return row;
 }
 
-function fromAddress() {
-  return guard.normalizeEmail(process.env.MAIL_FROM || "") || "vita@test.invalid";
-}
-
+// MAIL_FROM / MAIL_REPLY_TO (mail/address.js): plain addresses only; outside NODE_ENV=test an unset or
+// invalid MAIL_FROM throws MAIL_FROM_REQUIRED here, before any intent is recorded (-> internal_error task).
 function replyToAddress(token) {
-  const base = guard.normalizeEmail(process.env.MAIL_REPLY_TO || "") || fromAddress();
+  const base = mailAddress.replyToBase();
   const [local, domain] = base.split("@");
   return `${local}+${token.toLowerCase()}@${domain}`;
 }
 
 function messageIdFor(applicationId, submissionId) {
-  const domain = fromAddress().split("@")[1];
+  const domain = mailAddress.messageIdDomain();
   return `<vita-${applicationId}-${submissionId}-${crypto.randomBytes(8).toString("hex")}@${domain}>`;
 }
 

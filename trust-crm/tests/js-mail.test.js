@@ -109,7 +109,7 @@ test("MAIL_PROVIDER=imap_smtp selects imapSmtp; unknown value falls back to sand
 test("imapSmtp refuses to send unless MAIL_REAL_SEND=true", async () => {
   const imap = require("../modules/jobsearch/mail/imapSmtp");
   Object.assign(process.env, {
-    MAIL_SMTP_HOST: "smtp.invalid", MAIL_SMTP_USER: "u", MAIL_SMTP_PASS: "p",
+    MAIL_SMTP_HOST: "smtp.invalid", MAIL_SMTP_USER: "u", MAIL_SMTP_PASS: "p", MAIL_FROM: "jobs@vita.test.invalid",
     MAIL_IMAP_HOST: "imap.invalid", MAIL_IMAP_USER: "u", MAIL_IMAP_PASS: "p",
   });
   delete process.env.MAIL_REAL_SEND;
@@ -121,12 +121,13 @@ test("imapSmtp refuses to send unless MAIL_REAL_SEND=true", async () => {
     assert.equal(r.accepted, false);
   } finally {
     for (const k of Object.keys(process.env)) if (/^MAIL_(SMTP|IMAP)_/.test(k)) delete process.env[k];
+    delete process.env.MAIL_FROM;
   }
 });
 
 // ---------------------------------------------------------------- Task 18: SMTP needs only SMTP settings
 
-const SMTP_KEYS = ["MAIL_FROM", "MAIL_SMTP_HOST", "MAIL_SMTP_PORT", "MAIL_SMTP_USER", "MAIL_SMTP_PASS", "MAIL_IMAP_HOST", "MAIL_IMAP_USER", "MAIL_IMAP_PASS", "MAIL_REAL_SEND", "INBOUND_MAIL_SECRET"];
+const SMTP_KEYS = ["MAIL_FROM", "MAIL_REPLY_TO", "MAIL_SMTP_HOST", "MAIL_SMTP_PORT", "MAIL_SMTP_USER", "MAIL_SMTP_PASS", "MAIL_IMAP_HOST", "MAIL_IMAP_USER", "MAIL_IMAP_PASS", "MAIL_REAL_SEND", "INBOUND_MAIL_SECRET"];
 async function withMailEnv(env, fn) {
   const saved = Object.fromEntries(SMTP_KEYS.map((k) => [k, process.env[k]]));
   for (const k of SMTP_KEYS) delete process.env[k];
@@ -195,7 +196,7 @@ test("Task 18 imapSmtp: real sending needs ONLY the SMTP settings + MAIL_REAL_SE
       assert.match(smtp.got[0].data, /Subject: Application/);
     });
     // MAIL_REAL_SEND not true: nothing reaches the server (sandbox default unchanged)
-    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw" }, async () => {
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw", MAIL_FROM: "applications@vita.test.invalid" }, async () => {
       const r = await imap.send({ to: "hr@employer.test.invalid", subject: "x", text: "y" });
       assert.equal(r.accepted, false);
       assert.equal(smtp.got.length, 1);
@@ -211,7 +212,8 @@ test("Task 18 imapSmtp: real sending needs ONLY the SMTP settings + MAIL_REAL_SE
 
 test("Task 18 imapSmtp.status(): outbound 'connected' only with valid SMTP settings AND MAIL_REAL_SEND=true; inbound 'webhook' vs 'requires_setup'", async () => {
   const imap = require("../modules/jobsearch/mail/imapSmtp");
-  const SMTP = { MAIL_SMTP_HOST: "smtp.example.test", MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "secret-value" };
+  // Task 19: MAIL_FROM is part of a valid outbound configuration (I-1).
+  const SMTP = { MAIL_SMTP_HOST: "smtp.example.test", MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "secret-value", MAIL_FROM: "jobs@vita.example" };
   const cases = [
     [{}, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
     [{ MAIL_IMAP_HOST: "imap.x", MAIL_IMAP_USER: "u", MAIL_IMAP_PASS: "p", MAIL_REAL_SEND: "true" }, { status: "requires_setup", outbound: "not_configured", inbound: "requires_setup" }],
@@ -234,4 +236,85 @@ test("Task 18 imapSmtp.status(): outbound 'connected' only with valid SMTP setti
     });
   }
   await withMailEnv({ MAIL_SMTP_PORT: "abc" }, async () => assert.match((await imap.status()).detail, /MAIL_SMTP_PORT/));
+});
+
+// ---------------------------------------------------------------- Task 19 I-1: MAIL_FROM is required for real sends
+
+test("Task 19 I-1 imapSmtp: MAIL_FROM unset -> outbound not_configured, Health detail names MAIL_FROM, real send refused (nothing reaches SMTP)", async () => {
+  const imap = require("../modules/jobsearch/mail/imapSmtp");
+  const smtp = await fakeSmtp();
+  try {
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw", MAIL_REAL_SEND: "true", INBOUND_MAIL_SECRET: "s" }, async () => {
+      const s = await imap.status();
+      assert.equal(s.outbound, "not_configured");
+      assert.equal(s.status, "requires_setup");
+      assert.match(s.detail, /MAIL_FROM/);
+      assert.deepEqual(imap.problems(), ["MAIL_FROM"]);
+      await assert.rejects(imap.send({ to: "hr@employer.test.invalid", subject: "s", text: "t" }), (e) => e.code === "REQUIRES_SETUP" && /MAIL_FROM/.test(e.message));
+      assert.equal(smtp.got.length, 0);
+    });
+  } finally {
+    await smtp.close();
+  }
+});
+
+test("Task 19 I-1: MAIL_FROM must be a plain address (CRLF, display names, lists, junk -> not_configured; never sent)", async () => {
+  const imap = require("../modules/jobsearch/mail/imapSmtp");
+  const SMTP = { MAIL_SMTP_HOST: "smtp.example.test", MAIL_SMTP_USER: "vita", MAIL_SMTP_PASS: "pw", MAIL_REAL_SEND: "true" };
+  for (const bad of ["jobs@vita.example\r\nBcc: x@evil.example", "jobs@vita.example\n", "\r\njobs@vita.example", "VITA <jobs@vita.example>", "\"VITA\" jobs@vita.example", "jobs@vita.example, x@evil.example", "jobs", "@vita.example", "jobs@localhost", "jobs@vita.example>"]) {
+    await withMailEnv({ ...SMTP, MAIL_FROM: bad }, async () => {
+      const s = await imap.status();
+      assert.equal(s.outbound, "not_configured", JSON.stringify(bad));
+      assert.match(s.detail, /MAIL_FROM \(must be a plain address/, JSON.stringify(bad));
+      await assert.rejects(imap.send({ to: "a@test.invalid", subject: "s", text: "t" }), (e) => e.code === "REQUIRES_SETUP");
+    });
+  }
+  await withMailEnv({ ...SMTP, MAIL_FROM: "  Jobs@Vita.Example " }, async () => assert.equal((await imap.status()).outbound, "connected"));
+  await withMailEnv({ ...SMTP, MAIL_FROM: "jobs@vita.example", MAIL_REPLY_TO: "x@y.example\r\nBcc: z@evil.example" }, async () => {
+    assert.equal((await imap.status()).outbound, "not_configured");
+    assert.match((await imap.status()).detail, /MAIL_REPLY_TO/);
+  });
+  delete process.env.MAIL_REPLY_TO;
+});
+
+test("Task 19 I-1 fromAddress(): configured plain address; test-only fallback; throws outside NODE_ENV=test when unset or invalid", () => {
+  const addr = require("../modules/jobsearch/mail/address");
+  const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM, MAIL_REPLY_TO: process.env.MAIL_REPLY_TO };
+  try {
+    delete process.env.MAIL_REPLY_TO;
+    process.env.MAIL_FROM = "Applications@Agency.Example";
+    process.env.NODE_ENV = "production";
+    assert.equal(addr.fromAddress(), "applications@agency.example");
+    assert.equal(addr.replyToBase(), "applications@agency.example");
+    process.env.MAIL_REPLY_TO = "replies@agency.example";
+    assert.equal(addr.replyToBase(), "replies@agency.example");
+    delete process.env.MAIL_FROM;
+    assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED" && /MAIL_FROM/.test(e.message));
+    process.env.MAIL_FROM = "jobs@agency.example\r\nBcc: x@evil.example";
+    assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED");
+    process.env.NODE_ENV = "development";
+    assert.throws(() => addr.fromAddress(), (e) => e.code === "MAIL_FROM_REQUIRED");
+    process.env.NODE_ENV = "test";
+    delete process.env.MAIL_FROM;
+    assert.equal(addr.fromAddress(), "vita@test.invalid");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+test("Task 19 I-1: imapSmtp sends From: exactly MAIL_FROM (never the SMTP user)", async () => {
+  const imap = require("../modules/jobsearch/mail/imapSmtp");
+  const smtp = await fakeSmtp();
+  try {
+    await withMailEnv({ MAIL_SMTP_HOST: "127.0.0.1", MAIL_SMTP_PORT: String(smtp.port), MAIL_SMTP_USER: "smtp-login-user", MAIL_SMTP_PASS: "pw", MAIL_REAL_SEND: "true", MAIL_FROM: "applications@agency.test.invalid" }, async () => {
+      assert.equal((await imap.send({ to: "hr@employer.test.invalid", subject: "x", text: "y" })).accepted, true);
+      assert.match(smtp.got[0].from, /applications@agency\.test\.invalid/);
+      assert.match(smtp.got[0].data, /From: applications@agency\.test\.invalid/);
+    });
+  } finally {
+    await smtp.close();
+  }
 });

@@ -993,3 +993,46 @@ test("workers: handlers map submit/search; startWorkers is disabled under NODE_E
   assert.equal(workers.startWorkers(), null);
   assert.equal(workers.enabled(), false);
 });
+
+// ---------------------------------------------------------------- Task 19 I-1: MAIL_FROM drives Reply-To / Message-ID
+
+test("Task 19 I-1: Reply-To and Message-ID use the MAIL_FROM domain (never test.invalid)", async () => {
+  const saved = process.env.MAIL_FROM;
+  process.env.MAIL_FROM = "Jobs@Mail.Agency-Example.org";
+  try {
+    const w = await world();
+    const r = await queued(w);
+    assert.equal((await submitter.handleSubmit(r.job, DEPS)).status, "sent");
+    const [m] = await outbound(w.recipient);
+    assert.match(m.headers["Reply-To"], /^jobs\+vita-[a-f0-9]{20}@mail\.agency-example\.org$/);
+    assert.match(m.headers["Message-ID"], /^<vita-\d+-\d+-[a-f0-9]{16}@mail\.agency-example\.org>$/);
+    assert.ok(!JSON.stringify(m.headers).includes("test.invalid"));
+  } finally {
+    process.env.MAIL_FROM = saved;
+  }
+});
+
+test("Task 19 I-1: outside NODE_ENV=test an unset or CRLF-tainted MAIL_FROM refuses the send before any intent (internal_error task, zero mails)", async () => {
+  for (const bad of [undefined, "jobs@vita.test.invalid\r\nBcc: spy@evil.example"]) {
+    const saved = { NODE_ENV: process.env.NODE_ENV, MAIL_FROM: process.env.MAIL_FROM };
+    const w = await world();
+    const r = await queued(w);
+    process.env.NODE_ENV = "production";
+    if (bad === undefined) delete process.env.MAIL_FROM;
+    else process.env.MAIL_FROM = bad;
+    let out;
+    try {
+      out = await submitter.handleSubmit({ ...r.job, attempts: 5, max_attempts: 5 }, DEPS);
+    } finally {
+      process.env.NODE_ENV = saved.NODE_ENV;
+      process.env.MAIL_FROM = saved.MAIL_FROM;
+    }
+    assert.equal(out.status, "blocked", JSON.stringify(out));
+    assert.equal(out.code, "internal_error");
+    assert.equal((await outbound(w.recipient)).length, 0);
+    const [sub] = await subsOf(w.appId);
+    assert.equal(sub.status, "failed");
+    assert.match(sub.evidence.error, /MAIL_FROM/);
+    assert.notEqual(sub.evidence.phase, "sending");
+  }
+});

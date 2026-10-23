@@ -385,3 +385,13 @@ test("Task 18 admin 'Employers & rules' panel: directory, manual import (https o
   const en = I18N.dictionaries.en;
   for (const k of ["conf.scopeJobHint", "conf.scopeEmployerHint", "rules.hint", "ruleType.auto_submit", "ruleType.ack_reply"]) assert.ok(en[k], k);
 });
+
+test("Task 19 M-3: Health renders sandbox mail as 'Sandbox — no real mail is sent' (ar/en/fr), never as 'Connected'; SMTP problems are named", () => {
+  assert.equal(I18N.dictionaries.en["health.mailSandbox"], "Sandbox — no real mail is sent");
+  for (const lang of ["ar", "fr"]) assert.ok(I18N.dictionaries[lang]["health.mailSandbox"] && I18N.dictionaries[lang]["health.mailSandbox"] !== I18N.dictionaries.en["health.mailSandbox"], lang);
+  for (const lang of ["en", "ar", "fr"]) assert.match(I18N.dictionaries[lang]["health.mailMissing"], /\{names\}/, lang);
+  const admin = read("admin.js");
+  assert.match(admin, /m\.mode === "sandbox"\) return t\("health\.mailSandbox"\)/);
+  assert.ok(!admin.includes('tc("srcStatus", hl.mail.status)'), "the sandbox status is no longer shown as a source status");
+  assert.match(admin, /t\("health\.mailMissing", \{ names: m\.problems\.join/);
+});
