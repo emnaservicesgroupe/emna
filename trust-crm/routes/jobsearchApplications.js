@@ -8,7 +8,7 @@
 //   POST   /applications/:id/cancel            {reason} candidate (own) or staff in scope
 //   POST   /applications/:id/sharing-authorizations          {documentId, legitimateNeed}  CANDIDATE only
 //   DELETE /applications/:id/sharing-authorizations/:authId  CANDIDATE only
-//   POST   /cv-files/:id/approve               {language} candidate (own) or jobsearch:approve in scope
+//   POST   /cv-files/:id/approve               {language, note?} candidate (own) or jobsearch:approve in scope (staff: note >= 10 chars required)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
 const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/errorHandler");
@@ -57,7 +57,7 @@ router.delete("/applications/:id/sharing-authorizations/:authId", verifyToken, a
 }));
 
 router.post("/cv-files/:id/approve", verifyToken, asyncHandler(async (req, res) => {
-  res.json(await svc.approveCvVersion({ user: req.user, cvFileId: req.params.id, language: body(req).language }));
+  res.json(await svc.approveCvVersion({ user: req.user, cvFileId: req.params.id, language: body(req).language, note: body(req).note }));
 }));
 
 router.use(jobsearchErrorHandler);

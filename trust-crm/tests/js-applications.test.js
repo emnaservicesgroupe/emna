@@ -117,8 +117,8 @@ async function withApp(fn) {
       await pool.query("UPDATE js_profiles SET status='confirmed' WHERE candidate_id=$1", [c.candidateId]);
       return up.body.cvFileId;
     };
-    const approveCv = async (c, cvFileId, language = "en", token = c.token) =>
-      call("POST", `/jobsearch/cv-files/${cvFileId}/approve`, { token, body: { language } });
+    const approveCv = async (c, cvFileId, language = "en", token = c.token, note) =>
+      call("POST", `/jobsearch/cv-files/${cvFileId}/approve`, { token, body: note === undefined ? { language } : { language, note } });
     const create = (c, matchId, token = c.token) => call("POST", "/jobsearch/applications", { token, body: { matchId } });
     const prepare = (id, token, body = {}) => call("POST", `/jobsearch/applications/${id}/prepare`, { token, body });
     const approve = (id, token) => call("POST", `/jobsearch/applications/${id}/approve`, { token, body: { reason: "reviewed" } });
@@ -271,7 +271,8 @@ test("prepare: letter from confirmed profile, approved CV in the job language, o
     const cv2 = await t.uploadCv(c, "Karim Benali\nElectricien\nCV francais");
     const cv3 = await t.uploadCv(c, "Karim Benali\nElectrician\nNew draft, not approved");
     assert.equal((await t.approveCv(c, cv1, "en")).status, 200);
-    assert.equal((await t.approveCv(c, cv2, "fr", t.tok.admin)).status, 200);
+    // Task 18: staff approve a CV version on the candidate's behalf only with a recorded note.
+    assert.equal((await t.approveCv(c, cv2, "fr", t.tok.admin, "Candidate asked by phone on 2026-10-23 to use the French CV")).status, 200);
     assert.equal((await t.approveCv(c, cv3, "en", t.tok.agentB)).status, 404, "out-of-scope staff");
     assert.equal((await t.approveCv(c, cv3, "en", t.tok.agentA)).status, 403, "approving a CV needs jobsearch:approve or the candidate");
     const before = (await t.pool.query("SELECT id, storage_key, sha256, version FROM js_cv_files WHERE candidate_id=$1 ORDER BY id", [c.candidateId])).rows;
@@ -881,5 +882,42 @@ test("CV bytes or recorded sha256 changed after packaging, and an authorization 
     assert.match(r3.body.error, /sensitive_unauthorized/);
     assert.equal(await status(t, id), "ready_for_review");
     assert.equal((await t.approve(a, t.tok.admin)).status, 200, "restored bytes + sha -> valid again");
+  });
+});
+
+// ---------------------------------------------------------------- Task 18: CV approval on behalf (UI path)
+
+test("CV approval: candidate needs no note; staff (jobsearch:approve) must record a note >= 10 chars; the note is audited; Agents still 403", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.ids.managerA });
+    const cv1 = await t.uploadCv(c, "Karim Benali\nElectrician\nv1");
+    const cv2 = await t.uploadCv(c, "Karim Benali\nElectrician\nv2");
+    const own = await t.approveCv(c, cv1, "en");
+    assert.equal(own.status, 200, JSON.stringify(own.body));
+    assert.equal(own.body.sha256, undefined, "no hash for the candidate");
+    for (const note of [undefined, "", "   ", "too short", 42]) {
+      const r = await t.approveCv(c, cv2, "fr", t.tok.managerA, note);
+      assert.equal(r.status, 400, `note ${JSON.stringify(note)} -> ${r.status}`);
+      assert.match(r.body.error, /note/i);
+    }
+    assert.equal((await t.pool.query("SELECT approved FROM js_cv_files WHERE id=$1", [cv2])).rows[0].approved, false, "refused approvals change nothing");
+    const c2 = await t.newCandidate(); // assigned to agentA
+    const cvA = await t.uploadCv(c2, "Karim Benali\nElectrician\nagent");
+    assert.equal((await t.approveCv(c2, cvA, "fr", t.tok.agentA, "Candidate asked me by phone")).status, 403, "Agents cannot approve even with a note");
+    assert.equal((await t.approveCv(c, cv2, "fr", t.tok.managerB, "Candidate asked me by phone")).status, 404, "out-of-scope manager");
+    const ok = await t.approveCv(c, cv2, "fr", t.tok.managerA, "Candidate confirmed by phone: use the French CV");
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.onBehalf, true);
+    const audit = (await t.pool.query("SELECT actor, detail FROM js_audit_events WHERE action='cv.approve' AND detail->>'cvFileId' = $1", [String(cv2)])).rows;
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].actor, `user:${t.ids.managerA}`);
+    assert.equal(audit[0].detail.note, "Candidate confirmed by phone: use the French CV");
+    assert.equal(audit[0].detail.onBehalf, true);
+    // control characters are stripped, length capped
+    const cv3 = await t.uploadCv(c, "Karim Benali\nElectrician\nv3");
+    const long = await t.approveCv(c, cv3, "ar", t.tok.admin, `Checked\u0000 with the candidate ${"x".repeat(600)}`);
+    assert.equal(long.status, 200);
+    const d = (await t.pool.query("SELECT detail FROM js_audit_events WHERE action='cv.approve' AND detail->>'cvFileId' = $1", [String(cv3)])).rows[0].detail;
+    assert.ok(d.note.length <= 500 && !/\u0000/.test(d.note));
   });
 });

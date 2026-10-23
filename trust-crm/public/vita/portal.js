@@ -261,15 +261,69 @@
         });
     });
   }
+  var CV_LANGS = ["en", "fr", "ar"];
+  function scanBadge(f) {
+    return h("span", { class: "badge " + (f.scan_status === "clean" ? "ok" : f.scan_status === "infected" ? "bad" : "warn"), text: tc("scan", f.scan_status) });
+  }
   function renderVersions() {
     var box = $("#cv-versions");
     var files = S.profile && S.profile.cv_files ? S.profile.cv_files : [];
     if (!files.length) return V.setContent(box, h("p", { class: "small muted", text: t("upload.noneYet") }));
-    V.setContent(box, h("h3", { text: t("upload.versions") }), h("ul", { class: "compact" }, files.slice().reverse().map(function (f) {
-      return h("li", null, t("upload.version", { n: V.fmtNumber(f.version) }), " · ", V.fmtDateTime(f.created_at), " · ",
-        h("span", { class: "badge " + (f.scan_status === "clean" ? "ok" : f.scan_status === "infected" ? "bad" : "warn"), text: tc("scan", f.scan_status) }),
-        f.approved ? [" ", h("span", { class: "badge ok", text: t("upload.approved") })] : null);
-    })));
+    V.setContent(box, h("h3", { text: t("upload.versions") }),
+      h("p", { class: "notice info small", text: t("cv.approveExplain") }),
+      h("ul", { class: "plain" }, files.slice().reverse().map(cvVersionItem)));
+  }
+  /** One CV version: scan status, approval state, and (unless infected or already approved) the approval form. */
+  function cvVersionItem(f) {
+    var li = h("li", { class: "card" },
+      h("p", null, h("strong", { text: t("upload.version", { n: V.fmtNumber(f.version) }) }), " · ", V.fmtDateTime(f.created_at), " · ", scanBadge(f),
+        f.approved ? [" ", h("span", { class: "badge ok", text: t("cv.approvedIn", { lang: cvLangName(f.language) }) })] : null));
+    if (f.scan_status === "scan_unavailable") li.appendChild(h("p", { class: "small notice warn", text: t("cv.unscannedNotice") }));
+    if (f.scan_status === "infected") {
+      li.appendChild(h("p", { class: "small notice bad", text: t("cv.infectedNoApprove") }));
+      return li;
+    }
+    if (f.approved) return li;
+    var selId = "cv-lang-" + f.id;
+    var otherId = "cv-lang-other-" + f.id;
+    var sel = h("select", { id: selId }, CV_LANGS.map(function (l) { return h("option", { value: l, text: t("cv.lang." + l) }); }), h("option", { value: "other", text: t("cv.lang.other") }));
+    var other = h("input", { id: otherId, type: "text", attrs: { maxlength: "2", autocomplete: "off", inputmode: "latin", pattern: "[A-Za-z]{2}" } });
+    var otherField = h("div", { class: "field" }, h("label", { for: otherId, text: t("cv.otherCode") }), other);
+    otherField.hidden = true;
+    sel.addEventListener("change", function () { otherField.hidden = sel.value !== "other"; });
+    var btn = h("button", { type: "submit", class: "btn small", text: t("cv.approveButton"), attrs: { "aria-label": t("cv.approveNamed", { n: V.fmtNumber(f.version) }) } });
+    var form = h("form", { class: "inline-fields", attrs: { novalidate: true } },
+      h("div", { class: "field" }, h("label", { for: selId, text: t("cv.language") }), sel), otherField, btn);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var lang = sel.value;
+      if (lang === "other") {
+        lang = other.value.trim().toLowerCase();
+        if (!/^[a-z]{2}$/.test(lang)) {
+          other.setAttribute("aria-invalid", "true");
+          other.focus();
+          V.toast(t("cv.badCode"), "bad");
+          return;
+        }
+        other.removeAttribute("aria-invalid");
+      }
+      V.busy(btn, function () {
+        return V.api("POST", "/jobsearch/cv-files/" + f.id + "/approve", { body: { language: lang } }).then(function () {
+          var msg = t("cv.approvedDone", { n: V.fmtNumber(f.version) });
+          V.toast(msg, "ok");
+          V.announce(msg);
+          return refreshState(false);
+        });
+      }).catch(function () {});
+    });
+    li.appendChild(form);
+    return li;
+  }
+  function cvLangName(code) {
+    return CV_LANGS.indexOf(code) >= 0 ? t("cv.lang." + code) : String(code || "—").toUpperCase();
+  }
+  function hasApprovedCv() {
+    return Boolean(S.profile && (S.profile.cv_files || []).some(function (f) { return f.approved && f.scan_status !== "infected"; }));
   }
 
   // ================================================================ 2 review extracted fields
@@ -627,8 +681,14 @@
         h("span", { class: "badge info", text: t("mode.title") + ": " + tc("mode", st.mode || "search_only") }),
         h("span", { class: "badge " + (st.paused ? "warn" : "ok"), text: st.paused ? t("pause.isPaused") : t("pause.isActive") }),
         h("span", { class: "badge " + (el.eligible ? "ok" : "warn"), text: el.eligible ? t("elig.yes") : t("elig.no") })),
-      el.eligible ? null : h("p", { class: "small", text: el.reasons.map(function (r) { return tc("elig", r); }).join(" · ") })));
+      el.eligible ? null : h("p", { class: "small", text: el.reasons.map(function (r) { return tc("elig", r); }).join(" · ") }),
+      hasApprovedCv() ? null : noApprovedCvNotice()));
     selectStatusTab(S.statusTab, false);
+  }
+  function noApprovedCvNotice() {
+    var go = h("button", { type: "button", class: "btn secondary small", text: t("cv.goApprove") });
+    go.addEventListener("click", function () { goStep("upload", true); });
+    return h("div", { class: "notice warn small" }, h("p", { text: t("cv.noneApproved") }), go);
   }
   function loadStatusTab() {
     var loaders = { matches: loadMatches, apps: loadApps, interviews: loadInterviews, messages: loadMessages };

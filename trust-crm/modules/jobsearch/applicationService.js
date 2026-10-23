@@ -678,8 +678,13 @@ async function autoApprove(applicationId, opts = {}) {
 
 // ---------------------------------------------------------------- CV approval
 
-/** Marks one CV version approved for sending (metadata only; the stored bytes are never touched). */
-async function approveCvVersion({ user, cvFileId, language }) {
+/**
+ * Marks one CV version approved for sending (metadata only; the stored bytes are never touched).
+ * The candidate approves their own versions. Staff with jobsearch:approve (Manager/Admin/SuperAdmin) may
+ * approve on the candidate's behalf ONLY with a recorded note (>= 10 characters: who asked, when, how),
+ * which is stored in the audit trail.
+ */
+async function approveCvVersion({ user, cvFileId, language, note }) {
   const id = posInt(cvFileId);
   if (!id || !canUse(user, "jobsearch:read")) throw new HttpError(404, "Not found");
   const lang = documentPolicy.normLang(language);
@@ -692,16 +697,22 @@ async function approveCvVersion({ user, cvFileId, language }) {
   )).rows[0];
   if (!cv) throw new HttpError(404, "Not found");
   if (user.role !== "Candidate" && !hasPerm(user, "jobsearch:approve")) throw new HttpError(403, "Approving a CV version requires the candidate, a manager or an administrator");
+  const onBehalf = user.role !== "Candidate";
+  let why = null;
+  if (onBehalf) {
+    why = typeof note === "string" ? cleanReason(note, { required: false }) : null;
+    if (!why || why.length < 10) throw new HttpError(400, "note is required (at least 10 characters) when staff approve a CV version on the candidate's behalf");
+  }
   if (cv.scan_status === "infected") throw new HttpError(409, "Infected files cannot be approved");
   const row = await inTx(async (client) => {
     await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [cv.candidate_id]);
     const r = (await client.query("UPDATE js_cv_files SET approved = true, language = $2 WHERE id = $1 RETURNING id, candidate_id, version, language, approved, sha256", [id, lang])).rows[0];
-    await audit(client, user, "cv.approve", cv.candidate_id, null, { cvFileId: id, version: r.version, language: lang, sha256: r.sha256 });
+    await audit(client, user, "cv.approve", cv.candidate_id, null, { cvFileId: id, version: r.version, language: lang, sha256: r.sha256, ...(onBehalf ? { onBehalf: true, note: why } : {}) });
     await event(client, cv.candidate_id, "cv.approved", { cvFileId: id, version: r.version, language: lang });
     return r;
   });
-  await logAudit({ userId: user.id, action: "jobsearch.cv.approve", tableName: "js_cv_files", recordId: id, newData: { language: lang } });
-  return { id: row.id, candidateId: row.candidate_id, version: row.version, language: row.language, approved: row.approved, ...(user.role === "Candidate" ? {} : { sha256: row.sha256 }) };
+  await logAudit({ userId: user.id, action: "jobsearch.cv.approve", tableName: "js_cv_files", recordId: id, newData: { language: lang, ...(onBehalf ? { onBehalf: true } : {}) } });
+  return { id: row.id, candidateId: row.candidate_id, version: row.version, language: row.language, approved: row.approved, ...(onBehalf ? { sha256: row.sha256, onBehalf: true } : {}) };
 }
 
 // ---------------------------------------------------------------- list / detail

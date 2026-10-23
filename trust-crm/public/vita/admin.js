@@ -611,9 +611,13 @@
       V.api("GET", "/jobsearch/interviews?applicationId=" + id).catch(function () { return { interviews: [] }; }),
     ];
     return Promise.all(calls).then(function (r) {
-      if (S.drawerAppId !== id) return;
+      if (S.drawerAppId !== id) return null;
+      // the candidate's CV versions (for approval on the candidate's behalf); a missing profile is not an error
+      return V.api("GET", "/jobsearch/candidates/" + r[0].application.candidateId + "/profile").catch(function () { return null; }).then(function (p) { r.push(p); return r; });
+    }).then(function (r) {
+      if (!r || S.drawerAppId !== id) return;
       var scrollTop = $("#drawer").scrollTop;
-      V.setContent(body, drawerContent(r[0], r[1].submissions, r[2], r[3].messages, r[4].interviews));
+      V.setContent(body, drawerContent(r[0], r[1].submissions, r[2], r[3].messages, r[4].interviews, r[5]));
       if (quiet) $("#drawer").scrollTop = scrollTop;
       else V.announce(t("drawer.loaded"));
     }).catch(function (err) {
@@ -621,7 +625,7 @@
     });
   }
 
-  function drawerContent(d, subs, recipient, messages, interviews) {
+  function drawerContent(d, subs, recipient, messages, interviews, profile) {
     var a = d.application;
     var out = [];
     V.setContent($("#drawer-title"), (d.job ? d.job.title : t("drawer.title")) + " · #" + a.id);
@@ -689,6 +693,7 @@
     }
     if ((a.packageNotes || []).length) docSec.appendChild(h("div", { class: "notice info" }, h("strong", { text: t("docs.notes") }), V.listOf(a.packageNotes.map(function (n) { return typeof n === "string" ? n : n && (n.note || n.code || n.reason) ? String(n.note || n.code || n.reason) : ""; }))));
     out.push(docSec);
+    out.push(cvVersionsBlock(a, profile));
 
     if (a.coverLetter) out.push(h("section", { class: "card" }, h("h3", { text: t("drawer.coverLetter") }), h("div", { class: "untrusted", text: a.coverLetter })));
 
@@ -813,6 +818,69 @@
 
     if (a.status === "needs_staff" && can("approve")) sec.appendChild(manualCompletionForm(a, after));
     return sec;
+  }
+
+  /**
+   * The candidate's CV versions. Staff with jobsearch:approve may approve a version on the candidate's
+   * behalf ONLY with a recorded note (the server enforces >= 10 characters and audits it).
+   */
+  var CV_LANGS = ["en", "fr", "ar"];
+  function cvVersionsBlock(a, profile) {
+    var sec = h("section", { class: "card" }, h("h3", { text: t("cvAdmin.title") }));
+    var files = profile && profile.cv_files ? profile.cv_files : [];
+    if (!files.length) {
+      sec.appendChild(h("p", { class: "muted small", text: t("cvAdmin.none") }));
+      return sec;
+    }
+    sec.appendChild(h("p", { class: "small", text: t("cv.approveExplain") }));
+    if (!can("approve")) sec.appendChild(h("p", { class: "small muted", text: t("cvAdmin.approverOnly") }));
+    files.slice().reverse().forEach(function (f) {
+      var box = h("div", { class: "notice " + (f.approved ? "ok" : "info") },
+        h("p", null, h("strong", { text: t("upload.version", { n: V.fmtNumber(f.version) }) }), " · ", V.fmtDateTime(f.created_at), " · ",
+          h("span", { class: "badge " + (f.scan_status === "clean" ? "ok" : f.scan_status === "infected" ? "bad" : "warn"), text: tc("scan", f.scan_status) }), " ",
+          f.approved ? h("span", { class: "badge ok", text: t("cv.approvedIn", { lang: CV_LANGS.indexOf(f.language) >= 0 ? t("cv.lang." + f.language) : String(f.language || "—").toUpperCase() }) }) : h("span", { class: "badge neutral", text: t("cvAdmin.notApproved") })));
+      if (f.scan_status === "scan_unavailable") box.appendChild(h("p", { class: "small", text: t("cv.unscannedNotice") }));
+      if (!f.approved && f.scan_status !== "infected" && can("approve")) box.appendChild(cvApproveForm(a, f));
+      sec.appendChild(box);
+    });
+    return sec;
+  }
+  function cvApproveForm(a, f) {
+    var selId = "cva-lang-" + f.id;
+    var otherId = "cva-other-" + f.id;
+    var noteId = "cva-note-" + f.id;
+    var sel = h("select", { id: selId }, CV_LANGS.map(function (l) { return option(l, t("cv.lang." + l)); }), option("other", t("cv.lang.other")));
+    var other = h("input", { id: otherId, type: "text", attrs: { maxlength: "2", autocomplete: "off" } });
+    var otherField = h("div", { class: "field" }, h("label", { for: otherId, text: t("cv.otherCode") }), other);
+    otherField.hidden = true;
+    sel.addEventListener("change", function () { otherField.hidden = sel.value !== "other"; });
+    var note = h("textarea", { id: noteId, attrs: { rows: "2", maxlength: "500", required: true, "aria-describedby": noteId + "-hint" } });
+    var b = h("button", { type: "submit", class: "btn small", text: t("cvAdmin.onBehalf") });
+    var form = h("form", { attrs: { novalidate: true } },
+      h("div", { class: "inline-fields" }, h("div", { class: "field" }, h("label", { for: selId, text: t("cv.language") }), sel), otherField),
+      h("div", { class: "field" }, h("label", { for: noteId, text: t("cvAdmin.note") }), note, h("span", { class: "hint", id: noteId + "-hint", text: t("cvAdmin.noteHint") })),
+      b);
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var lang = sel.value;
+      if (lang === "other") {
+        lang = other.value.trim().toLowerCase();
+        if (!/^[a-z]{2}$/.test(lang)) { other.setAttribute("aria-invalid", "true"); other.focus(); V.toast(t("cv.badCode"), "bad"); return; }
+      }
+      var n = note.value.trim();
+      if (n.length < 10) { note.setAttribute("aria-invalid", "true"); note.focus(); V.toast(t("cvAdmin.noteTooShort"), "bad"); return; }
+      note.removeAttribute("aria-invalid");
+      V.confirmDialog(t("cvAdmin.confirm", { n: V.fmtNumber(f.version) }), t("cvAdmin.onBehalf")).then(function (ok) {
+        if (!ok) return;
+        V.busy(b, function () {
+          return V.api("POST", "/jobsearch/cv-files/" + f.id + "/approve", { body: { language: lang, note: n } }).then(function () {
+            V.toast(t("cvAdmin.approved"), "ok");
+            renderDrawer(a.id, true);
+          });
+        }).catch(function () {});
+      });
+    });
+    return form;
   }
 
   function manualCompletionForm(a, after) {

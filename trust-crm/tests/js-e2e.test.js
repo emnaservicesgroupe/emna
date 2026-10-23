@@ -1261,3 +1261,70 @@ test("J7 reporting from real records: every /reports groupBy, /dashboard and the
     assert.equal(Number(csv.headers.get("x-export-rows")), want.length);
   }
 });
+
+// =====================================================================================================
+// J9 (Task 18): the web-only path. Every step below is a call the portal (portal.js) or the staff console
+// (admin.js) makes; only the account creation and the employer/feed set-up are admin data. A local fake
+// clamd answers "OK" so the uploaded CV is genuinely scanned clean.
+// =====================================================================================================
+test("J9 web-only path: upload (scanned clean) -> confirm -> consent -> settings -> tick prepares but blocks (no approved CV) -> candidate approves the version in the portal -> staff 'Prepare' -> ready_for_review", async () => {
+  const net = require("net");
+  const portalJs = fs.readFileSync(path.join(__dirname, "..", "public", "vita", "portal.js"), "utf8");
+  const adminJs = fs.readFileSync(path.join(__dirname, "..", "public", "vita", "admin.js"), "utf8");
+  for (const [src, frag] of [[portalJs, 'base() + "/cv"'], [portalJs, 'base() + "/profile/confirm"'], [portalJs, 'base() + "/consent"'], [portalJs, '"/jobsearch/cv-files/" + f.id + "/approve"'],
+    [adminJs, '"/jobsearch/candidates/" + id + "/settings"'], [adminJs, '"/jobsearch/applications/" + a.id + "/prepare"']]) {
+    assert.ok(src.includes(frag), `the UI calls ${frag}`);
+  }
+  const clamd = net.createServer((sock) => {
+    let buf = Buffer.alloc(0);
+    sock.on("data", (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.length >= 4 && buf.subarray(buf.length - 4).equals(Buffer.alloc(4))) sock.end("stream: OK\0");
+    });
+    sock.on("error", () => {});
+  });
+  await new Promise((r) => clamd.listen(0, "127.0.0.1", r));
+  process.env.CLAMAV_HOST = "127.0.0.1";
+  process.env.CLAMAV_PORT = String(clamd.address().port);
+  try {
+    const w = await world();
+    const c = await E.createCandidate(w, "W", "X");
+    const pdf = makePdf("Nadia Saidi\nElectrician\nEmail: cand-w@test.invalid\n\nSKILLS\nIndustrial wiring, PLC programming\n\nWORK EXPERIENCE\nElectrician | Sfax Industries | 2014 - Present\n\nLANGUAGES\nEnglish (Fluent), French (Fluent)");
+    const up = await E.uploadCv(w, c, pdf, "cv.pdf");
+    assert.equal(up.status, 201, JSON.stringify(up.body));
+    assert.equal(up.body.scan.status, "clean");
+    const prof = await w.http("GET", `/jobsearch/candidates/${c.id}/profile`, c.token);
+    assert.deepEqual(prof.body.cv_files.map((f) => [f.id, f.scan_status, f.approved]), [[up.body.cvFileId, "clean", false]]);
+    assert.equal((await w.http("PUT", `/jobsearch/candidates/${c.id}/profile/confirm`, c.token, { edits: { profession: "Electrician" }, preferences: E.PREFS() })).status, 200);
+    assert.equal((await w.http("POST", `/jobsearch/candidates/${c.id}/consent`, c.token, { scope: E.CONSENT(), version: "2026-10-v1" })).status, 201);
+    assert.equal((await w.http("PUT", `/jobsearch/candidates/${c.id}/settings`, w.tokens.admin, { mode: "prepare_for_approval", cap_per_day: 5, cap_per_week: 20 })).status, 200);
+
+    const emp = await E.employer(w, "Cedar Line Electric", { domain: "cedar.test.invalid" });
+    fixture._set({ jobs: [E.feedJob(w, emp, { id: "fx-cedar-1", text: SUPPORT_AD.replace(/maple/g, "cedar") })] });
+    const s = await E.tick(w);
+    assert.deepEqual(s.errors, [], JSON.stringify(s));
+    const job = await jobBySource(w, "fx-cedar-1");
+    let app = await appFor(w, c.id, job.id);
+    assert.ok(app, "the tick created the application");
+    assert.equal(app.status, "preparing", "without an approved CV version preparation cannot complete");
+    assert.ok(app.package_blocked.some((b) => b.reason === "no_approved_cv"), JSON.stringify(app.package_blocked));
+
+    // the portal's "Approve this version for applications" button
+    const ok = await w.http("POST", `/jobsearch/cv-files/${up.body.cvFileId}/approve`, c.token, { language: "en" });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.deepEqual(E.staffOnlyKeys(ok.body, "cv-approve"), []);
+    // the staff console's "Prepare" action
+    const prep = await w.http("POST", `/jobsearch/applications/${app.id}/prepare`, w.tokens.X, {});
+    assert.equal(prep.status, 200, JSON.stringify(prep.body));
+    assert.equal(prep.body.application.status, "ready_for_review");
+    app = await appRow(w, app.id);
+    assert.equal(app.status, "ready_for_review");
+    const pkg = (await w.q("SELECT cv_file_id, sha256 FROM js_application_documents WHERE application_id = $1 AND removed_at IS NULL", [app.id])).rows;
+    assert.deepEqual(pkg.map((d) => [d.cv_file_id, d.sha256]), [[up.body.cvFileId, sha(pdf)]]);
+    assert.equal((await E.appMails(w)).length, 0, "nothing is sent before a human approves");
+  } finally {
+    delete process.env.CLAMAV_HOST;
+    delete process.env.CLAMAV_PORT;
+    await new Promise((r) => clamd.close(r));
+  }
+});

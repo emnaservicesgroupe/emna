@@ -323,3 +323,30 @@ test("dev seed script refuses to run in production", () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /refus/i);
 });
+
+// ---------------------------------------------------------------- Task 18: CV approval in the UI
+
+test("Task 18 portal: each CV version shows its scan status and can be approved with a language (en/fr/ar/other ISO code)", () => {
+  const js = read("portal.js");
+  const en = I18N.dictionaries.en;
+  assert.equal(en["cv.approveExplain"], "Approving lets VITA attach this exact file to applications you authorize; the original is never changed.");
+  assert.equal(en["cv.approveButton"], "Approve this version for applications");
+  assert.match(js, /V\.api\("POST", "\/jobsearch\/cv-files\/" \+ f\.id \+ "\/approve", \{ body: \{ language: lang \} \}\)/, "the portal calls the approval endpoint");
+  assert.match(js, /var CV_LANGS = \["en", "fr", "ar"\]/);
+  assert.match(js, /h\("option", \{ value: "other"/, "an 'other' language choice");
+  assert.match(js, /\/\^\[a-z\]\{2\}\$\/\.test\(lang\)/, "other = 2-letter ISO code, validated client side");
+  assert.match(js, /t\("cv\.approveExplain"\)/);
+  assert.match(js, /scanBadge\(f\)/, "scan status per version");
+  assert.match(js, /f\.scan_status === "infected"[\s\S]{0,120}cv\.infectedNoApprove/, "infected versions offer no approval");
+  assert.match(js, /cv\.noneApproved/, "the status page says when no version is approved");
+  for (const k of ["en", "fr", "ar", "other"]) assert.ok(`cv.lang.${k}` in en);
+});
+
+test("Task 18 admin: the application drawer lists CV versions; approval on the candidate's behalf needs jobsearch:approve and a note >= 10 chars", () => {
+  const js = read("admin.js");
+  assert.match(js, /"\/jobsearch\/candidates\/" \+ r\[0\]\.application\.candidateId \+ "\/profile"/, "the drawer loads the candidate's CV versions");
+  assert.match(js, /if \(!f\.approved && f\.scan_status !== "infected" && can\("approve"\)\) box\.appendChild\(cvApproveForm\(a, f\)\)/, "only approvers get the form");
+  assert.match(js, /if \(n\.length < 10\)/, "note length checked before the call");
+  assert.match(js, /"\/jobsearch\/cv-files\/" \+ f\.id \+ "\/approve", \{ body: \{ language: lang, note: n \} \}/);
+  assert.equal(I18N.dictionaries.en["cvAdmin.note"], "Note (required): who asked, when and how");
+});
