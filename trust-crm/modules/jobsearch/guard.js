@@ -46,6 +46,7 @@ const GUARD_CODES = Object.freeze([
   "document_unapproved",
   "sensitive_unauthorized",
   "package_changed",
+  "attachment_unscanned",
   "cap_exceeded",
   "recipient_unverified",
   "handoff_required",
@@ -404,6 +405,7 @@ async function evaluate(client, id, now, recheck, opts) {
     const codes = new Set(docProblems.map((p) => p.code));
     if (codes.has("sensitive_unauthorized")) return fail(notes, "sensitive_unauthorized", detail);
     if (["cv_changed", "cv_bytes_changed", "document_changed", "document_deleted", "cv_infected"].some((c) => codes.has(c))) return fail(notes, "package_changed", detail);
+    if (codes.has("attachment_unscanned")) return fail(notes, "attachment_unscanned", `${detail} (no malware scan; set ALLOW_UNSCANNED_ATTACHMENTS=true only if you accept unscanned files)`);
     return fail(notes, "document_unapproved", detail); // cv_not_approved, cv_missing, no_cv_in_package, unknown codes
   }
 

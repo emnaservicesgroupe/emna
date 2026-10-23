@@ -44,6 +44,10 @@ process.env.MAIL_SANDBOX_ALLOWLIST = "*@test.invalid,*@*.test.invalid";
 process.env.MAIL_FROM = "applications@vita.test.invalid";
 process.env.INBOUND_MAIL_SECRET = "js-e2e-inbound-secret";
 process.env.JOBSEARCH_EXPORT_RATE_PER_HOUR = "1000";
+// Task 18: uploads in this file are never scanned (no ClamAV in tests -> scan_status 'scan_unavailable'), and
+// unscanned CVs are not attached by default. These tests are about other rules, so they opt in explicitly;
+// the default (blocked) is covered by "attachment_unscanned" (js-guard) and "Task 18 unscanned CVs" (here / js-applications).
+process.env.ALLOW_UNSCANNED_ATTACHMENTS = "true";
 for (const k of ["CLAMAV_HOST", "MAIL_REAL_SEND", "INBOUND_AUTO_ACK_EVIDENCE", "APPLICATIONS_PER_TICK", "MATCH_AUTO_PREPARE_MIN", "MATCH_MIN_SCORE", "JOBBANK_CA_FEED_URL", "PARTNER_FEED_URLS", "JOBSEARCH_INBOX_REVIEWER_ID"]) delete process.env[k];
 
 const E = require("./helpers/e2e");

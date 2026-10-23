@@ -13,6 +13,16 @@ const { HttpError } = require("./httpError");
 const db = () => require("../../db");
 
 const SENSITIVE_TYPES = ["passport", "national_id", "police_certificate", "medical"];
+
+/**
+ * Unscanned CVs (scan_status 'scan_unavailable': no malware scanner was configured or reachable) are NOT
+ * attached unless the administrator explicitly opts in with ALLOW_UNSCANNED_ATTACHMENTS=true (exactly).
+ * 'infected' always blocks. Read at call time so a change takes effect without a restart of this module.
+ */
+function unscannedAllowed() {
+  return process.env.ALLOW_UNSCANNED_ATTACHMENTS === "true";
+}
+const scanUsable = (cv) => cv.scan_status === "clean" || (cv.scan_status === "scan_unavailable" && unscannedAllowed());
 const MAX_REQUESTED = 20;
 const LANG_ALIASES = { en: "en", eng: "en", english: "en", anglais: "en", fr: "fr", fra: "fr", french: "fr", francais: "fr", "français": "fr", ar: "ar", ara: "ar", arabic: "ar", arabe: "ar" };
 
@@ -128,10 +138,14 @@ async function pickCv(candidateId, jobLanguage, client) {
     [candidateId]
   )).rows;
   if (!rows.length) return null;
+  // Prefer versions that may be attached (scanned clean, or unscanned when explicitly allowed); only when
+  // none exists fall back to the others so the package shows WHY it is blocked (attachment_unscanned).
+  const usable = rows.filter(scanUsable);
+  const pool = usable.length ? usable : rows;
   const want = normLang(jobLanguage);
-  const same = want ? rows.find((r) => normLang(r.language) === want) : null;
+  const same = want ? pool.find((r) => normLang(r.language) === want) : null;
   if (same) return { cv: same, notes: [] };
-  return { cv: rows[0], notes: [`language_mismatch: approved CV is in ${normLang(rows[0].language) || "an unknown language"}, the job is in ${want || "an unknown language"}`] };
+  return { cv: pool[0], notes: [`language_mismatch: approved CV is in ${normLang(pool[0].language) || "an unknown language"}, the job is in ${want || "an unknown language"}`] };
 }
 
 /** Candidate-granted, non-revoked authorization for this application+document with a stated need. */
@@ -161,6 +175,7 @@ async function cvEntry(client, application, cvFileId) {
   if (!cv) return { blocked: { doc, reason: "not_found" } };
   if (!cv.approved) return { blocked: { doc, reason: "cv_not_approved" } };
   if (cv.scan_status === "infected") return { blocked: { doc, reason: "cv_infected" } };
+  if (!scanUsable(cv)) return { blocked: { doc, reason: "attachment_unscanned" } };
   const sha = await storedSha(cv.storage_key);
   if (!sha) return { blocked: { doc, reason: "cv_file_unavailable" } };
   if (cv.sha256 && sha !== cv.sha256) return { blocked: { doc, reason: "cv_integrity_mismatch" } };
@@ -223,7 +238,7 @@ async function buildPackage({ application, requested, jobLanguage, client }) {
 
 /**
  * Re-validates the stored (non-removed) package rows of an application inside `client`'s transaction:
- * CVs still approved, not infected, same version/sha256 and same stored bytes; CRM documents not
+ * CVs still approved, not infected, scanned (or unscanned explicitly allowed), same version/sha256 and same stored bytes; CRM documents not
  * deleted and unchanged since packaging (source_ref + sha256 when present); sensitive documents still
  * covered by the exact, valid, candidate-granted authorization.
  * @returns {Promise<Array<{code: string, cvFileId?: number, documentId?: number}>>} empty when valid
@@ -239,6 +254,7 @@ async function revalidateStoredPackage(client, application) {
       if (!cv) problems.push({ code: "cv_missing", ...ref });
       else if (!cv.approved) problems.push({ code: "cv_not_approved", ...ref });
       else if (cv.scan_status === "infected") problems.push({ code: "cv_infected", ...ref });
+      else if (!scanUsable(cv)) problems.push({ code: "attachment_unscanned", ...ref });
       else if (cv.sha256 !== r.sha256 || cv.version !== r.version) problems.push({ code: "cv_changed", ...ref });
       else if ((await storedSha(cv.storage_key)) !== r.sha256) problems.push({ code: "cv_bytes_changed", ...ref });
       continue;
@@ -268,4 +284,4 @@ async function revalidateStoredPackage(client, application) {
 
 const formatProblems = (ps) => ps.map((p) => `${p.code}${p.cvFileId ? `:cv${p.cvFileId}` : p.documentId ? `:doc${p.documentId}` : ""}`).join(", ");
 
-module.exports = { formatProblems, normDocType, buildPackage, pickCv, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, SENSITIVE_TYPES };
+module.exports = { formatProblems, normDocType, buildPackage, pickCv, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, unscannedAllowed, SENSITIVE_TYPES };

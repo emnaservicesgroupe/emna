@@ -343,6 +343,7 @@ test("health: staff (Agent/Receptionist), Candidate, Accountant 403; Manager and
     assert.equal(h.modulePaused, false);
     assert.equal(h.mail.status, "connected");
     assert.equal(h.storage.malwareScan, "scan_unavailable");
+    assert.equal(h.storage.unscannedAttachments, process.env.ALLOW_UNSCANNED_ATTACHMENTS === "true" ? "allowed" : "blocked");
     for (const secret of ["S3cretPass", "abc123SECRET", "pw123", "KEY999", "ops@vita.example", "feeduser", "northwind*", "JWT", process.env.JWT_SECRET]) {
       assert.ok(!r.text.includes(secret), `health leaks ${secret}`);
     }

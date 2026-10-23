@@ -350,3 +350,12 @@ test("Task 18 admin: the application drawer lists CV versions; approval on the c
   assert.match(js, /"\/jobsearch\/cv-files\/" \+ f\.id \+ "\/approve", \{ body: \{ language: lang, note: n \} \}/);
   assert.equal(I18N.dictionaries.en["cvAdmin.note"], "Note (required): who asked, when and how");
 });
+
+test("Task 18 unscanned files: the UI says 'Not scanned — an administrator must enable scanning or explicitly allow unscanned files'", () => {
+  const en = I18N.dictionaries.en;
+  assert.equal(en["cv.unscannedNotice"], "Not scanned — an administrator must enable scanning or explicitly allow unscanned files.");
+  assert.equal(en["block.attachment_unscanned"], "Not scanned — an administrator must enable scanning or explicitly allow unscanned files");
+  assert.match(read("portal.js"), /f\.scan_status === "scan_unavailable"\) li\.appendChild\(h\("p", \{ class: "small notice warn", text: t\("cv\.unscannedNotice"\) \}\)\)/);
+  assert.match(read("admin.js"), /f\.scan_status === "scan_unavailable"\) box\.appendChild\(h\("p", \{ class: "small", text: t\("cv\.unscannedNotice"\) \}\)\)/);
+  assert.match(read("admin.js"), /tc\("block", b && b\.reason\)/, "blocked package reasons (attachment_unscanned) are shown in the drawer");
+});

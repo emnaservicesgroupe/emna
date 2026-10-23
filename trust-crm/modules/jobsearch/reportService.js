@@ -449,7 +449,7 @@ async function health({ user }) {
     tasksAwaitingHuman: tasks,
     outcomeUnknown,
     mail: mailStatus,
-    storage: { malwareScan: process.env.CLAMAV_HOST ? "configured" : "scan_unavailable" },
+    storage: { malwareScan: process.env.CLAMAV_HOST ? "configured" : "scan_unavailable", unscannedAttachments: process.env.ALLOW_UNSCANNED_ATTACHMENTS === "true" ? "allowed" : "blocked" },
   };
 }
 

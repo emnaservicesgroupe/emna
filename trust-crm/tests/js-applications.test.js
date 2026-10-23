@@ -13,6 +13,10 @@ process.env.JWT_SECRET = "js-applications-test-secret";
 process.env.STORAGE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "js-apps-"));
 delete process.env.CLAMAV_HOST;
 process.env.JS_UPLOADS_PER_HOUR = "1000";
+// Task 18: uploads in this file are never scanned (no ClamAV in tests -> scan_status 'scan_unavailable'), and
+// unscanned CVs are not attached by default. These tests are about other rules, so they opt in explicitly;
+// the default (blocked) is covered by "attachment_unscanned" (js-guard) and "Task 18 unscanned CVs" (here / js-applications).
+process.env.ALLOW_UNSCANNED_ATTACHMENTS = "true";
 
 const coverLetter = require("../modules/jobsearch/coverLetter");
 const applicationService = require("../modules/jobsearch/applicationService");
@@ -920,4 +924,51 @@ test("CV approval: candidate needs no note; staff (jobsearch:approve) must recor
     const d = (await t.pool.query("SELECT detail FROM js_audit_events WHERE action='cv.approve' AND detail->>'cvFileId' = $1", [String(cv3)])).rows[0].detail;
     assert.ok(d.note.length <= 500 && !/\u0000/.test(d.note));
   });
+});
+
+test("Task 18 unscanned CVs: preparation blocks with attachment_unscanned (default); approval refuses; ALLOW_UNSCANNED_ATTACHMENTS=true allows; a clean version is preferred", async () => {
+  const saved = process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+  try {
+    await withApp(async (t) => {
+      delete process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+      const c = await t.newCandidate();
+      const cv = await t.uploadCv(c, "Karim Benali\nElectrician"); // no scanner in tests -> scan_unavailable
+      assert.equal((await t.pool.query("SELECT scan_status FROM js_cv_files WHERE id=$1", [cv])).rows[0].scan_status, "scan_unavailable");
+      assert.equal((await t.approveCv(c, cv, "en")).status, 200, "approving the version is allowed; attaching it is not");
+      const j = await t.newJob(c);
+      const a = await t.create(c, j.matchId);
+      const p = await t.prepare(a.body.application.id, t.tok.agentA);
+      assert.equal(p.status, 200, JSON.stringify(p.body));
+      assert.equal(p.body.application.status, "preparing");
+      assert.deepEqual(p.body.package.blocked.map((b) => b.reason), ["attachment_unscanned"]);
+      assert.deepEqual(p.body.package.included, []);
+
+      process.env.ALLOW_UNSCANNED_ATTACHMENTS = "true";
+      const p2 = await t.prepare(a.body.application.id, t.tok.agentA);
+      assert.equal(p2.body.application.status, "ready_for_review", JSON.stringify(p2.body));
+      // the setting is switched off again before the human approval: approval re-validates and refuses
+      delete process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+      const ap = await t.approve(a.body.application.id, t.tok.admin);
+      assert.equal(ap.status, 409, JSON.stringify(ap.body));
+      assert.match(ap.body.error, /attachment_unscanned/);
+
+      // a clean approved version is picked over a newer unscanned one
+      const c2 = await t.newCandidate();
+      const older = await t.uploadCv(c2, "Karim Benali\nElectrician\nolder");
+      const newer = await t.uploadCv(c2, "Karim Benali\nElectrician\nnewer");
+      await t.pool.query("UPDATE js_cv_files SET scan_status='clean' WHERE id=$1", [older]);
+      for (const id of [older, newer]) assert.equal((await t.approveCv(c2, id, "en")).status, 200);
+      const j2 = await t.newJob(c2);
+      const a2 = await t.create(c2, j2.matchId);
+      const p3 = await t.prepare(a2.body.application.id, t.tok.agentA);
+      assert.equal(p3.body.application.status, "ready_for_review", JSON.stringify(p3.body));
+      assert.deepEqual(p3.body.package.included.map((d) => d.cvFileId), [older]);
+      // requesting the unscanned one explicitly is blocked
+      const p4 = await t.prepare(a2.body.application.id, t.tok.agentA, { documents: [{ cvFileId: newer }] });
+      assert.deepEqual(p4.body.package.blocked.map((b) => b.reason), ["attachment_unscanned"]);
+    });
+  } finally {
+    if (saved === undefined) delete process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+    else process.env.ALLOW_UNSCANNED_ATTACHMENTS = saved;
+  }
 });

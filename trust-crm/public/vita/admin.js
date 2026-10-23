@@ -1430,6 +1430,7 @@
           [t("health.lastTick"), hl.scheduler.lastTickAt ? V.fmtDateTime(hl.scheduler.lastTickAt) + (hl.scheduler.errors ? " · " + t("health.tickErrors", { n: V.fmtNumber(hl.scheduler.errors) }) : "") : t("sources.never")],
           [t("health.mail"), tc("srcStatus", hl.mail.status) + (hl.mail.realSend ? " · " + t("health.realSend") : " · " + t("health.sandbox"))],
           [t("health.scan"), tc("scan", hl.storage.malwareScan)],
+          [t("health.unscanned"), hl.storage.unscannedAttachments === "allowed" ? t("health.unscannedAllowed") : t("health.unscannedBlocked")],
         ]),
         h("h3", { text: t("health.sources") }),
         table([t("sources.key"), t("filter.status"), t("sources.lastRunAt"), t("sources.lastRun"), t("sources.lastError")], hl.sources.map(function (s) {

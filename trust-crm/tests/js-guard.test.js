@@ -963,3 +963,31 @@ test("long ads: head + tail + keyword windows of the middle are scanned; 200k-ch
     assert.ok(Date.now() - t0 < 2000, `${JSON.stringify(unit)} took ${Date.now() - t0} ms`);
   }
 });
+
+// ---------------------------------------------------------------- Task 18: unscanned attachments
+
+test("attachment_unscanned: a CV with scan_status 'scan_unavailable' blocks the send unless ALLOW_UNSCANNED_ATTACHMENTS=true", async () => {
+  const saved = process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+  try {
+    const w = await world();
+    assert.equal((await check(w.appId)).ok, true, "clean CV: sendable");
+    await q("UPDATE js_cv_files SET scan_status='scan_unavailable' WHERE id=$1", [w.cvFileId]);
+    for (const v of [undefined, "", "false", "TRUE", "1", "yes"]) {
+      if (v === undefined) delete process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+      else process.env.ALLOW_UNSCANNED_ATTACHMENTS = v;
+      const r = await check(w.appId);
+      assert.equal(r.ok, false, `ALLOW_UNSCANNED_ATTACHMENTS=${v}`);
+      assert.equal(r.code, "attachment_unscanned", JSON.stringify(r));
+      assert.match(r.detail, /attachment_unscanned/);
+    }
+    assert.ok(guard.GUARD_CODES.includes("attachment_unscanned"));
+    process.env.ALLOW_UNSCANNED_ATTACHMENTS = "true";
+    assert.equal((await check(w.appId)).ok, true, "explicitly allowed by the administrator");
+    // infected always blocks, whatever the setting
+    await q("UPDATE js_cv_files SET scan_status='infected' WHERE id=$1", [w.cvFileId]);
+    assert.equal((await check(w.appId)).code, "package_changed");
+  } finally {
+    if (saved === undefined) delete process.env.ALLOW_UNSCANNED_ATTACHMENTS;
+    else process.env.ALLOW_UNSCANNED_ATTACHMENTS = saved;
+  }
+});
