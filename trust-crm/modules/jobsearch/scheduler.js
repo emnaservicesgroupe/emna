@@ -165,6 +165,7 @@ function emptySummary(at) {
     searchesRescheduled: 0,
     searchesAbandoned: 0,
     queueProcessed: 0,
+    draftsSwept: 0,
     matched: 0,
     matchSkipped: 0,
     applicationsCreated: 0,
@@ -707,6 +708,11 @@ async function stepExpiry(ctx) {
   }
 }
 
+/** Follow-up drafts stuck in 'sending' (> 10 min) -> back to draft (or 'sent' when the sandbox has it). Bounded. */
+async function stepSweepDrafts(ctx) {
+  const out = await require("./draftService").sweepStuckDrafts({ minutes: 10, limit: 50 });
+  ctx.summary.draftsSwept = (ctx.summary.draftsSwept || 0) + out.swept;
+}
 
 async function step(ctx, name, fn) {
   try {
@@ -764,6 +770,7 @@ async function tick(now = new Date(), { deps = {} } = {}) {
     await step(ctx, "send", (c) => stepDrain(c, ["submit"])); // what this tick queued is sent this tick (bounded)
     await step(ctx, "expiry", stepExpiry);
     await step(ctx, "stale", async (c) => { await queue.reclaimStale({ now: c.now }); });
+    await step(ctx, "sweep_drafts", stepSweepDrafts);
     await recordTick(summary);
     return summary;
   } catch (err) {

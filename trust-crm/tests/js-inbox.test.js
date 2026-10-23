@@ -135,6 +135,7 @@ async function world(opts = {}) {
   return w;
 }
 
+const authOk = (w) => `mx.vita.test; dkim=pass header.d=${w.domain}; spf=pass; dmarc=pass`;
 let mid = 0;
 const newId = () => `<reply-${++mid}-${crypto.randomBytes(4).toString("hex")}@mail.example>`;
 const reply = (w, extra = {}) => ({ messageId: newId(), inReplyTo: w.providerId, references: [w.plannedId], from: `HR Team <hr@${w.domain}>`, to: "applications@vita.test.invalid", subject: "Re: Application", text: "Hello, thanks.", ...extra });
@@ -148,7 +149,7 @@ test("genuine reply (In-Reply-To = stored provider id, employer-domain sender) v
     to: "applications@vita.test.invalid",
     subject: "Re: Application: Electrician",
     text: "Thank you for applying. We have received your application and will review it.",
-    headers: { "In-Reply-To": w.providerId, References: w.plannedId },
+    headers: { "In-Reply-To": w.providerId, References: w.plannedId, "Authentication-Results": `mx.vita.test; dkim=pass header.d=${w.domain}; spf=pass; dmarc=pass` },
   });
   const polled = await inbox.pollAndStore();
   assert.equal(polled.matched, 1, JSON.stringify(polled));
@@ -173,7 +174,7 @@ test("genuine reply (In-Reply-To = stored provider id, employer-domain sender) v
   assert.equal(await statusOf(w.appId), "confirmed_submitted");
   // replay through poll (cursor) and directly: still one message, one confirmation
   assert.equal((await inbox.pollAndStore()).matched, 0);
-  const again = await inbox.ingest({ messageId: m[0].message_id, from: `hr@${w.domain}`, text: "Thank you for applying", inReplyTo: w.providerId });
+  const again = await inbox.ingest({ messageId: m[0].message_id, from: `hr@${w.domain}`, text: "Thank you for applying", inReplyTo: w.providerId, authResults: authOk(w) });
   assert.equal(again.duplicate, true);
   assert.equal((await q("SELECT count(*)::int n FROM js_messages WHERE message_id=$1", [m[0].message_id])).rows[0].n, 1);
   assert.equal((await q("SELECT * FROM js_submissions WHERE id=$1", [w.sub.id])).rows[0].evidence.confirmations.length, 1);
@@ -255,7 +256,7 @@ test("display-name address trick, multiple From, invalid From and DKIM fail -> n
   const ok = await inbox.ingest(reply(w, { authResults: { dkim: "pass" } }));
   assert.equal(ok.matched, true);
   for (const r of [spoof, quoted, multi, list, missing, dkim, header]) assert.equal((await msgRow(r.id)).application_id, null);
-  assert.deepEqual(replyMatcher.parseFrom("Jane Doe <Jane@Employer.com>"), { ok: true, address: "jane@employer.com", domain: "employer.com" });
+  assert.deepEqual(replyMatcher.parseFrom("Jane Doe <Jane@Employer.com>"), { ok: true, address: "jane@employer.com", domain: "employer.com", name: "Jane Doe" });
 });
 
 // ---------------------------------------------------------------- webhook
@@ -569,4 +570,340 @@ test("imapSmtp.status() is honest: requires_setup unless configured AND polling 
     for (const k of keys) delete process.env[k];
     process.env.MAIL_PROVIDER = "sandbox";
   }
+});
+
+// ================================================================ fix round 1 (review I1-I3 + minors)
+
+const scheduler = require("../modules/jobsearch/scheduler");
+const inboxRoutes = require("../routes/jobsearchInbox");
+const subStatus = async (id) => (await q("SELECT status FROM js_submissions WHERE id=$1", [id])).rows[0].status;
+
+test("reviewer adversarial table (adv.js): every row, incl. former WRONG/JUDGE rows, has the decided outcome", async () => {
+  const A = await world();
+  const B = await world();
+  const C1 = await world({ domain: "northwindshared.example" });
+  const C2 = await world({ domain: "northwindshared.example" });
+  const N = await world();
+  await q("UPDATE js_employers SET domain=NULL, verified_contact_email=NULL WHERE id=$1", [N.employerId]);
+  const NC = await world();
+  await q("UPDATE js_employers SET domain=NULL, verified_contact_email='recruiter.nw@gmail.com' WHERE id=$1", [NC.employerId]);
+  const AG = await world();
+  await q("UPDATE js_employers SET domain=NULL, verified_contact_email='recruiter@agency-x.example' WHERE id=$1", [AG.employerId]);
+  const D = await world();
+  await q("UPDATE candidates SET is_deleted=true WHERE id=$1", [D.candidateId]);
+  const d = A.domain;
+  const big = Array.from({ length: 100000 }, (_, i) => `<junk${i}@x.example>`);
+  big.push(A.providerId);
+  const rows = [
+    ["baseline genuine reply A", A.appId, reply(A)],
+    ["display-name contains employer addr", "none", reply(A, { from: `hr@${d} <evil@evil.example>` })],
+    ["quoted display-name addr", "none", reply(A, { from: `"hr@${d}" <evil@evil.example>` })],
+    ["encoded-word display w/ addr", "none", reply(A, { from: `=?utf-8?q?hr@${d}?= <evil@evil.example>` })],
+    ["comment form", "none", reply(A, { from: `evil@evil.example (hr@${d})` })],
+    ["two angle addrs", "none", reply(A, { from: `"x" <evil@evil.example>, <hr@${d}>` })],
+    ["From array of 2", "none", reply(A, { from: [`hr@${d}`, "evil@evil.example"] })],
+    ["From array []", "none", reply(A, { from: [] })],
+    ["From null", "none", reply(A, { from: null })],
+    ["From object name has @", "none", reply(A, { from: { name: `hr@${d}`, address: "evil@evil.example" } })],
+    ["From object legit", A.appId, reply(A, { from: { name: "HR", address: `hr@${d}` } })],
+    ["From CRLF injection", "none", reply(A, { from: `hr@${d}\r\nBcc: evil@evil.example` })],
+    ["% routing", "none", reply(A, { from: `evil%evil.example@${d}` })],
+    ["IP literal", "none", reply(A, { from: "hr@[10.0.0.1]" })],
+    ["homoglyph domain", "none", reply(A, { from: `hr@${d.replace("i", "і")}` })],
+    ["subdomain sender", "none", reply(A, { from: `hr@mail.${d}` })],
+    ["suffix lookalike", "none", reply(A, { from: `hr@${d}.evil.example` })],
+    ["prefix lookalike", "none", reply(A, { from: `hr@x${d}` })],
+    ["uppercase employer domain", A.appId, reply(A, { from: `HR@${d.toUpperCase()}` })],
+    ["free-mail sender", "none", reply(A, { from: "northwind.hr@gmail.com" })],
+    ["candidate's own address", "none", reply(A, { from: "karim@example.com" })],
+    ["our own outbound address", "none", reply(A, { from: "applications@vita.test.invalid" })],
+    ["MAILER-DAEMON bounce", "none", reply(A, { from: "MAILER-DAEMON@mx.provider.example", subject: "Undelivered Mail Returned to Sender" })],
+    ["domain NULL, sender at old domain", "none", reply(N, { from: `hr@${N.domain}` })],
+    ["domain NULL, verified gmail contact exact", NC.appId, reply(NC, { from: "recruiter.nw@gmail.com" })],
+    ["domain NULL, other gmail user", "none", reply(NC, { from: "attacker@gmail.com" })],
+    ["domain NULL, other user at the agency contact's domain (narrowed)", "none", reply(AG, { from: "someone@agency-x.example" })],
+    ["domain NULL, the agency contact exactly", AG.appId, reply(AG, { from: "recruiter@agency-x.example" })],
+    ["deleted candidate", "none", reply(D)],
+    ["refs to B, sender A domain", "none", reply(B, { from: `hr@${d}` })],
+    ["unknown In-Reply-To", "none", reply(A, { inReplyTo: "<nope@x.example>", references: [] })],
+    ["subject/name similarity only", "none", reply(A, { inReplyTo: undefined, references: [], subject: "Re: Application: Electrician - Karim Benali" })],
+    ["In-Reply-To A + References B", "none", reply(A, { references: [B.plannedId] })],
+    ["token A + refs B (A domain)", "none", reply(B, { from: `hr@${d}`, subject: `Re [${A.token}]` })],
+    ["token A + refs B (B domain)", "none", reply(B, { subject: `Re [${A.token}]` })],
+    ["token A in body, A domain", A.appId, { messageId: newId(), from: `hr@${d}`, text: `quoted: Reference ${A.token}` }],
+    ["token A, sender B domain", "none", { messageId: newId(), from: `hr@${B.domain}`, subject: `[${A.token}]` }],
+    ["forged token", "none", { messageId: newId(), from: `hr@${d}`, subject: `[VITA-${"a".repeat(20)}]` }],
+    ["two tokens", "none", { messageId: newId(), from: `hr@${d}`, text: `${A.token} ${B.token}` }],
+    ["id case-changed", "none", reply(A, { inReplyTo: A.providerId.toUpperCase(), references: [] })],
+    ["same employer domain refs C1", C1.appId, reply(C1)],
+    ["same employer domain refs C2 from C1 sender", C2.appId, reply(C2, { from: "hr@northwindshared.example" })],
+    ["same employer token C2 + refs C1", "none", reply(C1, { subject: `[${C2.token}]` })],
+    ["100k references, real id last (cap 50)", "none", reply(A, { inReplyTo: undefined, references: big })],
+    ["dkim=fail obj", "none", reply(A, { authResults: { dkim: "fail" } })],
+    ["dmarc=fail obj", "none", reply(A, { authResults: { dkim: "pass", dmarc: "fail" } })],
+    ["dkim permerror", "none", reply(A, { authResults: { dkim: "permerror" } })],
+    ["dkim temperror (decided: fail closed)", "none", reply(A, { authResults: { dkim: "temperror" } })],
+    ["spf fail only", A.appId, reply(A, { authResults: { spf: "fail", dkim: "pass" } })],
+    ["A-R array: pass first, fail second", "none", reply(A, { authResults: ["attacker.example; dkim=pass; dmarc=pass", "mx.ours; dkim=fail header.d=evil; dmarc=fail"] })],
+    ["A-R dmarc=fail after 4000 chars", "none", reply(A, { authResults: `mx; spf=pass ${"x".repeat(4100)}; dmarc=fail` })],
+    ["no auth results, INBOUND_AUTH_REQUIRED=false (test default)", A.appId, reply(A, {})],
+    ["dkim as array (garbage -> fail)", "none", reply(A, { authResults: { dkim: ["fail"], dmarc: ["fail"] } })],
+  ];
+  const wrong = [];
+  for (const [name, expect, mailIn] of rows) {
+    let r;
+    try {
+      r = await inbox.ingest(mailIn);
+    } catch (err) {
+      r = { error: err.status };
+    }
+    const ok = expect === "none" ? r.error === 400 || r.matched === false : r.matched === true && r.applicationId === expect;
+    if (!ok) wrong.push(`${name}: ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("I1: negated / hedged acknowledgements never record evidence; genuine authenticated one records exactly once", async () => {
+  const negs = [
+    "We have not received your application documents yet, please resend.",
+    "We did not receive your CV.",
+    "Nous n'avons pas encore reçu votre candidature.",
+    "Please resend, we could not open the attachment.",
+    "We received your application but it is incomplete.",
+    "Thank you for applying, we are still waiting for your diploma.",
+    "Accusé de réception : dossier incomplet, pièces manquantes.",
+    "We haven't received your application documents.",
+  ];
+  for (const text of negs) {
+    const w = await world();
+    const r = await inbox.ingest(reply(w, { text, authResults: authOk(w) }));
+    assert.equal(r.matched, true, text);
+    assert.equal(await subStatus(w.sub.id), "sent", `no evidence for: ${text}`);
+    assert.notEqual((await msgRow(r.id)).classification.category, "acknowledgement", text);
+  }
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { text: "Thank you for applying — we have received your application.", authResults: authOk(w) }));
+  assert.deepEqual(r.evidence, { recorded: true });
+  assert.equal(await subStatus(w.sub.id), "confirmed_submitted");
+  const again = await inbox.ingest(reply(w, { text: "Thank you for applying — we have received your application.", authResults: authOk(w) }));
+  assert.notEqual(again.evidence && again.evidence.recorded, true);
+  assert.equal((await q("SELECT evidence FROM js_submissions WHERE id=$1", [w.sub.id])).rows[0].evidence.confirmations.length, 1);
+});
+
+test("I1/I2: acknowledgement evidence needs authenticated (aligned dkim=pass), not an auto-reply/OOO", async () => {
+  const text = "Thank you for applying. We have received your application.";
+  const noAuth = await world();
+  const r1 = await inbox.ingest(reply(noAuth, { text }));
+  assert.equal(r1.matched, true);
+  assert.equal(r1.evidence.reason, "not_authenticated");
+  assert.equal(await subStatus(noAuth.sub.id), "sent");
+  const unaligned = await world();
+  const r2 = await inbox.ingest(reply(unaligned, { text, authResults: "mx; dkim=pass header.d=sendgrid.net; spf=pass" }));
+  assert.equal(r2.matched, true);
+  assert.equal(r2.evidence.reason, "not_authenticated");
+  const ooo = await world();
+  const r3 = await inbox.ingest(reply(ooo, { text, subject: "Automatic reply: Application", authResults: authOk(ooo) }));
+  assert.equal(r3.evidence.reason, "auto_reply");
+  const rfc = await world();
+  const r4 = await inbox.ingest(reply(rfc, { text, headers: { "Auto-Submitted": "auto-replied" }, authResults: authOk(rfc) }));
+  assert.equal(r4.evidence.reason, "auto_reply");
+  for (const w of [ooo, rfc]) assert.equal(await subStatus(w.sub.id), "sent");
+  // an ATS notice ('auto-generated') from the verified domain still counts
+  const ats = await world();
+  const r5 = await inbox.ingest(reply(ats, { text, headers: { "Auto-Submitted": "auto-generated" }, authResults: authOk(ats) }));
+  assert.deepEqual(r5.evidence, { recorded: true });
+  // the candidate replying from their own address is never the employer
+  const loop = await world();
+  const r6 = await inbox.ingest(reply(loop, { text, from: "karim@example.com", authResults: "mx; dkim=pass header.d=example.com" }));
+  assert.equal(r6.matched, false);
+  assert.equal(r6.reason, "candidate_sender");
+});
+
+test("I2: auth evaluation fails closed (any fail wins, whole value scanned, garbage/oversize fail, temperror fail, INBOUND_AUTH_REQUIRED)", async () => {
+  const e = replyMatcher.evaluateAuth;
+  assert.equal(e(["x; dkim=pass; dmarc=pass", "y; dkim=fail"], "a.example").failed, true);
+  assert.equal(e(`spf=pass ${"x".repeat(5000)}; dmarc=fail`, "a.example").failed, true);
+  assert.equal(e({ dkim: "temperror" }, "a.example").failed, true);
+  assert.equal(e({ dkim: 1 }, "a.example").failed, true);
+  assert.equal(e([1, "dkim=pass"], "a.example").failed, true);
+  assert.equal(e(`dkim=pass ${"x".repeat(70000)}`, "a.example").failed, true);
+  assert.equal(e(42, "a.example").failed, true);
+  assert.equal(e(null, "a.example").present, false);
+  assert.equal(e("no verdicts here", "a.example").present, false);
+  assert.equal(e("dkim=pass header.d=a.example", "hr.a.example").authenticated, true, "parent domain aligns");
+  assert.equal(e("dkim=pass header.i=@a.example", "a.example").authenticated, true);
+  assert.equal(e("dkim=pass header.d=other.example", "a.example").authenticated, false);
+  assert.equal(e({ spf: "fail", dkim: "pass", dkimDomain: "a.example" }, "a.example").authenticated, true, "SPF never decides");
+  const w = await world();
+  process.env.INBOUND_AUTH_REQUIRED = "true";
+  try {
+    const r = await inbox.ingest(reply(w));
+    assert.equal(r.matched, false);
+    assert.equal(r.reason, "auth_missing");
+    const ok = await inbox.ingest(reply(w, { authResults: authOk(w) }));
+    assert.equal(ok.matched, true);
+  } finally {
+    delete process.env.INBOUND_AUTH_REQUIRED;
+  }
+  assert.equal(replyMatcher.authRequired(), false, "NODE_ENV=test default");
+  process.env.NODE_ENV = "production";
+  try {
+    assert.equal(replyMatcher.authRequired(), true, "production default");
+  } finally {
+    process.env.NODE_ENV = "test";
+  }
+});
+
+test("I3: reschedule is one transaction: overlap -> 409 + original untouched; crash -> untouched; concurrent -> one consistent winner; one live slot per application", async () => {
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { text: "Interview invitation" }));
+  const first = (await interviewService.createFromMessage({ messageId: r.id, proposedStart: "2026-12-01T10:00:00Z", tz: "UTC", actor: w.manager })).appointment;
+  await assert.rejects(interviewService.createFromMessage({ messageId: r.id, proposedStart: "2026-12-05T10:00:00Z", tz: "UTC", actor: w.manager }), (e) => e.status === 409 && e.code === "interview_already_scheduled");
+  // another application of the same staff member blocks 14:00-15:00
+  const w2 = await world({ managerId: w.managerId });
+  const r2 = await inbox.ingest(reply(w2, { text: "Interview?" }));
+  const other = (await interviewService.createFromMessage({ messageId: r2.id, proposedStart: "2026-12-01T14:00:00Z", tz: "UTC", actor: w.manager })).appointment;
+  const snap = async (id) => (await q("SELECT starts_at, ends_at, tz, status FROM js_appointments WHERE id=$1", [id])).rows[0];
+  const before = await snap(first.id);
+  const clash = await http("POST", `/jobsearch/interviews/${first.id}/reschedule`, tok(w.managerId, "Manager"), { proposedStart: "2026-12-01T14:30:00Z", tz: "UTC" });
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.code, "APPOINTMENT_OVERLAP");
+  assert.deepEqual(await snap(first.id), before, "original slot still booked");
+  await assert.rejects(interviewService.rescheduleInterview({ id: first.id, proposedStart: "2026-12-02T09:00:00Z", tz: "UTC", actor: w.manager, deps: { afterUpdate: async () => { throw new Error("crash"); } } }), /crash/);
+  assert.deepEqual(await snap(first.id), before, "rolled back after a crash inside the transaction");
+  const confirmed = await interviewService.confirmInterview({ id: first.id, candidateAvailabilityConfirmed: true, actor: w.manager, note: "candidate confirmed by phone call" });
+  assert.equal(confirmed.status, "confirmed");
+  const [a, b] = await Promise.allSettled([
+    interviewService.rescheduleInterview({ id: first.id, proposedStart: "2026-12-03T09:00:00Z", tz: "UTC", actor: w.manager }),
+    interviewService.rescheduleInterview({ id: first.id, proposedStart: "2026-12-04T09:00:00Z", tz: "UTC", actor: w.manager }),
+  ]);
+  assert.ok([a, b].some((x) => x.status === "fulfilled"));
+  const after = await snap(first.id);
+  assert.ok(["2026-12-03T09:00:00.000Z", "2026-12-04T09:00:00.000Z"].includes(after.starts_at.toISOString()));
+  assert.equal(after.status, "tentative", "the candidate must confirm again");
+  assert.equal((await q("SELECT count(*)::int n FROM js_appointments WHERE application_id=$1 AND status <> 'cancelled'", [w.appId])).rows[0].n, 1);
+  assert.deepEqual(await snap(other.id), { ...(await snap(other.id)), status: "tentative" });
+  // an explicit additional round is allowed
+  const extra = await interviewService.createFromMessage({ messageId: r.id, proposedStart: "2026-12-10T10:00:00Z", tz: "UTC", actor: w.manager, additionalRound: true });
+  assert.equal(extra.appointment.status, "tentative");
+});
+
+test("minor (a)(b): object From stored as plain address + display name (drafts work); candidate timeline shows fixed codes only", async () => {
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { from: { name: "Head of HR", address: `HR@${w.domain}` } }));
+  const m = await msgRow(r.id);
+  assert.equal(m.from_addr, `hr@${w.domain}`);
+  assert.equal(m.from_name, "Head of HR");
+  const d = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  assert.equal(d.to, `hr@${w.domain}`);
+  const appt = (await interviewService.createFromMessage({ messageId: r.id, proposedStart: "2026-12-07T10:00:00Z", tz: "UTC", actor: w.manager })).appointment;
+  await interviewService.cancelInterview({ id: appt.id, actor: w.manager, reason: "Secret internal note about salary" });
+  await inbox.applyClassification({ messageId: r.id, actor: w.manager, status: "rejected", reason: "Employer said the candidate is too old" });
+  const ct = await candidateToken(w.userId);
+  const view = await http("GET", `/jobsearch/applications/${w.appId}`, ct);
+  assert.equal(view.status, 200);
+  const txt = JSON.stringify(view.body.timeline);
+  assert.doesNotMatch(txt, /Secret|salary|too old/);
+  assert.ok(view.body.timeline.some((e) => e.event === "interview_cancelled" && e.detail.reason === "cancelled_by_staff"));
+  assert.ok(view.body.timeline.some((e) => e.event === "status_from_reply" && e.detail.reason === "reply_rejected"));
+});
+
+test("minor (c): hard bounce matched by Message-ID -> outcome_unknown + verify_delivery task, never attached; soft bounce changes nothing", async () => {
+  const w = await world();
+  const r = await inbox.ingest({
+    messageId: newId(),
+    from: "MAILER-DAEMON@mx.northwind-relay.example",
+    subject: "Delivery Status Notification (Failure)",
+    text: `Your message could not be delivered.\nStatus: 5.1.1 user unknown\nOriginal-Message-ID: ${w.plannedId}`,
+    headers: { "Content-Type": "multipart/report; report-type=delivery-status" },
+  });
+  assert.equal(r.matched, false);
+  assert.equal(r.reason, "bounce");
+  assert.equal(r.bounce.submissionId, w.sub.id);
+  const m = await msgRow(r.id);
+  assert.equal(m.application_id, null);
+  assert.equal(m.message_kind, "bounce");
+  assert.equal(await subStatus(w.sub.id), "outcome_unknown");
+  assert.equal(await statusOf(w.appId), "outcome_unknown");
+  const t = (await q("SELECT * FROM js_tasks WHERE application_id=$1 AND reason='verify_delivery' AND status='open'", [w.appId])).rows;
+  assert.equal(t.length, 1);
+  assert.ok((await timelineOf(w.appId)).some((e) => e.event === "delivery_bounce_reported"));
+  const ct = await candidateToken(w.userId);
+  assert.deepEqual((await http("GET", "/jobsearch/messages", ct)).body.messages, []);
+  const w2 = await world();
+  const soft = await inbox.ingest({ messageId: newId(), from: "postmaster@relay.example", subject: "Delivery delayed", text: `Status: 4.4.1 deferred\n${w2.providerId}` });
+  assert.equal(soft.reason, "bounce");
+  assert.equal(await subStatus(w2.sub.id), "sent");
+});
+
+test("minor (e): rate-limit map evicts expired / oldest entries instead of clearing everything", () => {
+  const { hits, rateLimited, MAX_TRACKED } = inboxRoutes._internal;
+  hits.clear();
+  const old = Date.now() - 120000;
+  for (let i = 0; i < MAX_TRACKED; i += 1) hits.set(`stale-${i}`, [old]);
+  for (let i = 0; i < 5; i += 1) rateLimited("busy-ip");
+  rateLimited("new-ip");
+  assert.ok(hits.size < 10, `expired entries dropped (${hits.size})`);
+  assert.equal(hits.get("busy-ip").length, 5, "live counters survive");
+  hits.clear();
+  for (let i = 0; i < MAX_TRACKED + 5; i += 1) hits.set(`live-${i}`, [Date.now()]);
+  rateLimited("latest");
+  assert.ok(hits.size <= MAX_TRACKED);
+  assert.ok(hits.has("latest"));
+  hits.clear();
+});
+
+test("minor (f): drafts stuck in 'sending' are swept by the scheduler tick; resend reuses the Message-ID and never double-sends", async () => {
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { text: "Please send your availability" }));
+  const d1 = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  await q("UPDATE js_messages SET status='sending', sending_at=now() - interval '11 minutes', message_id='<stuck-1@vita.test.invalid>' WHERE id=$1", [d1.id]);
+  // a second draft whose mail DID reach the sandbox before the crash
+  const d2 = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  await mail.sandbox.send({ to: `hr@${w.domain}`, subject: "x", text: "y", headers: { "Message-ID": "<stuck-2@vita.test.invalid>" } });
+  await q("UPDATE js_messages SET status='sending', sending_at=now() - interval '11 minutes', message_id='<stuck-2@vita.test.invalid>' WHERE id=$1", [d2.id]);
+  const fresh = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  await q("UPDATE js_messages SET status='sending', sending_at=now() WHERE id=$1", [fresh.id]);
+  const summary = await scheduler.tick(new Date(), { deps: { onStep: async (name) => (name === "sweep_drafts" ? undefined : "skip") } });
+  assert.equal(summary.draftsSwept, 2, JSON.stringify(summary));
+  const m1 = await msgRow(d1.id);
+  assert.equal(m1.status, "draft");
+  assert.equal(m1.send_error, "send_interrupted");
+  assert.equal((await msgRow(d2.id)).status, "sent");
+  assert.equal((await msgRow(fresh.id)).status, "sending", "recent sends are left alone");
+  const before = (await mail.sandbox.listOutbound({ to: `hr@${w.domain}` })).length;
+  const s = await draftService.sendFollowUp({ draftId: d1.id, actor: w.manager });
+  assert.equal(s.sent, true);
+  const outs = await mail.sandbox.listOutbound({ to: `hr@${w.domain}` });
+  assert.equal(outs.length, before + 1);
+  assert.equal(outs[outs.length - 1].headers["Message-ID"], "<stuck-1@vita.test.invalid>", "same Message-ID reused");
+  // a draft carrying a Message-ID that already went out is refused
+  const d3 = await draftService.createDraft({ messageId: r.id, actor: w.manager });
+  await q("UPDATE js_messages SET message_id='<stuck-1@vita.test.invalid>' WHERE id=$1", [d3.id]);
+  await assert.rejects(draftService.sendFollowUp({ draftId: d3.id, actor: w.manager }), (e) => e.code === "already_sent");
+  assert.equal((await mail.sandbox.listOutbound({ to: `hr@${w.domain}` })).length, before + 1);
+});
+
+test("minor (g): HMAC is over the RAW bytes; parallel replays of one Message-ID store exactly one row", async () => {
+  const w = await world();
+  const msgId = newId();
+  const raw = `{  "text" : "Hello",\n  "from": "hr@${w.domain}",   "messageId": "${msgId}", "inReplyTo": "${w.providerId}" }`;
+  const reserialized = JSON.stringify(JSON.parse(raw));
+  assert.notEqual(raw, reserialized);
+  assert.equal((await push(null, { raw, signature: sign(reserialized) })).status, 401, "a signature over re-serialized JSON is refused");
+  const ok = await push(null, { raw, signature: sign(raw) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const textPlain = await http("POST", "/jobsearch/inbound/mail", null, JSON.stringify(reply(w)), { "content-type": "text/plain" });
+  assert.equal(textPlain.status, 401);
+  const p = reply(w);
+  const body = JSON.stringify(p);
+  const tp = await http("POST", "/jobsearch/inbound/mail", null, body, { "content-type": "text/plain", "x-vita-signature": sign(body) });
+  assert.equal(tp.status, 200, "content type does not matter: raw bytes are signed");
+  const upper = await http("POST", "/JOBSEARCH/INBOUND/MAIL", null, JSON.stringify(reply(w)), { "x-vita-signature": "sha256=" + "0".repeat(64) });
+  assert.equal(upper.status, 401, "case-variant path still goes through the signature check");
+  const race = reply(w);
+  const results = await Promise.all(Array.from({ length: 6 }, () => push(race)));
+  assert.ok(results.every((x) => x.status === 200), JSON.stringify(results.map((x) => x.status)));
+  assert.equal(results.filter((x) => x.body.stored === true).length, 1);
+  assert.equal((await q("SELECT count(*)::int n FROM js_messages WHERE message_id=$1", [race.messageId])).rows[0].n, 1);
 });

@@ -282,9 +282,13 @@ async function sendFollowUp({ draftId, actor, deps = {} }) {
       await S.auditEvent(client, actor, "message.follow_up_refused", app.candidate_id, app.id, { draftId: id, code: blocked.code });
       return { refused: blocked, app };
     }
-    const messageId = messageIdForDraft(id);
+    // Idempotent by Message-ID: a draft keeps its Message-ID across attempts, and a Message-ID that
+    // already went out (any outbound row 'sent' with it) is never sent again.
+    const messageId = draft.message_id || messageIdForDraft(id);
+    const dup = await client.query("SELECT id FROM js_messages WHERE direction = 'out' AND message_id = $1 AND status = 'sent' LIMIT 1", [messageId]);
+    if (dup.rowCount) return { refused: { code: "already_sent", detail: "A message with this Message-ID was already sent" }, app };
     const refs = matcher.messageIdList(parent.refs, parent.message_id);
-    await client.query("UPDATE js_messages SET status = 'sending', message_id = $2, auto_sent = $3, sent_by = $4, send_error = NULL WHERE id = $1", [id, messageId, auto, S.actorLabel(actor)]);
+    await client.query("UPDATE js_messages SET status = 'sending', sending_at = now(), message_id = $2, auto_sent = $3, sent_by = $4, send_error = NULL WHERE id = $1", [id, messageId, auto, S.actorLabel(actor)]);
     await S.auditEvent(client, actor, "message.follow_up_sending", app.candidate_id, app.id, { draftId: id, auto, ruleId: rule ? rule.id : null, to: draft.to_addr });
     return {
       app,
@@ -323,7 +327,7 @@ async function sendFollowUp({ draftId, actor, deps = {} }) {
       await S.auditEvent(client, actor, "message.follow_up_unknown", app.candidate_id, app.id, { draftId: id, error: res.reason });
     } else {
       const reason = oneLine((res && res.reason) || "not accepted by the mail provider", 300);
-      row = (await client.query("UPDATE js_messages SET status = 'draft', message_id = NULL, auto_sent = false, send_error = $2 WHERE id = $1 RETURNING *", [id, reason])).rows[0];
+      row = (await client.query("UPDATE js_messages SET status = 'draft', auto_sent = false, send_error = $2 WHERE id = $1 RETURNING *", [id, reason])).rows[0];
       await S.auditEvent(client, actor, "message.follow_up_not_accepted", app.candidate_id, app.id, { draftId: id, reason });
     }
     return row;
@@ -333,4 +337,34 @@ async function sendFollowUp({ draftId, actor, deps = {} }) {
   return { sent: false, draft: presentDraft(final), error: final.send_error };
 }
 
-module.exports = { summarize, draftReply, createDraft, sendFollowUp, setGenerator, loadMessageScoped, presentDraft, replySubject, AUTO_WINDOW_HOURS };
+/**
+ * Drafts stuck in 'sending' (process died between intent and result) for longer than `minutes`:
+ * if the sandbox recorded the outbound Message-ID it went out -> 'sent'; otherwise back to 'draft'
+ * with send_error 'send_interrupted' (a human decides; a re-send reuses the same Message-ID).
+ * Bounded; called by the scheduler tick.
+ */
+async function sweepStuckDrafts({ minutes = 10, limit = 50 } = {}) {
+  const out = { swept: 0, markedSent: 0 };
+  const rows = (await S.db().query(
+    "SELECT id FROM js_messages WHERE direction = 'out' AND status = 'sending' AND sending_at < now() - make_interval(mins => $1) ORDER BY sending_at LIMIT $2",
+    [minutes, limit]
+  )).rows;
+  for (const { id } of rows) {
+    await S.inTx(async (client) => {
+      const r = (await client.query("SELECT * FROM js_messages WHERE id = $1 AND status = 'sending' FOR UPDATE SKIP LOCKED", [id])).rows[0];
+      if (!r) return;
+      const sb = r.message_id ? (await client.query("SELECT message_id FROM js_sandbox_mail WHERE headers->>'_direction' = 'outbound' AND headers->>'Message-ID' = $1 LIMIT 1", [r.message_id])).rows[0] : null;
+      if (sb) {
+        await client.query("UPDATE js_messages SET status = 'sent', sent_at = COALESCE(sent_at, now()), provider_message_id = $2 WHERE id = $1", [id, sb.message_id]);
+        out.markedSent += 1;
+      } else {
+        await client.query("UPDATE js_messages SET status = 'draft', send_error = 'send_interrupted' WHERE id = $1", [id]);
+      }
+      await S.auditEvent(client, "system:scheduler", "message.follow_up_swept", null, r.application_id, { draftId: id, result: sb ? "sent" : "draft" });
+      out.swept += 1;
+    });
+  }
+  return out;
+}
+
+module.exports = { sweepStuckDrafts, summarize, draftReply, createDraft, sendFollowUp, setGenerator, loadMessageScoped, presentDraft, replySubject, AUTO_WINDOW_HOURS };

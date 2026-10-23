@@ -10,7 +10,8 @@
 //   POST /messages/:id/apply-classification {status, reason?}          jobsearch:approve + scope; status interview|offer|rejected
 //   POST /messages/:id/draft                 {lang?}                    staff jobsearch:write + scope
 //   POST /drafts/:id/send                    {}                         jobsearch:approve, or an enabled ack_reply rule
-//   POST /messages/:id/interview             {proposedStart, tz, durationMinutes?, title?}  jobsearch:approve + scope
+//   POST /messages/:id/interview             {proposedStart, tz, durationMinutes?, title?, additionalRound?}  jobsearch:approve + scope;
+//                                            409 interview_already_scheduled when a live slot exists (reschedule it)
 //   POST /interviews/:id/availability        {available: true, note?}   Candidate (own) or staff recording it (note)
 //   POST /interviews/:id/cancel              {reason?}                  jobsearch:approve + scope
 //   POST /interviews/:id/reschedule          {proposedStart, tz, durationMinutes?}
@@ -37,14 +38,24 @@ function pick(req, allowed) {
 
 // ---------------------------------------------------------------- inbound webhook
 
-const hits = new Map(); // ip -> [timestamps]
+const hits = new Map(); // ip -> [timestamps] (insertion order = least recently refreshed first)
+const MAX_TRACKED = 10000;
+function evict(now) {
+  for (const [ip, arr] of hits) if (!arr.length || now - arr[arr.length - 1] >= 60000) hits.delete(ip);
+  // still too many live entries: drop the least recently seen ones (never the whole map)
+  for (const ip of hits.keys()) {
+    if (hits.size <= MAX_TRACKED) break;
+    hits.delete(ip);
+  }
+}
 function rateLimited(ip) {
   const limit = Number(process.env.INBOUND_MAIL_RATE_PER_MIN) > 0 ? Number(process.env.INBOUND_MAIL_RATE_PER_MIN) : 120;
   const now = Date.now();
   const arr = (hits.get(ip) || []).filter((t) => now - t < 60000);
   arr.push(now);
-  hits.set(ip, arr);
-  if (hits.size > 10000) hits.clear();
+  hits.delete(ip);
+  hits.set(ip, arr); // re-insert: most recent last
+  if (hits.size > MAX_TRACKED) evict(now);
   return arr.length > limit;
 }
 
@@ -116,8 +127,8 @@ router.post("/drafts/:id/send", verifyToken, asyncHandler(async (req, res) => {
 // ---------------------------------------------------------------- interviews
 
 router.post("/messages/:id/interview", verifyToken, asyncHandler(async (req, res) => {
-  const b = pick(req, ["proposedStart", "tz", "durationMinutes", "title"]);
-  res.status(201).json(await interviewService.createFromMessage({ messageId: req.params.id, proposedStart: b.proposedStart, tz: b.tz, durationMinutes: b.durationMinutes, title: b.title, actor: req.user }));
+  const b = pick(req, ["proposedStart", "tz", "durationMinutes", "title", "additionalRound"]);
+  res.status(201).json(await interviewService.createFromMessage({ messageId: req.params.id, proposedStart: b.proposedStart, tz: b.tz, durationMinutes: b.durationMinutes, title: b.title, additionalRound: b.additionalRound, actor: req.user }));
 }));
 
 router.post("/interviews/:id/availability", verifyToken, asyncHandler(async (req, res) => {
@@ -148,3 +159,4 @@ router.use((err, _req, res, _next) => {
 });
 
 module.exports = router;
+module.exports._internal = { hits, rateLimited, MAX_TRACKED };

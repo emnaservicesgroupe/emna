@@ -26,7 +26,6 @@ const { httpErr, oneLine } = S;
 const SYSTEM_ACTOR = "system:inbox";
 const BODY_MAX = 20000;
 const MAX_ATTACHMENTS = 20;
-const ACK_RE = /received your application|thank you for applying|nous avons bien re[cç]u|accus[eé] de r[eé]ception/i;
 const EXEC_EXT = /\.(exe|com|bat|cmd|scr|pif|msi|msp|mst|dll|cpl|sys|drv|js|jse|mjs|vbs|vbe|wsf|wsh|wsc|hta|ps1|psm1|psd1|sh|bash|zsh|csh|ksh|jar|class|apk|app|dmg|pkg|deb|rpm|lnk|url|reg|inf|iso|img|vhd|vhdx|docm|dotm|xlsm|xltm|xlam|pptm|potm|ppam|sldm|run|bin|elf|gadget|msc|application|appref-ms|chm|xll|svg|html?|xht|xhtml|mht|mhtml)$/i;
 const REVIEW_ROLES = ["Admin", "SuperAdmin", "Manager"];
 const CLASSIFIABLE = ["interview", "offer", "rejected"];
@@ -103,10 +102,39 @@ function normalizeInbound(raw) {
     text: sanitizeUntrusted(text, BODY_MAX),
     receivedAt: received && !isNaN(received) ? received.toISOString() : new Date().toISOString(),
     attachments: attachmentMeta(m.attachments),
-    authResults: matcher.parseAuthResults(m.authResults || m.authenticationResults),
+    // raw value kept for the matcher's evaluation (see replyMatcher field contract); never stored raw
+    authResults: m.authResults !== undefined ? m.authResults : m.authenticationResults,
+    autoHeaders: autoHeadersOf(m),
+    // Message-IDs quoted in the RAW body (DSNs quote the original id; the sanitizer strips <...>)
+    quotedIds: quotedIdsOf(text),
   };
   NORMALIZED.add(out);
   return out;
+}
+
+function quotedIdsOf(rawText) {
+  const t = String(rawText || "").slice(0, 60000);
+  const angle = t.match(/<[^<>\s]{1,300}@[^<>\s]{1,255}>/g) || [];
+  const labelled = [...t.matchAll(/message-id\s*:\s*<?([^\s<>]{1,300}@[^\s<>]{1,255})>?/gi)].map((x) => x[1]);
+  return matcher.messageIdList([...angle, ...labelled].slice(0, 100));
+}
+
+/** Auto-reply / report markers from `headers` (any case) or top-level fields. Strings only. */
+function autoHeadersOf(m) {
+  const h = m.headers && typeof m.headers === "object" && !Array.isArray(m.headers) ? m.headers : {};
+  const lower = {};
+  for (const [k, v] of Object.entries(h).slice(0, 200)) if (typeof v === "string") lower[k.toLowerCase()] = v;
+  const pickStr = (...vals) => {
+    const v = vals.find((x) => typeof x === "string" && x.trim());
+    return v ? oneLine(v, 200) : null;
+  };
+  return {
+    autoSubmitted: pickStr(m.autoSubmitted, lower["auto-submitted"]),
+    precedence: pickStr(m.precedence, lower.precedence),
+    xAutoreply: pickStr(lower["x-autoreply"], lower["x-autorespond"] ? null : undefined),
+    xAutorespond: pickStr(lower["x-autorespond"]),
+    contentType: pickStr(m.contentType, lower["content-type"]),
+  };
 }
 
 /** Sandbox / poll format -> raw inbound object. */
@@ -125,6 +153,7 @@ function fromPolled(p) {
     receivedAt: p.receivedAt,
     attachments: Array.isArray(p.attachments) ? p.attachments : [],
     authResults: h.authResults || hv("Authentication-Results"),
+    headers: h,
   };
 }
 
@@ -140,6 +169,79 @@ async function reviewerOnDuty(c) {
   return r.rows[0] ? r.rows[0].id : null;
 }
 
+/** Message ids a DSN refers to: In-Reply-To / References + ids quoted in the report body. */
+function bounceIds(m) {
+  return matcher.messageIdList(m.inReplyTo, m.references, m.quotedIds || []);
+}
+
+async function storeRow(client, m, f) {
+  const sender = matcher.parseFrom(m.from);
+  const fromAddr = sender.ok ? sender.address : typeof m.from === "string" ? oneLine(m.from, 500) : oneLine(JSON.stringify(m.from === undefined ? null : m.from), 500);
+  const thread = m.references[0] || matcher.normalizeMessageId(m.inReplyTo || "") || m.messageId;
+  const auth = f.auth ? { present: f.auth.present, failed: f.auth.failed, authenticated: f.auth.authenticated, verdicts: f.auth.verdicts, ...(f.auth.reason ? { reason: f.auth.reason } : {}) } : null;
+  return (await client.query(
+    `INSERT INTO js_messages (direction, thread_ref, message_id, in_reply_to, refs, application_id, from_addr, from_name, to_addr, subject, match_confidence,
+                              review_state, match_reason, body_sanitized, ai_summary, attachments, auth_results, classification, submission_id, received_at, message_kind)
+     VALUES ('in',$1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20)
+     ON CONFLICT (message_id) WHERE direction = 'in' DO NOTHING RETURNING *`,
+    [
+      thread, m.messageId, m.inReplyTo, JSON.stringify(m.references), f.applicationId || null, fromAddr, sender.ok && sender.name ? sender.name : null,
+      m.to, m.subject, f.high ? 1 : 0, f.applicationId ? "matched" : "needs_review", f.reason, m.text, f.summary,
+      JSON.stringify(m.attachments), auth ? JSON.stringify(auth) : null, JSON.stringify(f.cls), f.submissionId || null, m.receivedAt, f.kind,
+    ]
+  )).rows[0];
+}
+
+async function openReviewTask(client, row, reason) {
+  const reviewer = await reviewerOnDuty(client);
+  const task = (await client.query(
+    `INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES (NULL,'unmatched_reply',$1,$2,$3)
+     ON CONFLICT (message_id, reason) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+    [`message:${row.id}: inbound message could not be matched (${reason})`, reviewer, row.id]
+  )).rows[0];
+  await S.auditEvent(client, SYSTEM_ACTOR, "message.needs_review", null, null, { messageId: row.id, reason, taskId: task ? task.id : null });
+  await S.staffEvent(client, null, reviewer, "staff.reply_needs_review", { messageId: row.id, reason, taskId: task ? task.id : null });
+  return task ? task.id : null;
+}
+
+/**
+ * Bounce / DSN: never attached to an application (never in the candidate's view). A HARD bounce (5.x.x)
+ * that references exactly one submission's provider/planned Message-ID makes a 'sent' submission
+ * 'outcome_unknown' (honest: we no longer know it arrived), adds a timeline note and a 'verify_delivery'
+ * staff task. Nothing is ever marked confirmed from a bounce.
+ */
+async function ingestBounce(client, m, cls) {
+  const ids = bounceIds(m);
+  const subs = ids.length
+    ? (await client.query("SELECT id, application_id, status FROM js_submissions WHERE provider_message_id = ANY($1::text[]) OR evidence->>'messageIdPlanned' = ANY($1::text[]) ORDER BY id DESC", [ids])).rows
+    : [];
+  const apps = [...new Set(subs.map((x) => x.application_id))];
+  const st = matcher.bounceStatus(m.text);
+  let locked = null;
+  if (apps.length === 1 && st.hard) locked = await S.lockApplication(client, apps[0]);
+  const row = await storeRow(client, m, { reason: "bounce", kind: "bounce", cls, summary: "Delivery status notification (bounce).", submissionId: apps.length === 1 ? subs[0].id : null });
+  if (!row) return { duplicate: true };
+  const res = { confidence: "none", reason: "bounce" };
+  if (!locked) return { row, res, taskId: await openReviewTask(client, row, apps.length > 1 ? "bounce_ambiguous" : st.hard ? "bounce_unmatched" : "bounce_soft") };
+  const { app, cand } = locked;
+  const sub = (await client.query("SELECT * FROM js_submissions WHERE id = $1 FOR UPDATE", [subs[0].id])).rows[0];
+  const bounce = { messageId: row.id, code: st.code, at: new Date().toISOString() };
+  if (sub.status === "sent") {
+    await client.query("UPDATE js_submissions SET status = 'outcome_unknown', evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [sub.id, JSON.stringify({ bounce })]);
+    if (app.status === "sent") await applicationService.transition(app.id, "outcome_unknown", SYSTEM_ACTOR, { client, reason: "hard_bounce", detail: { submissionId: sub.id } });
+  } else {
+    await client.query("UPDATE js_submissions SET evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [sub.id, JSON.stringify({ lateBounce: bounce })]);
+  }
+  await S.timeline(client, app.id, SYSTEM_ACTOR, "delivery_bounce_reported", { code: "hard_bounce", submissionId: sub.id, messageId: row.id });
+  const existing = (await client.query("SELECT id FROM js_tasks WHERE application_id = $1 AND reason = 'verify_delivery' AND status = 'open' LIMIT 1", [app.id])).rows[0];
+  const taskId = existing
+    ? existing.id
+    : (await client.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to) VALUES ($1,'verify_delivery',$2,$3) RETURNING id", [app.id, `Submission ${sub.id}: hard bounce ${st.code || ""} reported (message ${row.id}); verify delivery with the employer`, S.responsibleOf(app, cand)])).rows[0].id;
+  await S.auditEvent(client, SYSTEM_ACTOR, "submission.bounce", app.candidate_id, app.id, { submissionId: sub.id, messageId: row.id, code: st.code, previousStatus: sub.status, taskId });
+  await S.staffEvent(client, app.candidate_id, S.responsibleOf(app, cand), "staff.delivery_bounce", { applicationId: app.id, submissionId: sub.id, messageId: row.id, taskId });
+  return { row, res, taskId, bounce: { submissionId: sub.id, applicationId: app.id } };
+}
+
 /**
  * Stores one normalized inbound message (idempotent by Message-ID).
  * @returns {Promise<{id, duplicate, matched, confidence, reason, applicationId?, taskId?, evidence?}>}
@@ -149,58 +251,26 @@ async function ingest(mail) {
   const existing = (await S.db().query("SELECT id, application_id, review_state FROM js_messages WHERE direction = 'in' AND message_id = $1", [m.messageId])).rows[0];
   if (existing) return { id: existing.id, duplicate: true, matched: Boolean(existing.application_id), confidence: null, reason: "duplicate" };
   const cls = matcher.classifyReply(m.text);
-  const isAck = ACK_RE.test(m.text.normalize("NFC")) || cls.category === "acknowledgement";
+  const bounce = matcher.isBounce(m);
+  const autoReply = !bounce && matcher.isAutoReply(m);
   const out = await S.inTx(async (client) => {
+    if (bounce) return ingestBounce(client, m, cls);
     const res = await matcher.match(m, { client });
     let app = null;
     let cand = null;
     if (res.confidence === "high") ({ app, cand } = await S.lockApplication(client, res.applicationId));
-    const thread = m.references[0] || matcher.normalizeMessageId(m.inReplyTo || "") || m.messageId;
     const summary = draftService.summarize({ classification: cls });
-    const row = (await client.query(
-      `INSERT INTO js_messages (direction, thread_ref, message_id, in_reply_to, refs, application_id, from_addr, to_addr, subject, match_confidence,
-                                review_state, match_reason, body_sanitized, ai_summary, attachments, auth_results, classification, submission_id, received_at)
-       VALUES ('in',$1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb,$16::jsonb,$17,$18)
-       ON CONFLICT (message_id) WHERE direction = 'in' DO NOTHING RETURNING *`,
-      [
-        thread,
-        m.messageId,
-        m.inReplyTo,
-        JSON.stringify(m.references),
-        app ? app.id : null,
-        typeof m.from === "string" ? oneLine(m.from, 500) : oneLine(JSON.stringify(m.from || null), 500),
-        m.to,
-        m.subject,
-        res.confidence === "high" ? 1 : 0,
-        app ? "matched" : "needs_review",
-        res.reason,
-        m.text,
-        summary,
-        JSON.stringify(m.attachments),
-        m.authResults ? JSON.stringify(m.authResults) : null,
-        JSON.stringify(cls),
-        app ? res.submissionId : null,
-        m.receivedAt,
-      ]
-    )).rows[0];
+    const row = await storeRow(client, m, { applicationId: app ? app.id : null, high: Boolean(app), reason: res.reason, summary, cls, auth: res.auth, submissionId: app ? res.submissionId : null, kind: autoReply ? "auto_reply" : "reply" });
     if (!row) return { duplicate: true };
     if (app) {
       const responsible = S.responsibleOf(app, cand);
       await S.timeline(client, app.id, SYSTEM_ACTOR, "reply_received", { messageId: row.id, classification: cls.category, via: res.reason });
-      await S.auditEvent(client, SYSTEM_ACTOR, "message.received", app.candidate_id, app.id, { messageId: row.id, reason: res.reason, sender: res.sender, classification: cls.category, instructionLike: cls.instructionLike, attachmentsDropped: m.attachments.filter((a) => a.dropped).length });
+      await S.auditEvent(client, SYSTEM_ACTOR, "message.received", app.candidate_id, app.id, { messageId: row.id, reason: res.reason, sender: res.sender, authenticated: res.authenticated, autoReply, classification: cls.category, instructionLike: cls.instructionLike, attachmentsDropped: m.attachments.filter((a) => a.dropped).length });
       await S.staffEvent(client, app.candidate_id, responsible, "staff.reply_received", { applicationId: app.id, messageId: row.id, classification: cls.category, proposedStatus: cls.proposedStatus });
       await S.candidateEvent(client, app.candidate_id, "application.update", { applicationId: app.id, message: "You have an update" });
       return { row, app, res };
     }
-    const reviewer = await reviewerOnDuty(client);
-    const task = (await client.query(
-      `INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES (NULL,'unmatched_reply',$1,$2,$3)
-       ON CONFLICT (message_id, reason) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
-      [`message:${row.id}: inbound reply could not be matched (${res.reason})`, reviewer, row.id]
-    )).rows[0];
-    await S.auditEvent(client, SYSTEM_ACTOR, "message.needs_review", null, null, { messageId: row.id, reason: res.reason, taskId: task ? task.id : null });
-    await S.staffEvent(client, null, reviewer, "staff.reply_needs_review", { messageId: row.id, reason: res.reason, taskId: task ? task.id : null });
-    return { row, res, taskId: task ? task.id : null };
+    return { row, res, taskId: await openReviewTask(client, row, res.reason) };
   });
   if (out.duplicate) {
     const r = (await S.db().query("SELECT id, application_id FROM js_messages WHERE direction = 'in' AND message_id = $1", [m.messageId])).rows[0];
@@ -209,12 +279,19 @@ async function ingest(mail) {
   const result = { id: out.row.id, duplicate: false, matched: Boolean(out.app), confidence: out.res.confidence, reason: out.res.reason };
   if (out.app) result.applicationId = out.app.id;
   else result.taskId = out.taskId;
+  if (out.bounce) result.bounce = out.bounce;
   await S.auditLog(SYSTEM_ACTOR, out.app ? "jobsearch.message.matched" : "jobsearch.message.needs_review", "js_messages", out.row.id, { reason: out.res.reason });
-  if (out.app && isAck && out.res.confidence === "high" && out.res.submissionId) result.evidence = await acknowledge(out.row, out.res.submissionId);
+  // Evidence only for: 'high' + DKIM-authenticated (aligned) + an un-negated acknowledgement sentence +
+  // not an auto-reply/bounce (+ the matcher already refused our own / the candidate's address).
+  if (out.app) {
+    const why = out.res.confidence !== "high" ? "not_high" : out.res.authenticated !== true ? "not_authenticated" : autoReply ? "auto_reply" : !cls.acknowledgement ? null : !out.res.submissionId ? "no_submission" : "";
+    if (why === "") result.evidence = await acknowledge(out.row, out.res.submissionId);
+    else if (why) result.evidence = { recorded: false, reason: why };
+  }
   return result;
 }
 
-/** 'high' acknowledgement -> employer_acknowledgement evidence (once per submission; failures audited). */
+/** Records employer_acknowledgement evidence (once per submission; failures audited). Callers check eligibility. */
 async function acknowledge(row, submissionId) {
   const sub = (await S.db().query("SELECT status FROM js_submissions WHERE id = $1", [submissionId])).rows[0];
   if (!sub || !["sent", "outcome_unknown"].includes(sub.status)) return { recorded: false, reason: sub ? `submission_${sub.status}` : "no_submission" };
@@ -350,10 +427,12 @@ async function applyClassification({ messageId, actor, status, reason }) {
     if (!a.rowCount) throw httpErr(409, "Create the interview appointment first (POST /jobsearch/messages/:id/interview)");
   }
   const cls = msg.classification || {};
+  // The candidate-visible reason is a fixed code; the staff's free text stays in staff-only fields.
+  const staffNote = typeof reason === "string" && reason.trim() ? oneLine(reason, 500) : null;
   const row = await applicationService.transition(msg.application_id, status, actor, {
-    reason: typeof reason === "string" && reason.trim() ? reason : `reply:${status}`,
+    reason: `reply_${status}`,
     event: "status_from_reply",
-    detail: { messageId: msg.id, proposed: cls.category || null, proposedStatus: cls.proposedStatus || null },
+    detail: { messageId: msg.id, proposed: cls.category || null, proposedStatus: cls.proposedStatus || null, staffNote },
   });
   await S.auditLog(actor, "jobsearch.message.apply_classification", "js_messages", msg.id, { applicationId: row.id, status });
   return { applicationId: row.id, status: row.status, messageId: msg.id };
@@ -375,6 +454,8 @@ function presentMessage(r, user) {
     confidence: Number(r.match_confidence) >= 1 ? "high" : "none",
     matchReason: r.match_reason,
     from: r.from_addr,
+    fromName: r.from_name || null,
+    kind: r.message_kind || "reply",
     to: r.to_addr,
     subject: r.subject,
     body: r.body_sanitized,
