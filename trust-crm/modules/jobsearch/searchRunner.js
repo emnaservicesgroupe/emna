@@ -235,6 +235,17 @@ async function enqueueSearch({ sourceKey, candidateId, requestedBy }) {
 async function handleSearchJob(job, deps = {}) {
   const p = job.payload || {};
   const noop = (reason) => ({ status: "skipped", reason, found: 0, created: 0, runs: [] });
+  if (p.scheduled === true && (p.requestedBy === undefined || p.requestedBy === null)) {
+    // Scheduler-created item (Task 12; built server-side only): no requester. runSearch repeats the
+    // module-pause, eligibility (searchEligible), source-pause and rate-limit checks at run time.
+    if (!p.candidateId || !p.sourceKey) return noop("bad_scheduled_payload");
+    try {
+      return await runSearch({ sourceKey: p.sourceKey, candidateId: p.candidateId, manual: false }, deps);
+    } catch (err) {
+      if (err instanceof HttpError) return noop(`${err.status}: ${err.message}`);
+      throw err;
+    }
+  }
   const u = await db().query("SELECT id, role, is_active FROM users WHERE id = $1", [p.requestedBy]);
   if (!u.rowCount || !u.rows[0].is_active) return noop("requester_inactive");
   const user = { id: u.rows[0].id, role: u.rows[0].role };

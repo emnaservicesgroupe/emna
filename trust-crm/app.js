@@ -15,6 +15,7 @@ const jobsearchSourcesRoutes = require("./routes/jobsearchSources");
 const jobsearchMatchesRoutes = require("./routes/jobsearchMatches");
 const jobsearchApplicationsRoutes = require("./routes/jobsearchApplications");
 const jobsearchSubmissionsRoutes = require("./routes/jobsearchSubmissions");
+const jobsearchAdminRoutes = require("./routes/jobsearchAdmin");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 
 const app = express();
@@ -49,6 +50,7 @@ app.use("/jobsearch", jobsearchSourcesRoutes);
 app.use("/jobsearch", jobsearchMatchesRoutes);
 app.use("/jobsearch", jobsearchApplicationsRoutes);
 app.use("/jobsearch", jobsearchSubmissionsRoutes);
+app.use("/jobsearch", jobsearchAdminRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);

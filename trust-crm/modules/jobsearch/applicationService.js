@@ -50,6 +50,11 @@ const CANCELLABLE_QUEUE_KINDS = consentService.CANCELLABLE_QUEUE_KINDS;
 const SYSTEM_GRANT = Symbol("jobsearch.systemSendGrant");
 // Internal capability for needs_staff -> sent (staff-recorded manual completion, Task 11).
 const MANUAL_COMPLETION = Symbol("jobsearch.manualCompletion");
+// Internal capability for the scheduler (Task 12): create/prepare as a system actor ('system:scheduler')
+// without a user scope. Never reachable from a route (a Symbol key cannot come from JSON). It does NOT
+// allow approve/queue: those still need SYSTEM_GRANT via autoApprove / the submitter.
+const SCHEDULER_GRANT = Symbol("jobsearch.schedulerGrant");
+const isSystemActor = (actor) => typeof actor === "string" && /^system:[a-z_]{1,40}$/.test(actor);
 
 const LABEL_NOTICE = "Employer-support labels are read from the job ad and are informational only. Always verify with the employer before relying on them.";
 const MAX_REASON = 500;
@@ -247,6 +252,15 @@ async function loadScoped(user, applicationId, client) {
   return r.rows[0];
 }
 
+/** System actors (scheduler): the application row when its candidate is not deleted, else 404. */
+async function loadLive(applicationId) {
+  const id = posInt(applicationId);
+  if (!id) throw new HttpError(404, "Not found");
+  const r = await db().query("SELECT a.* FROM js_applications a JOIN candidates c ON c.id = a.candidate_id WHERE a.id = $1 AND c.is_deleted = false", [id]);
+  if (!r.rowCount) throw new HttpError(404, "Not found");
+  return r.rows[0];
+}
+
 // ---------------------------------------------------------------- creation
 
 /**
@@ -254,16 +268,22 @@ async function loadScoped(user, applicationId, client) {
  * mode other than search_only. First status: 'matched'.
  * @returns {Promise<object>} presented application with `created` (false when it already existed)
  */
-async function createFromMatch({ matchId, actor }) {
+async function createFromMatch({ matchId, actor, [SCHEDULER_GRANT]: schedulerGrant }) {
   const mid = posInt(matchId);
   if (!mid) throw new HttpError(400, "matchId must be a positive integer");
-  if (!canUse(actor, "jobsearch:write")) throw new HttpError(404, "Not found");
-  const { clause, params } = candidateScopeSql(actor, "c", 1);
-  const m = (await db().query(
-    `SELECT m.candidate_id, m.job_id FROM js_matches m JOIN candidates c ON c.id = m.candidate_id
-      WHERE m.id = $1 AND c.is_deleted = false AND ${clause}`,
-    [mid, ...params]
-  )).rows[0];
+  const system = schedulerGrant === true && isSystemActor(actor);
+  if (!system && !canUse(actor, "jobsearch:write")) throw new HttpError(404, "Not found");
+  let m;
+  if (system) {
+    m = (await db().query("SELECT m.candidate_id, m.job_id FROM js_matches m JOIN candidates c ON c.id = m.candidate_id WHERE m.id = $1 AND c.is_deleted = false", [mid])).rows[0];
+  } else {
+    const { clause, params } = candidateScopeSql(actor, "c", 1);
+    m = (await db().query(
+      `SELECT m.candidate_id, m.job_id FROM js_matches m JOIN candidates c ON c.id = m.candidate_id
+        WHERE m.id = $1 AND c.is_deleted = false AND ${clause}`,
+      [mid, ...params]
+    )).rows[0];
+  }
   if (!m) throw new HttpError(404, "Not found");
   const out = await inTx(async (client) => {
     const cand = (await client.query("SELECT id, assigned_to, is_deleted FROM candidates WHERE id = $1 FOR UPDATE", [m.candidate_id])).rows[0];
@@ -301,9 +321,10 @@ async function createFromMatch({ matchId, actor }) {
  * blocked). Builds the cover letter from the CONFIRMED profile and stores the exact package.
  * @param {{id, actor, documents?: Array, lang?: string}} args  documents undefined = reuse the last request
  */
-async function prepareApplication({ id, actor, documents, lang }) {
-  if (!canUse(actor, "jobsearch:write")) throw new HttpError(404, "Not found");
-  const scoped = await loadScoped(actor, id);
+async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT]: schedulerGrant }) {
+  const system = schedulerGrant === true && isSystemActor(actor);
+  if (!system && !canUse(actor, "jobsearch:write")) throw new HttpError(404, "Not found");
+  const scoped = system ? await loadLive(id) : await loadScoped(actor, id);
   const requested = documents === undefined ? undefined : documentPolicy.validateRequested(documents);
   if (lang !== undefined && lang !== null && !coverLetter.LANGS.includes(lang)) throw new HttpError(400, "lang must be en, fr or ar");
   const result = await inTx(async (client) => {
@@ -833,7 +854,7 @@ module.exports = {
   revokeSharing,
   autoApproveEligibility,
   autoApprove,
-  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION },
+  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION, SCHEDULER_GRANT },
   approveCvVersion,
   listApplications,
   getApplication,
