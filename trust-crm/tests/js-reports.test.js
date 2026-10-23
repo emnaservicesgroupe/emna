@@ -283,6 +283,32 @@ test("dashboard: totals equal independent counts for admin, staff X (excludes C 
   checkDash(xa.body.totals, await dashIndep("A"));
 });
 
+test("dashboard: tasks bound to no candidate (unmatched reply) appear for approvers only; candidate-level tasks follow scope", async () => {
+  const msg = (await q("SELECT id FROM js_messages WHERE application_id IS NULL LIMIT 1")).rows[0].id;
+  const t = (await q("INSERT INTO js_tasks (message_id, reason, detail, assigned_to) VALUES ($1,'unmatched_reply','Reply could not be matched',$2) RETURNING id", [msg, s.users.admin])).rows[0].id;
+  try {
+    for (const who of ["admin", "X"]) {
+      const d = (await get("/jobsearch/dashboard", tk[who])).body;
+      const item = d.attention.find((i) => i.taskId === t);
+      assert.ok(item, `${who} sees the unmatched_reply task`);
+      assert.equal(item.candidateId, null);
+      assert.equal(item.link, `/vita/#/messages/${msg}`);
+      assert.equal(d.totals.unassigned_open_tasks, 1);
+      const filtered = (await get(`/jobsearch/dashboard?candidateId=${s.cand.A}`, tk[who])).body;
+      assert.ok(!filtered.attention.some((i) => i.taskId === t), "not on a per-candidate dashboard");
+    }
+    const y = (await get("/jobsearch/dashboard", tk.Y)).body;
+    assert.ok(!y.attention.some((i) => i.taskId === t), "Agent does not see unmatched items");
+    assert.equal(y.totals.unassigned_open_tasks, undefined);
+    assert.ok(!y.attention.some((i) => i.reason === "prepare_consent_missing"), "B's candidate-level task is not Y's");
+    const a = (await get("/jobsearch/dashboard", tk.candA)).body;
+    assert.deepEqual(a.attention, []);
+    assert.equal(a.totals.unassigned_open_tasks, undefined);
+  } finally {
+    await q("DELETE FROM js_tasks WHERE id = $1", [t]);
+  }
+});
+
 test("dashboard: other scopes' candidateId -> 404; deleted candidate -> 404; bad id -> 400; Accountant/HR 403; no token 401", async () => {
   assert.equal((await get(`/jobsearch/dashboard?candidateId=${s.cand.C}`, tk.X)).status, 404);
   assert.equal((await get(`/jobsearch/dashboard?candidateId=${s.cand.A}`, tk.Y)).status, 404);
@@ -374,6 +400,18 @@ test("csvCell: formula triggers (= + - @ TAB CR) neutralised; quotes, commas, CR
   assert.equal(exportService.csvCell('=HYPERLINK("x")'), `"'=HYPERLINK(""x"")"`);
   assert.equal(exportService.csvCell("plain"), "plain");
   assert.equal(exportService.csvCell(null), "");
+  // first VISIBLE character decides (spaces, tabs, NBSP, zero-width, BOM, line breaks skipped); full-width triggers too
+  for (const v of [" =cmd", "\n=cmd", " =1", "\u200B=HYPERLINK(\"http://x\")", "\u00A0@SUM(1)", "\u2060-1", "\uFEFF=1", "\uFF1D1+1", "\uFF0B1", "\uFF0D1", "\uFF20x", "\t \r\n =1"]) {
+    const cell = exportService.csvCell(v);
+    assert.ok(cell.startsWith("'") || cell.startsWith(`"'`), `${JSON.stringify(v)} -> ${JSON.stringify(cell)}`);
+    assert.equal(records(exportService.toCsv([{ key: "v", header: "v" }], [{ v }])).data[0].v, `'${v}`, "content preserved after the apostrophe");
+  }
+  for (const v of ["hello", "Re: offer", "a = b", "x@y.example", "10-2", "Zoë", "東京"]) assert.equal(exportService.csvCell(v), v, `normal text unchanged: ${v}`);
+  // per-cell cap: 2000 characters, the cut marked with an ellipsis
+  const long = exportService.csvCell("x".repeat(5000));
+  assert.equal(long.length, 2000);
+  assert.ok(long.endsWith("…"));
+  assert.equal(exportService.csvCell("y".repeat(2000)), "y".repeat(2000));
   const values = ['a,b', 'say "hi"', "line1\r\nline2", "Zoë — 東京, ok", "x\ny", " lead"];
   const csv = exportService.toCsv([{ key: "v", header: "v" }], values.map((v) => ({ v })));
   assert.deepEqual(records(csv).data.map((r) => r.v), values);
@@ -401,7 +439,8 @@ test("export.csv: headers, scope-filtered rows equal SQL counts, per-role column
   const ca = await get("/jobsearch/export.csv?type=applications", tk.candA);
   assert.equal(ca.status, 200);
   const cad = records(ca.text);
-  assert.deepEqual(cad.header, ["id", "job_title", "employer", "country", "status", "created_at", "updated_at"]);
+  assert.deepEqual(cad.header, ["id", "job_title", "employer", "country", "status", "employer_support", "employer_support_evidence", "notice", "created_at", "updated_at"]);
+  assert.ok(cad.data.every((d) => d.notice === exportService.SUPPORT_NOTICE && d.employer_support === "unknown"));
   assert.deepEqual(cad.data.map((d) => Number(d.id)).sort((a, b) => a - b), s.apps.A.map((a) => a.id).sort((a, b) => a - b));
   assert.equal(records((await get("/jobsearch/export.csv?type=matches", tk.candA)).text).data.length, await num(`SELECT count(*) AS n FROM js_matches WHERE candidate_id = ${s.cand.A}`));
   for (const t of ["submissions", "messages", "tasks"]) assert.equal((await get(`/jobsearch/export.csv?type=${t}`, tk.candA)).status, 403, t);
@@ -412,6 +451,24 @@ test("export.csv: headers, scope-filtered rows equal SQL counts, per-role column
   assert.ok(subsX.data.every((d) => /@[ab]\.example$/.test(d.recipient)), "X never sees C's recipients");
   const subsY = records((await get("/jobsearch/export.csv?type=submissions", tk.Y)).text);
   assert.ok(!subsY.header.includes("provider_message_id"), "Agent has no jobsearch:approve");
+  assert.ok(!subsY.header.includes("recipient"), "Agent: no recipient addresses");
+  const msgsY = records((await get("/jobsearch/export.csv?type=messages", tk.Y)).text);
+  assert.ok(!msgsY.header.includes("from_addr") && !msgsY.header.includes("message_id"), "Agent: no sender addresses / message ids");
+  assert.ok(msgsY.data.length > 0);
+  assert.ok(records((await get("/jobsearch/export.csv?type=messages", tk.X)).text).header.includes("from_addr"), "Manager keeps sender addresses");
+  // matches export (staff): label + evidence + notice; a confirmed label gets the 'confirmed' notice
+  const mid = (await q(`SELECT m.id FROM js_matches m WHERE m.candidate_id = ${s.cand.B} ORDER BY id LIMIT 1`)).rows[0].id;
+  await q("UPDATE js_matches SET employer_support = 'confirmed', employer_support_evidence = 'HR confirmed by phone' WHERE id = $1", [mid]);
+  try {
+    const mx = records((await get("/jobsearch/export.csv?type=matches", tk.X)).text);
+    for (const k of ["employer_support", "employer_support_evidence", "notice"]) assert.ok(mx.header.includes(k), k);
+    const conf = mx.data.find((d) => Number(d.id) === mid);
+    assert.equal(conf.employer_support_evidence, "HR confirmed by phone");
+    assert.equal(conf.notice, exportService.SUPPORT_NOTICE_CONFIRMED);
+    assert.ok(mx.data.filter((d) => Number(d.id) !== mid).every((d) => d.notice === exportService.SUPPORT_NOTICE));
+  } finally {
+    await q("UPDATE js_matches SET employer_support = 'unknown', employer_support_evidence = NULL WHERE id = $1", [mid]);
+  }
   assert.equal(subsY.data.length, await num(`SELECT count(*) AS n FROM js_submissions s JOIN js_applications a ON a.id = s.application_id JOIN candidates c ON c.id = a.candidate_id WHERE c.assigned_to = ${s.users.Y} AND c.is_deleted = false`));
   // messages: '+Re: ...' subject neutralised, quotes/newline round-trip; unmatched review queue not exported
   const msgs = records((await get("/jobsearch/export.csv?type=messages", tk.admin)).text);
@@ -425,7 +482,7 @@ test("export.csv: headers, scope-filtered rows equal SQL counts, per-role column
   assert.ok((await get("/jobsearch/export.csv?type=matches&bom=1", tk.admin)).text.startsWith("﻿"));
   // one audit row (js_audit_events + audit_logs) per successful export
   const after = await num("SELECT count(*) AS n FROM js_audit_events WHERE action = 'export'");
-  assert.equal(after - before, 10, "10 successful exports; refused (403) exports are not audited as exports");
+  assert.equal(after - before, 13, "13 successful exports; refused (403) exports are not audited as exports");
   const last = (await q("SELECT * FROM js_audit_events WHERE action = 'export' ORDER BY id DESC LIMIT 1")).rows[0];
   assert.equal(last.actor, `user:${s.users.admin}`);
   assert.equal(last.detail.type, "matches");

@@ -181,6 +181,7 @@ async function dashboard({ user, query = {} }) {
   for (const r of interviews.rows) at(r.cid).interviews = r.n;
 
   let attention = [];
+  let unscopedCount = null;
   if (!isCand) {
     const tasks = await c.query(
       `SELECT c.id AS cid, count(*)::int AS n FROM js_tasks t LEFT JOIN js_applications ta ON ta.id = t.application_id
@@ -202,14 +203,28 @@ async function dashboard({ user, query = {} }) {
        ) x ORDER BY created_at ASC, application_id LIMIT ${ATTENTION_LIMIT}`,
       p
     );
+    // Tasks bound to no candidate (unmatched replies, mailbox/config problems...): only for roles that may
+    // see the unmatched review queue (jobsearch:approve = Manager/Admin/SuperAdmin, as in the inbox rules),
+    // and only on the unfiltered dashboard. Candidate-level tasks ('candidate:<id>:' prefix) are scoped above.
+    let unscoped = [];
+    if (!candidateId && hasPerm(user, "jobsearch:approve")) {
+      unscoped = (await c.query(
+        `SELECT 'task' AS type, t.id AS task_id, t.reason, NULL::int AS application_id, NULL::int AS candidate_id, t.message_id, t.created_at
+           FROM js_tasks t
+          WHERE t.status = 'open' AND t.application_id IS NULL AND (t.detail IS NULL OR t.detail !~ '^candidate:[0-9]{1,9}:')
+          ORDER BY t.created_at ASC, t.id LIMIT ${ATTENTION_LIMIT}`
+      )).rows;
+      unscopedCount = (await c.query("SELECT count(*)::int AS n FROM js_tasks t WHERE t.status = 'open' AND t.application_id IS NULL AND (t.detail IS NULL OR t.detail !~ '^candidate:[0-9]{1,9}:')")).rows[0].n;
+    }
+    const merged = [...items.rows, ...unscoped].sort((x, y) => new Date(x.created_at) - new Date(y.created_at)).slice(0, ATTENTION_LIMIT);
     const now = Date.now();
-    attention = items.rows.map((r) => ({
+    attention = merged.map((r) => ({
       type: r.type,
       taskId: r.task_id,
       reason: r.reason,
       candidateId: r.candidate_id,
       applicationId: r.application_id,
-      link: r.application_id ? `/vita/#/applications/${r.application_id}` : `/vita/#/candidates/${r.candidate_id}`,
+      link: r.application_id ? `/vita/#/applications/${r.application_id}` : r.candidate_id ? `/vita/#/candidates/${r.candidate_id}` : r.message_id ? `/vita/#/messages/${r.message_id}` : `/vita/#/tasks/${r.task_id}`,
       createdAt: r.created_at,
       ageHours: Math.max(0, Math.floor((now - new Date(r.created_at).getTime()) / 3600000)),
     }));
@@ -218,10 +233,12 @@ async function dashboard({ user, query = {} }) {
   const total = emptyCounts();
   for (const x of per.values()) for (const k of Object.keys(total)) total[k] += x[k];
   const names = await c.query(`SELECT c.id, c.full_name FROM candidates c WHERE ${w}${cf} ORDER BY c.id LIMIT ${CANDIDATE_LIST_LIMIT}`, p);
+  const totals = shape(total, isCand);
+  if (unscopedCount !== null) totals.unassigned_open_tasks = unscopedCount;
   return {
     scope: scopeName(user),
     candidateId: candidateId || null,
-    totals: shape(total, isCand),
+    totals,
     candidates: names.rows.map((r) => ({ candidateId: r.id, name: r.full_name, counts: shape(per.get(r.id) || emptyCounts(), isCand) })),
     attention,
   };

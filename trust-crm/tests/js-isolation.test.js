@@ -99,7 +99,14 @@ test("matrix: GET /applications/:id, /candidates/:id/matches, /submissions?appli
       assert.equal((await get(`/jobsearch/applications/${appId}`, actor)).status, want, `${actor} app ${key}`);
       const m = await get(`/jobsearch/candidates/${cid}/matches`, actor);
       if (actor === "unauth") assert.equal(m.status, 401);
-      else if (inScope) assert.equal(m.status, 200, `${actor} matches ${key}`);
+      else if (inScope) {
+        assert.equal(m.status, 200, `${actor} matches ${key}`);
+        assert.ok(m.body.matches.length > 0);
+        for (const x of m.body.matches) {
+          assert.ok("evidence" in x.employerSupport, "label travels with its evidence");
+          assert.match(x.employerSupport.notice, /verify with the employer|Confirmed with the employer/);
+        }
+      }
       else if (actor === "accountant" || actor === "hr") assert.ok([403, 404].includes(m.status), `${actor} matches ${key}: ${m.status}`);
       else assert.equal(m.status, 404, `${actor} matches ${key}`);
       const sub = await get(`/jobsearch/submissions?applicationId=${appId}`, actor);
@@ -343,26 +350,64 @@ test("SSE live: X never receives C's events, candidate A never receives audience
   await waitFor(() => eventsHub.stats().subscribers === 0 && !eventsHub.stats().polling, 1800, "cleanup + poller stopped");
 });
 
-test("SSE: reassigning C to X starts delivery after the next re-check; reassigning back stops it", async () => {
+const rechecked = (userId, since) => eventsHub._internal.subscribers().filter((x) => x.userId === userId).every((x) => x.checkedAt > since);
+
+test("SSE: reassigning C to X starts delivery after the next re-check; reassigning back stops it (deterministic)", async () => {
   const x = await sse("X");
-  await sleep(100);
+  assert.equal(x.status, 200);
+  // 'before' is judged under the OLD scope: the A probe after it is delivered in id order, so 'before'
+  // has been seen (and refused) by the time the probe arrives.
   const before = await eventsHub.publish(s.cand.C, "application.status_changed", { applicationId: appOf("C"), from: "a", to: "b" });
-  await sleep(150);
+  const probe1 = await eventsHub.publish(s.cand.A, "application.status_changed", { applicationId: appOf("A"), from: "p", to: "q" });
+  await waitFor(() => x.events.some((e) => e.id === probe1.id), 1800, "probe 1");
+  const t1 = Date.now();
   await q("UPDATE candidates SET assigned_to = $1 WHERE id = $2", [s.users.X, s.cand.C]);
   try {
-    await sleep(450); // > recheck (250 ms) + poll
+    await waitFor(() => rechecked(s.users.X, t1), 1800, "re-check after reassignment");
     const after = await eventsHub.publish(s.cand.C, "application.status_changed", { applicationId: appOf("C"), from: "b", to: "c" });
     await waitFor(() => x.events.some((e) => e.id === after.id), 1800, "delivery after reassignment");
     assert.ok(!x.events.some((e) => e.id === before.id), "nothing from before the reassignment");
   } finally {
     await q("UPDATE candidates SET assigned_to = $1 WHERE id = $2", [s.users.Y, s.cand.C]);
   }
-  await sleep(450);
+  const t2 = Date.now();
+  await waitFor(() => rechecked(s.users.X, t2), 1800, "re-check after reassigning back");
   const gone = await eventsHub.publish(s.cand.C, "application.status_changed", { applicationId: appOf("C"), from: "c", to: "d" });
   const mine = await eventsHub.publish(s.cand.A, "application.status_changed", { applicationId: appOf("A"), from: "c", to: "d" });
   await waitFor(() => x.events.some((e) => e.id === mine.id), 1800, "still receiving own");
   assert.ok(!x.events.some((e) => e.id === gone.id), "C's events stop after reassignment back");
   x.close();
+  await waitFor(() => eventsHub.stats().subscribers === 0, 1800, "cleanup");
+});
+
+test("SSE: a client that aborts inside the connect window is cleaned up; caps recover (no 429 lock-out)", async () => {
+  let entered = 0;
+  let released = 0;
+  eventsHub._internal.setHooks({
+    beforeRefresh: async () => {
+      entered += 1;
+      await sleep(150); // the DB re-check window
+      released += 1;
+    },
+  });
+  try {
+    for (let i = 0; i < 4; i++) {
+      const ac = new AbortController();
+      const p = fetch(`${base}/jobsearch/events`, { headers: { authorization: `Bearer ${tk.Y}` }, signal: ac.signal }).catch(() => null);
+      await waitFor(() => entered > i, 1800, "inside the connect window");
+      ac.abort();
+      await p;
+    }
+    await waitFor(() => released === 4, 1800, "connect windows finished");
+    await sleep(60);
+    assert.equal(eventsHub.stats().subscribers, 0, "aborted connects hold no slot");
+    assert.equal(eventsHub.stats().polling, false, "poller not started for dead streams");
+  } finally {
+    eventsHub._internal.setHooks({});
+  }
+  const ys = [await sse("Y"), await sse("Y"), await sse("Y")];
+  assert.deepEqual(ys.map((st) => st.status), [200, 200, 200], "per-user cap fully available again");
+  for (const st of ys) st.close();
   await waitFor(() => eventsHub.stats().subscribers === 0, 1800, "cleanup");
 });
 
@@ -415,4 +460,32 @@ test("SSE: total cap and unknown/unsafe kinds are never delivered", async () => 
   await waitFor(() => eventsHub.stats().subscribers === 0, 1800, "cleanup");
   await assert.rejects(() => eventsHub.publish(1, "bad kind", {}));
   await assert.rejects(() => eventsHub.publish(1, "x.y", {}, "everyone"));
+});
+
+test("SSE: a stalled reader (never reads) is closed and unregistered once its unsent buffer exceeds the limit", async () => {
+  const net = require("net");
+  process.env.JOBSEARCH_SSE_MAX_BUFFER_BYTES = String(64 * 1024);
+  process.env.JOBSEARCH_SSE_BATCH = "5000";
+  try {
+    const port = server.address().port;
+    const sock = net.connect(port, "127.0.0.1");
+    sock.on("error", () => {});
+    await new Promise((r) => sock.once("connect", r));
+    sock.write(`GET /jobsearch/events HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ${tk.admin}\r\n\r\n`);
+    await waitFor(() => eventsHub.stats().subscribers === 1, 1800, "stream registered");
+    sock.pause(); // stop reading
+    // ~10 MB of neutral frames: more than loopback socket buffers + the 64 KiB limit
+    await q(`INSERT INTO js_events (candidate_id, kind, payload)
+             SELECT NULL, 'module.paused', jsonb_build_object('applicationId', 123456789, 'status', 'stalled_reader_padding') FROM generate_series(1, 70000)`);
+    await waitFor(() => eventsHub.stats().subscribers === 0, 8000, "stalled stream closed");
+    sock.destroy();
+    // the cap is free again
+    const again = await sse("admin");
+    assert.equal(again.status, 200);
+    again.close();
+    await waitFor(() => eventsHub.stats().subscribers === 0, 1800, "cleanup");
+  } finally {
+    delete process.env.JOBSEARCH_SSE_MAX_BUFFER_BYTES;
+    delete process.env.JOBSEARCH_SSE_BATCH;
+  }
 });

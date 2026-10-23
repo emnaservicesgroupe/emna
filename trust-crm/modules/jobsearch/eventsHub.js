@@ -15,7 +15,13 @@
 // Each subscriber's scope (assigned candidates, is_active, role, token_version) is re-read from the DB at
 // most every JOBSEARCH_SSE_RECHECK_MS (60 s); a suspended/revoked/role-changed user's stream is closed and
 // a reassignment takes effect at the next re-check. Payloads are reduced to neutral whitelisted fields.
-// Out-of-order commits of bigserial ids are covered by a small look-back window + per-stream dedupe.
+// Out-of-order commits of bigserial ids: a 50-id look-back window + per-stream dedupe catches rows that
+// commit slightly late. A row that commits later than that (or with an id at/below the stream's
+// connect-time head) is NEVER delivered on that stream - and Last-Event-ID replay will not return it either
+// once the client has seen a higher id. It is lost for live delivery, not deferred: clients must treat
+// events as change hints and refetch state (on connect, on reconnect and periodically).
+// Streams whose response is destroyed/ended, or whose unsent buffer exceeds JOBSEARCH_SSE_MAX_BUFFER_BYTES
+// (256 KiB; a stalled reader), are closed and unregistered by the poller.
 const { candidateScopeSql, isAdmin } = require("./scope");
 
 const db = () => require("../../db");
@@ -30,9 +36,10 @@ const cfg = () => ({
   heartbeatMs: envInt("JOBSEARCH_SSE_HEARTBEAT_MS", 25000),
   maxPerUser: envInt("JOBSEARCH_SSE_MAX_PER_USER", 3),
   maxTotal: envInt("JOBSEARCH_SSE_MAX_TOTAL", 500),
+  maxBuffer: envInt("JOBSEARCH_SSE_MAX_BUFFER_BYTES", 256 * 1024),
+  batch: envInt("JOBSEARCH_SSE_BATCH", 500),
 });
 const REPLAY_LIMIT = 500;
-const BATCH = 500;
 const LOOKBACK = 50; // ids re-read each poll to catch rows whose transaction committed late
 const DEDUPE = 1000;
 
@@ -89,6 +96,8 @@ function frame(row, staff) {
 // ---------------------------------------------------------------- subscribers
 
 const subs = new Set();
+// Test-only injection points (e.g. a delay inside the connect window).
+const hooks = { beforeRefresh: null };
 let timer = null;
 let polling = false;
 let cursor = null; // highest js_events.id the poller has read
@@ -125,8 +134,18 @@ async function refresh(sub) {
   return true;
 }
 
+/** The client went away (abort during connect, network drop) or the response is finished. */
+function gone(sub) {
+  const { res, req } = sub;
+  return sub.closed || res.destroyed || res.writableEnded || Boolean(req && req.socket && req.socket.destroyed);
+}
+
 function write(sub, text) {
   if (sub.closed) return;
+  if (gone(sub)) {
+    close(sub);
+    return;
+  }
   try {
     sub.res.write(text);
     sub.lastWrite = Date.now();
@@ -152,7 +171,9 @@ function close(sub) {
   sub.closed = true;
   subs.delete(sub);
   try {
-    sub.res.end();
+    // A stalled reader's backlog would never drain through end(): drop the connection instead.
+    if (sub.res.destroyed || sub.res.writableLength > 0) sub.res.destroy();
+    else sub.res.end();
   } catch {
     /* already gone */
   }
@@ -204,10 +225,15 @@ async function tick() {
     }
     if (!ok) close(sub);
   }
+  // Dead or stalled streams: a destroyed/ended response emits nothing on write, so sweep explicitly;
+  // a reader that stopped reading lets the unsent buffer grow - close it before it grows unbounded.
+  for (const sub of [...subs]) {
+    if (gone(sub) || sub.res.writableLength > c.maxBuffer) close(sub);
+  }
   if (!subs.size) return;
   if (cursor === null) cursor = await maxId();
   const from = Math.max(0, cursor - LOOKBACK);
-  const rows = (await db().query("SELECT id, candidate_id, kind, payload, audience, user_id, created_at FROM js_events WHERE id > $1 ORDER BY id LIMIT $2", [from, BATCH + LOOKBACK])).rows;
+  const rows = (await db().query("SELECT id, candidate_id, kind, payload, audience, user_id, created_at FROM js_events WHERE id > $1 ORDER BY id LIMIT $2", [from, c.batch + LOOKBACK])).rows;
   for (const row of rows) {
     const id = Number(row.id);
     if (id > cursor) cursor = id;
@@ -257,17 +283,29 @@ class LimitError extends Error {
  */
 async function subscribe({ user, req, res, lastEventId }) {
   const c = cfg();
+  const sub = { user, req, res, candidates: new Set(), ownCandidate: null, admin: false, checkedAt: 0, lastWrite: Date.now(), floor: 0, seen: new Set(), closed: false };
+  // Listeners BEFORE any await: a client that aborts while we query the DB is cleaned up. verifyToken
+  // already awaited before we got here, so 'close' may have fired already -> also check gone() after
+  // every await and give the slot back.
+  res.on("close", () => close(sub));
+  res.on("error", () => close(sub));
+  if (gone(sub)) {
+    close(sub);
+    return null;
+  }
   if (subs.size >= c.maxTotal) throw new LimitError(503, "Too many event streams; try again later");
-  const mine = [...subs].filter((s) => s.user.id === user.id).length;
-  if (mine >= c.maxPerUser) throw new LimitError(429, `At most ${c.maxPerUser} event streams per user`);
-  const sub = { user, res, candidates: new Set(), ownCandidate: null, admin: false, checkedAt: 0, lastWrite: Date.now(), floor: 0, seen: new Set(), closed: false };
-  if (!(await refresh(sub))) throw new LimitError(401, "Session expired");
-  // Re-count after the await (another connect may have interleaved), then reserve the slot.
+  if ([...subs].filter((s) => s.user.id === user.id).length >= c.maxPerUser) throw new LimitError(429, `At most ${c.maxPerUser} event streams per user`);
+  if (hooks.beforeRefresh) await hooks.beforeRefresh(sub);
+  const ok = await refresh(sub);
+  if (gone(sub)) {
+    close(sub);
+    return null;
+  }
+  if (!ok) throw new LimitError(401, "Session expired");
+  // Re-count after the awaits (another connect may have interleaved), then reserve the slot.
   if (subs.size >= c.maxTotal) throw new LimitError(503, "Too many event streams; try again later");
   if ([...subs].filter((s) => s.user.id === user.id).length >= c.maxPerUser) throw new LimitError(429, `At most ${c.maxPerUser} event streams per user`);
   subs.add(sub);
-  res.on("close", () => close(sub));
-  res.on("error", () => close(sub));
   if (req && req.socket) req.socket.setTimeout(0);
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -279,8 +317,16 @@ async function subscribe({ user, req, res, lastEventId }) {
   write(sub, `retry: 5000\n: connected\n\n`);
   try {
     const head = await maxId();
+    if (gone(sub)) {
+      close(sub);
+      return null;
+    }
     if (Number.isSafeInteger(lastEventId) && lastEventId >= 0) {
       await replay(sub, lastEventId);
+      if (gone(sub)) {
+        close(sub);
+        return null;
+      }
     }
     // Everything up to `head` that this stream should see has now been replayed (or deliberately
     // skipped when no Last-Event-ID was sent); live delivery starts after it.
@@ -289,7 +335,7 @@ async function subscribe({ user, req, res, lastEventId }) {
   } catch (err) {
     console.error("jobsearch events: replay failed:", err && err.code, err && err.message);
     close(sub);
-    return sub;
+    return null;
   }
   startPoller();
   return sub;
@@ -319,5 +365,10 @@ function shutdown() {
 }
 
 const stats = () => ({ subscribers: subs.size, polling: Boolean(timer) });
+/** Test helpers: per-stream last scope re-check time; connect-window hook. */
+const subscribers = () => [...subs].map((x) => ({ userId: x.user.id, checkedAt: x.checkedAt }));
+const _setHooks = (h = {}) => {
+  hooks.beforeRefresh = typeof h.beforeRefresh === "function" ? h.beforeRefresh : null;
+};
 
-module.exports = { publish, subscribe, shutdown, stats, neutralPayload, LimitError, _internal: { tick, allowed } };
+module.exports = { publish, subscribe, shutdown, stats, neutralPayload, LimitError, _internal: { tick, allowed, subscribers, setHooks: _setHooks } };

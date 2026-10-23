@@ -14,6 +14,8 @@ const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
 const { relabelJobs, lockForRelabel } = require("../modules/jobsearch/matchService");
 const { logAudit } = require("../utils/audit");
 
+const { supportNotice } = require("../modules/jobsearch/exportService");
+
 const router = express.Router();
 const db = () => require("../db");
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -42,7 +44,7 @@ router.get("/candidates/:id/matches", verifyToken, asyncHandler(async (req, res)
       reasons: r.reasons,
       missing: r.missing,
       uncertain: r.uncertain,
-      employerSupport: { label: r.employer_support, evidence: r.employer_support_evidence, ...(r.employer_support_conflict ? { conflict: true } : {}) },
+      employerSupport: { label: r.employer_support, evidence: r.employer_support_evidence, ...(r.employer_support_conflict ? { conflict: true } : {}), notice: supportNotice(r.employer_support) },
       overseas: { accepted: r.overseas_accepted, evidence: r.overseas_applicants_evidence },
       firstSeen: r.created_at,
       job: { title: r.title, employer: r.employer, location: r.location, country: r.country, url: r.url },
