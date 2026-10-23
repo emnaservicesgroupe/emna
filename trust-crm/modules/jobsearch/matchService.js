@@ -38,35 +38,53 @@ function present(row, extra) {
     uncertain: row.uncertain,
     employer_support: row.employer_support,
     employer_support_evidence: row.employer_support_evidence,
+    employer_support_conflict: row.employer_support_conflict,
+    overseas_accepted: row.overseas_accepted,
     overseas_applicants_evidence: row.overseas_applicants_evidence,
     first_seen: row.created_at,
     ...extra,
   };
 }
 
-/** Staff/employer confirmation for this employer or any application on this job; null if none. */
-async function findConfirmation(client, job) {
-  const r = await client.query(
-    `SELECT ec.* FROM js_employer_confirmations ec
-      WHERE btrim(coalesce(ec.evidence_text,'')) <> ''
-        AND ((ec.employer_id IS NOT NULL AND ec.employer_id = $1)
-             OR ec.application_id IN (SELECT id FROM js_applications WHERE job_id = $2))
-      ORDER BY ec.id DESC LIMIT 1`,
-    [job.employer_id, job.id]
-  );
-  return r.rows[0] || null;
+/** Non-revoked confirmations indexed for lookup: job-scoped (job_id) or employer-wide (job_id NULL). */
+async function loadConfirmations(client) {
+  const rows = (await client.query(
+    `SELECT * FROM js_employer_confirmations
+      WHERE revoked_at IS NULL AND btrim(coalesce(evidence_text,'')) <> '' ORDER BY id DESC`
+  )).rows;
+  const byJob = new Map();
+  const byEmployer = new Map();
+  for (const r of rows) {
+    if (r.job_id) { if (!byJob.has(r.job_id)) byJob.set(r.job_id, r); }
+    else if (r.employer_id && !byEmployer.has(r.employer_id)) byEmployer.set(r.employer_id, r);
+  }
+  return (job) => byJob.get(job.id) || (job.employer_id ? byEmployer.get(job.employer_id) : null) || null;
+}
+
+const UPSERT = `INSERT INTO js_matches (candidate_id, job_id, score, reasons, missing, uncertain, employer_support, employer_support_evidence, employer_support_conflict, overseas_accepted, overseas_applicants_evidence)
+  VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11)
+  ON CONFLICT (candidate_id, job_id) DO UPDATE SET
+    score = EXCLUDED.score, reasons = EXCLUDED.reasons, missing = EXCLUDED.missing, uncertain = EXCLUDED.uncertain,
+    employer_support = EXCLUDED.employer_support, employer_support_evidence = EXCLUDED.employer_support_evidence,
+    employer_support_conflict = EXCLUDED.employer_support_conflict,
+    overseas_accepted = EXCLUDED.overseas_accepted, overseas_applicants_evidence = EXCLUDED.overseas_applicants_evidence
+  RETURNING *`;
+
+function upsertParams(candidateId, job, r) {
+  return [candidateId, job.id, r.score, JSON.stringify(r.reasons), JSON.stringify(r.missing), JSON.stringify(r.uncertain),
+    r.employerSupport.label, r.employerSupport.evidence, r.employerSupport.conflict === true, r.overseas.accepted, r.overseas.evidence];
 }
 
 /**
  * @param {number} candidateId
- * @param {{now?: Date}} [opts]
+ * @param {{now?: Date, minScore?: number}} [opts]
  * @returns {Promise<object[]>} stored matches at or above MATCH_MIN_SCORE ([] when the candidate is not search-eligible)
  */
 async function matchCandidate(candidateId, opts = {}) {
   const threshold = opts.minScore ?? minScore();
   return inTx(async (client) => {
     // Same lock as consent grant/withdraw: a withdrawal and a match run serialise.
-    const lock = await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [candidateId]);
+    const lock = await client.query("SELECT id FROM candidates WHERE id = $1 AND is_deleted = false FOR UPDATE", [candidateId]);
     if (!lock.rowCount) return [];
     const elig = await consentService.searchEligible(candidateId);
     if (!elig.eligible) return [];
@@ -84,12 +102,14 @@ async function matchCandidate(candidateId, opts = {}) {
       allowed = allowed.filter((c) => cc.includes(c));
     }
     const professions = (settings.allowed_professions || []).map(normalize).filter(Boolean);
+    const withApp = new Set((await client.query("SELECT job_id FROM js_applications WHERE candidate_id = $1", [candidateId])).rows.map((r) => r.job_id));
+    const confirmationFor = await loadConfirmations(client);
 
     const stored = [];
     const keep = new Set();
     if (allowed.length) {
       const jobs = (await client.query(
-        `SELECT j.*, e.name AS employer_name FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id
+        `SELECT j.* FROM js_jobs j
           WHERE j.status = 'open' AND (j.closing_at IS NULL OR j.closing_at > $1)
           ORDER BY j.id LIMIT ${MAX_JOBS}`,
         [opts.now || new Date()]
@@ -102,24 +122,14 @@ async function matchCandidate(candidateId, opts = {}) {
           if (!professions.some((p) => ` ${hay} `.includes(` ${p} `))) continue;
         }
         keep.add(job.id);
-        const confirmation = await findConfirmation(client, job);
-        const r = scoreMatch(profile, prefs, job, { confirmation, now: opts.now });
-        const hasApp = (await client.query("SELECT 1 FROM js_applications WHERE candidate_id = $1 AND job_id = $2", [candidateId, job.id])).rowCount > 0;
-        if (r.score < threshold && !hasApp) {
+        const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job), now: opts.now });
+        if (r.score < threshold && !withApp.has(job.id)) {
           // Fell below the threshold after a profile/job change: remove the stale match.
           await client.query("DELETE FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [candidateId, job.id]);
           continue;
         }
-        const row = (await client.query(
-          `INSERT INTO js_matches (candidate_id, job_id, score, reasons, missing, uncertain, employer_support, employer_support_evidence, overseas_applicants_evidence)
-           VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9)
-           ON CONFLICT (candidate_id, job_id) DO UPDATE SET
-             score = EXCLUDED.score, reasons = EXCLUDED.reasons, missing = EXCLUDED.missing, uncertain = EXCLUDED.uncertain,
-             employer_support = EXCLUDED.employer_support, employer_support_evidence = EXCLUDED.employer_support_evidence,
-             overseas_applicants_evidence = EXCLUDED.overseas_applicants_evidence
-           RETURNING *`,
-          [candidateId, job.id, r.score, JSON.stringify(r.reasons), JSON.stringify(r.missing), JSON.stringify(r.uncertain), r.employerSupport.label, r.employerSupport.evidence, r.overseas.evidence]
-        )).rows[0];
+        // Every run rewrites score AND labels (support, conflict, overseas), even when the score is unchanged.
+        const row = (await client.query(UPSERT, upsertParams(candidateId, job, r))).rows[0];
         stored.push(present(row, { overseas: r.overseas, breakdown: r.breakdown }));
       }
     }
@@ -133,4 +143,29 @@ async function matchCandidate(candidateId, opts = {}) {
   });
 }
 
-module.exports = { matchCandidate, minScore, findConfirmation };
+/**
+ * Re-evaluates EXISTING matches on the given jobs (after a confirmation is recorded or revoked) so
+ * labels are never stale. Never creates or deletes matches; pruning happens on the next matchCandidate run.
+ */
+async function relabelJobs(client, jobIds) {
+  if (!jobIds.length) return 0;
+  const confirmationFor = await loadConfirmations(client);
+  const rows = (await client.query("SELECT candidate_id, job_id FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id, job_id", [jobIds])).rows;
+  const jobs = new Map((await client.query("SELECT * FROM js_jobs WHERE id = ANY($1::int[])", [jobIds])).rows.map((j) => [j.id, j]));
+  const cache = new Map();
+  for (const { candidate_id: cid, job_id: jid } of rows) {
+    if (!cache.has(cid)) {
+      cache.set(cid, {
+        profile: (await client.query("SELECT confirmed FROM js_profiles WHERE candidate_id = $1", [cid])).rows[0]?.confirmed || {},
+        prefs: (await client.query("SELECT * FROM js_preferences WHERE candidate_id = $1", [cid])).rows[0] || {},
+      });
+    }
+    const job = jobs.get(jid);
+    const { profile, prefs } = cache.get(cid);
+    const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job) });
+    await client.query(UPSERT, upsertParams(cid, job, r));
+  }
+  return rows.length;
+}
+
+module.exports = { matchCandidate, relabelJobs, minScore };

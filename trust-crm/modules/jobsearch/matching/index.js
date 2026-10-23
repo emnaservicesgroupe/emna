@@ -122,6 +122,12 @@ const LICENCE_GENERIC = new Set(["licensed", "license", "licence", "licenses", "
 
 // ---- salary ----
 const CURRENCY_CODE = /\b(cad|usd|eur|gbp|aud|qar|aed|sar|tnd|chf)\b/i;
+const PERIOD_AFTER = [
+  ["year", /^\s{0,3}(?:per\s+(?:year|annum)|(?:a|an)\s+year|\/\s{0,2}(?:yr|year|an)\b|annually|yearly|p\.?\s?a\b|par\s+an\b|annuel\w*)/i],
+  ["hour", /^\s{0,3}(?:per\s+hour|(?:a|an)\s+hour|\/\s{0,2}(?:hr|h|hour)\b|hourly|de\s+l'heure|horaire)/i],
+  ["month", /^\s{0,3}(?:per\s+month|(?:a|an)\s+month|\/\s{0,2}(?:mo|month)\b|monthly|par\s+mois|mensuel\w*)/i],
+];
+const PERIOD_ANY = [["year", /\b(?:per\s+(?:year|annum)|annually|yearly|a\s+year|par\s+an)\b/i], ["hour", /\b(?:per\s+hour|hourly|an\s+hour|taux\s+horaire)\b|\/\s?(?:hr|hour)\b/i], ["month", /\b(?:per\s+month|monthly|a\s+month|par\s+mois)\b/i]];
 function parseSalary(list) {
   for (const s of list) {
     if (!/\b(?:salary|salaire|pay|wage|compensation|remuneration|per\s+hour|hourly|annually|per\s+year|a\s+year|par\s+an|taux\s+horaire|per\s+month|monthly|par\s+mois)\b|\/\s*(?:hr|hour|year|yr|month|an|h)\b/i.test(s.folded)) continue;
@@ -135,22 +141,23 @@ function parseSalary(list) {
       const marker = m[1] || "";
       if (!marker && v < 1000) continue;
       if (v < 5) continue;
-      nums.push({ v, marker: marker.toLowerCase() });
+      const after = text.slice(m.index + m[0].length, m.index + m[0].length + 30);
+      const adj = PERIOD_AFTER.find(([, r]) => r.test(after));
+      nums.push({ v, marker: marker.toLowerCase(), period: adj ? adj[0] : null });
     }
     if (!nums.length) continue;
     const top = nums.reduce((a, b) => (b.v > a.v ? b : a));
+    let period = top.period;
+    if (!period) {
+      const found = PERIOD_ANY.filter(([, r]) => r.test(text)).map(([k]) => k);
+      if (found.length === 1) period = found[0];
+      else if (!found.length && top.v >= 20000) period = "year";
+    }
     const code = (CURRENCY_CODE.exec(text) || [])[1];
-    const period = /hour|hourly|\/\s*(?:hr|h)\b|horaire/i.test(text) ? "hour" : /month|monthly|mois/i.test(text) ? "month" : "year";
-    const annual = top.v * (period === "hour" ? 2080 : period === "month" ? 12 : 1);
-    return { annual, currency: code ? code.toUpperCase() : top.marker === "$" ? "$" : top.marker === "€" ? "EUR" : top.marker === "£" ? "GBP" : null, quote: s.quote };
+    const annual = period ? top.v * (period === "hour" ? 2080 : period === "month" ? 12 : 1) : null;
+    return { annual, period, figure: top.v, currency: code ? code.toUpperCase() : top.marker === "$" ? "$" : top.marker === "€" ? "EUR" : top.marker === "£" ? "GBP" : null, quote: s.quote };
   }
   return null;
-}
-// salary_min has no stored unit: >= 20000 annual, 200..19999 monthly, < 200 hourly (documented heuristic).
-function prefAnnual(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return n >= 20000 ? n : n >= 200 ? n * 12 : n * 2080;
 }
 
 function neutralPoints(max) {
@@ -302,28 +309,14 @@ function scoreMatch(profile, prefs, job, opts = {}) {
     }
   }
 
-  // 5. salary (5)
+  // 5. salary (5). salary_min has no stored unit, so a comparison would rest on a guess: always neutral + uncertain.
   {
     const max = WEIGHTS.salary;
     const pay = parseSalary(list);
-    const want = prefAnnual(prefs.salary_min);
-    const wantCur = str(prefs.salary_currency).toUpperCase();
-    if (!pay) {
-      breakdown.salary = neutralPoints(max);
-      uncertain.push("Salary is not stated in the ad");
-    } else if (want === null) {
-      breakdown.salary = neutralPoints(max);
-      uncertain.push("No salary expectation in your preferences to compare with the stated pay");
-    } else if (!pay.currency || (pay.currency === "$" ? !["CAD", "USD", "AUD", "NZD"].includes(wantCur) : pay.currency !== wantCur)) {
-      breakdown.salary = neutralPoints(max);
-      uncertain.push("Stated pay is in a currency that cannot be compared with your expectation");
-    } else if (pay.annual >= want) {
-      breakdown.salary = max;
-      reasons.push(`Stated pay is at or above your expectation ("${clip(pay.quote, 100)}")`);
-    } else {
-      breakdown.salary = 0;
-      missing.push(`Stated pay is below your expected minimum ("${clip(pay.quote, 100)}")`);
-    }
+    breakdown.salary = neutralPoints(max);
+    if (!pay) uncertain.push("Salary is not stated in the ad");
+    else if (!pay.period) uncertain.push(`Pay is stated ("${clip(pay.quote, 100)}") but its period (hour/month/year) is unclear`);
+    else uncertain.push(`Stated pay is about ${Math.round(pay.annual)} per year (${clip(pay.quote, 100)}); your expected minimum has no stored unit, so it was not compared`);
   }
 
   // 6. licensing (5)
@@ -351,8 +344,11 @@ function scoreMatch(profile, prefs, job, opts = {}) {
   }
 
   // 7. overseas / work-authorisation text (5). Never an eligibility claim.
-  const overseas = detectOverseas(desc);
-  const employerSupport = detectEmployerSupport(desc, { confirmation: opts.confirmation });
+  // Label detection reads the sanitized text BEFORE any sentence dropping: the injection filter must never hide a negative.
+  const rawDesc = sanitizeUntrusted(job.description_text ?? job.description);
+  const overseas = detectOverseas(rawDesc);
+  const employerSupport = detectEmployerSupport(rawDesc, { confirmation: opts.confirmation });
+  if (employerSupport.conflict) uncertain.push("Staff confirmation recorded; the advertisement itself says sponsorship is not available \u2014 verify");
   {
     const max = WEIGHTS.overseasAuth;
     const residence = country(prefs.residence_country);
@@ -374,6 +370,8 @@ function scoreMatch(profile, prefs, job, opts = {}) {
     else if (prefs.needs_work_auth_support !== true) {
       a = 0.5;
       uncertain.push("It is unknown whether you need employer support for work authorization");
+    } else if (employerSupport.conflict) {
+      a = 0.5;
     } else if (employerSupport.label === "confirmed" || employerSupport.label === "stated_in_ad") {
       a = 1;
       reasons.push(`The ad mentions employer support for work authorization ("${clip(employerSupport.evidence, 120)}"); this is not verified`);

@@ -1,6 +1,7 @@
 // Matches (mounted at /jobsearch):
 //   GET  /candidates/:id/matches     ?page&pageSize   candidate own / staff assigned / admin all, else 404
-//   POST /employer-confirmations     admin only (jobsearch:write); records a staff/employer confirmation
+//   POST /employer-confirmations     admin only (jobsearch:write); job-scoped (jobId/applicationId) or employer-wide (employerId); evidence note required
+//   DELETE /employer-confirmations/:id  admin only; revokes (labels revert immediately)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
 const { PERMISSIONS } = require("../middleware/role");
@@ -8,8 +9,9 @@ const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/er
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { authorize } = require("../modules/jobsearch/profileService");
 const { isAdmin } = require("../modules/jobsearch/scope");
-const { detectOverseas, NOTICE } = require("../modules/jobsearch/matching");
+const { NOTICE } = require("../modules/jobsearch/matching");
 const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
+const { relabelJobs } = require("../modules/jobsearch/matchService");
 const { logAudit } = require("../utils/audit");
 
 const router = express.Router();
@@ -24,8 +26,8 @@ router.get("/candidates/:id/matches", verifyToken, asyncHandler(async (req, res)
   if (page > 10000) throw new HttpError(400, "page must be at most 10000");
   const total = (await db().query("SELECT count(*)::int AS n FROM js_matches m JOIN js_jobs j ON j.id = m.job_id WHERE m.candidate_id = $1 AND j.status = 'open'", [id])).rows[0].n;
   const rows = (await db().query(
-    `SELECT m.id, m.job_id, m.score, m.reasons, m.missing, m.uncertain, m.employer_support, m.employer_support_evidence, m.created_at,
-            j.title, j.location, j.country, j.url, j.description_text, e.name AS employer
+    `SELECT m.id, m.job_id, m.score, m.reasons, m.missing, m.uncertain, m.employer_support, m.employer_support_evidence, m.employer_support_conflict, m.overseas_accepted, m.overseas_applicants_evidence, m.created_at,
+            j.title, j.location, j.country, j.url, e.name AS employer
        FROM js_matches m JOIN js_jobs j ON j.id = m.job_id LEFT JOIN js_employers e ON e.id = j.employer_id
       WHERE m.candidate_id = $1 AND j.status = 'open'
       ORDER BY m.score DESC, m.id ASC LIMIT $2 OFFSET $3`,
@@ -40,8 +42,8 @@ router.get("/candidates/:id/matches", verifyToken, asyncHandler(async (req, res)
       reasons: r.reasons,
       missing: r.missing,
       uncertain: r.uncertain,
-      employerSupport: { label: r.employer_support, evidence: r.employer_support_evidence },
-      overseas: detectOverseas(r.description_text),
+      employerSupport: { label: r.employer_support, evidence: r.employer_support_evidence, ...(r.employer_support_conflict ? { conflict: true } : {}) },
+      overseas: { accepted: r.overseas_accepted, evidence: r.overseas_applicants_evidence },
       firstSeen: r.created_at,
       job: { title: r.title, employer: r.employer, location: r.location, country: r.country, url: r.url },
     })),
@@ -61,44 +63,40 @@ router.post("/employer-confirmations", verifyToken, asyncHandler(async (req, res
   if (!["staff", "employer"].includes(kind)) throw new HttpError(400, "kind must be staff or employer");
   let employerId = null;
   let applicationId = null;
-  let jobIds = [];
+  let jobId = null;
   if (b.applicationId !== undefined) {
     applicationId = posInt(b.applicationId);
     if (!applicationId) throw new HttpError(400, "applicationId must be a positive integer");
     const a = await db().query("SELECT a.job_id, j.employer_id FROM js_applications a JOIN js_jobs j ON j.id = a.job_id WHERE a.id = $1", [applicationId]);
     if (!a.rowCount) throw new HttpError(404, "Not found");
     employerId = a.rows[0].employer_id;
-    jobIds = [a.rows[0].job_id];
+    jobId = a.rows[0].job_id;
   } else if (b.jobId !== undefined) {
-    const jobId = posInt(b.jobId);
+    jobId = posInt(b.jobId);
     if (!jobId) throw new HttpError(400, "jobId must be a positive integer");
     const j = await db().query("SELECT id, employer_id FROM js_jobs WHERE id = $1", [jobId]);
     if (!j.rowCount) throw new HttpError(404, "Not found");
     employerId = j.rows[0].employer_id;
-    if (!employerId) throw new HttpError(400, "This job has no employer record to confirm against");
-    jobIds = [jobId];
   } else if (b.employerId !== undefined) {
+    // Employer-wide: applies to every job of this employer (employers are matched by normalized name only).
     employerId = posInt(b.employerId);
     if (!employerId) throw new HttpError(400, "employerId must be a positive integer");
     if (!(await db().query("SELECT 1 FROM js_employers WHERE id = $1", [employerId])).rowCount) throw new HttpError(404, "Not found");
   } else {
     throw new HttpError(400, "employerId, jobId or applicationId is required");
   }
+  const scope = jobId ? "job" : "employer";
   const client = await db().connect();
   let row;
   try {
     await client.query("BEGIN");
     row = (await client.query(
-      "INSERT INTO js_employer_confirmations (employer_id, application_id, kind, evidence_text, confirmed_by) VALUES ($1,$2,$3,$4,$5) RETURNING id, employer_id, application_id, kind, evidence_text, created_at",
-      [applicationId ? null : employerId, applicationId, kind, note, req.user.id]
+      "INSERT INTO js_employer_confirmations (employer_id, application_id, job_id, kind, evidence_text, confirmed_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, employer_id, application_id, job_id, kind, evidence_text, created_at",
+      [employerId, applicationId, jobId, kind, note, req.user.id]
     )).rows[0];
-    // Existing matches pick the label up immediately (a later match run resolves it the same way).
-    await client.query(
-      `UPDATE js_matches SET employer_support = 'confirmed', employer_support_evidence = $1
-        WHERE job_id IN (SELECT id FROM js_jobs WHERE ($2::int IS NOT NULL AND employer_id = $2) OR id = ANY($3::int[]))`,
-      [note, applicationId ? null : employerId, jobIds]
-    );
-    await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'employer.confirmation',$2::jsonb)", [`user:${req.user.id}`, JSON.stringify({ confirmationId: row.id, employerId, applicationId, jobIds, kind })]);
+    const affected = jobId ? [jobId] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [employerId])).rows.map((r) => r.id);
+    await relabelJobs(client, affected);
+    await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'employer.confirmation',$2::jsonb)", [`user:${req.user.id}`, JSON.stringify({ confirmationId: row.id, employerId, applicationId, jobId, scope, kind })]);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -106,8 +104,33 @@ router.post("/employer-confirmations", verifyToken, asyncHandler(async (req, res
   } finally {
     client.release();
   }
-  await logAudit({ userId: req.user.id, action: "jobsearch.employer.confirmation", tableName: "js_employer_confirmations", recordId: row.id, newData: { employerId, applicationId, kind } });
-  res.status(201).json({ id: row.id, employerId: row.employer_id, applicationId: row.application_id, kind: row.kind, evidence: row.evidence_text, label: "confirmed", notice: NOTICE });
+  await logAudit({ userId: req.user.id, action: "jobsearch.employer.confirmation", tableName: "js_employer_confirmations", recordId: row.id, newData: { employerId, applicationId, jobId, scope, kind } });
+  res.status(201).json({ id: row.id, scope, jobId: row.job_id, employerId: row.employer_id, applicationId: row.application_id, kind: row.kind, evidence: row.evidence_text, label: "confirmed", notice: NOTICE });
+}));
+
+router.delete("/employer-confirmations/:id", verifyToken, asyncHandler(async (req, res) => {
+  const perms = PERMISSIONS[req.user && req.user.role] || [];
+  if (!isAdmin(req.user) || !(perms.includes("*") || perms.includes("jobsearch:write"))) throw new HttpError(403, "Admin access required");
+  const id = posInt(req.params.id);
+  if (!id) throw new HttpError(404, "Not found");
+  const client = await db().connect();
+  let row;
+  try {
+    await client.query("BEGIN");
+    row = (await client.query("UPDATE js_employer_confirmations SET revoked_at = now(), revoked_by = $2 WHERE id = $1 AND revoked_at IS NULL RETURNING id, employer_id, job_id", [id, req.user.id])).rows[0];
+    if (!row) throw new HttpError(404, "Not found");
+    const affected = row.job_id ? [row.job_id] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [row.employer_id])).rows.map((r) => r.id);
+    await relabelJobs(client, affected);
+    await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'employer.confirmation.revoke',$2::jsonb)", [`user:${req.user.id}`, JSON.stringify({ confirmationId: id, employerId: row.employer_id, jobId: row.job_id })]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  await logAudit({ userId: req.user.id, action: "jobsearch.employer.confirmation.revoke", tableName: "js_employer_confirmations", recordId: id });
+  res.json({ id, revoked: true });
 }));
 
 router.use(jobsearchErrorHandler);

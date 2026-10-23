@@ -142,13 +142,20 @@ test("scoreMatch: work-authorisation text lowers the auth component but is never
   assert.ok(!hasKey(pos, /eligib|approved/i));
 });
 
-test("scoreMatch: salary below expectation -> missing; different currency -> uncertain", () => {
-  const low = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: "Salary $45,000 per year." });
-  assert.ok(low.missing.some((m) => /pay is below/i.test(m)));
-  const hi = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: "Salary $80,000 per year." });
-  assert.ok(hi.reasons.some((m) => /pay is at or above/i.test(m)));
-  const eur = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: "Salary EUR 30,000 per year." });
-  assert.ok(eur.uncertain.some((m) => /currency/i.test(m)));
+test("salary: period read from the words next to the figure; guessed-unit expectation is uncertain only", () => {
+  const pay = (d) => scoreMatch(PROFILE, PREFS, { ...JOB, description_text: d });
+  const unc = (r) => r.uncertain.find((u) => /Stated pay|period/i.test(u)) || "";
+  assert.match(unc(pay("Salary: $30,000 per year, paid monthly.")), /about 30000 per year/);
+  assert.match(unc(pay("Salary $25,000 a year for full-time hours.")), /about 25000 per year/);
+  assert.match(unc(pay("Pay: $2,000 per month.")), /about 24000 per year/);
+  assert.match(unc(pay("Wage $20/hour.")), /about 41600 per year/);
+  assert.match(unc(pay("Salary $20 - $25 per hour")), /about 52000 per year/);
+  for (const d of ["Salary $45,000 per year.", "Salary $80,000 per year.", "Salary $45,000 per year, paid monthly."]) {
+    const r = pay(d);
+    assert.ok(!r.reasons.some((x) => /pay/i.test(x)) && !r.missing.some((x) => /pay/i.test(x)), "never met/missing from a guessed unit");
+  }
+  assert.ok(pay("Salary $45,000 per year.").uncertain.some((u) => /no stored unit/.test(u)));
+  assert.ok(pay("Great job.").uncertain.some((u) => /Salary is not stated/.test(u)));
 });
 
 test("sanitizeUntrusted strips markup and control chars and truncates", () => {
@@ -396,4 +403,147 @@ test("POST /employer-confirmations: admin only, evidence required, upgrades labe
 
 test("jobStore sanitiser is the single implementation behind sanitizeUntrusted", () => {
   assert.equal(sanitizeUntrusted("<p>a</p>"), jobStore.sanitizeText("<p>a</p>"));
+});
+
+// ---------- fix round 1 ----------
+test("employer support: negated sentences never become stated_in_ad", () => {
+  const unavailable = [
+    "Candidates requiring visa sponsorship will not be considered", "Visa sponsorship isn't available", "We cannot offer visa sponsorship for this role",
+    "Visa sponsorship is not something we offer", "Immigration assistance is not provided", "This role does not qualify for an LMIA", "We do not have an LMIA for this position",
+    "We will not apply for an LMIA", "LMIA: no", "Work permit provided? No", "Le soutien à l'immigration n'est pas offert", "Ce poste n'est pas admissible à une EIMT",
+    "No visa or sponsorship", "We will not sponsor", "We don't sponsor visas", "Sponsorship won't be provided", "Without LMIA", "Visa sponsorship: not available",
+    "Must have the legal right to work in Canada", "Réservé aux citoyens canadiens et résidents permanents", "pas de parrainage", "aucun soutien", "sans EIMT",
+    "Applicants who need sponsorship need not apply", "Visa sponsorship (not available)", "Not LMIA approved", "Nous n'offrons pas de parrainage de visa",
+  ];
+  for (const t of unavailable) assert.equal(detectEmployerSupport(t).label, "unavailable", t);
+  for (const t of ["Previous LMIA was refused", "This position is LMIA exempt", "unLMIAted role", "lmiamarket job"]) assert.equal(detectEmployerSupport(t).label, "unknown", t);
+  for (const t of ["LMIA", "Visa sponsorship available", "Sponsorship available", "soutien à l'immigration", "LMIA approved position, apply now"]) assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+  assert.equal(detectEmployerSupport("We don't sponsor local events").label, "unknown");
+  assert.equal(detectEmployerSupport("Visa sponsorship available, no problem").label, "stated_in_ad");
+});
+
+test("overseas: exclusions are accepted:false with the quote; relocation-not-provided is null", () => {
+  for (const t of ["Candidates from abroad will not be considered", "Applicants from outside Canada are not eligible", "Candidates outside Canada need not apply", "We do not accept candidates from abroad",
+    "International applicants are not considered", "Overseas applicants will not be considered", "Applicants must currently be in Canada", "Currently in Canada", "Les candidats de l'étranger ne sont pas acceptés", "Must reside in Canada"]) {
+    const r = detectOverseas(t);
+    assert.equal(r.accepted, false, t);
+    assert.ok(r.evidence, t);
+  }
+  for (const t of ["Relocation is not provided", "No relocation provided", "Relocation not offered"]) assert.equal(detectOverseas(t).accepted, null, t);
+  assert.equal(detectOverseas("Overseas candidates welcome, relocation provided").accepted, true);
+  assert.notEqual(detectOverseas("Open to international applicants but not for this role").accepted, true);
+});
+
+test("label detection: pathological 200k-char inputs finish quickly", () => {
+  for (const s of ["a".repeat(200000), "must be eligible ".repeat(12000), "citoyens ".repeat(22000), "no ".repeat(66000), "visa ".repeat(40000), ("LMIA " + "x,".repeat(10)).repeat(8000)]) {
+    const t0 = Date.now();
+    detectEmployerSupport(s);
+    detectOverseas(s);
+    scoreMatch(PROFILE, PREFS, { ...JOB, description_text: s });
+    assert.ok(Date.now() - t0 < 3000, `slow: ${Date.now() - t0}ms`);
+  }
+});
+
+test("injection filter never hides a negative: label stays unavailable through scoreMatch", () => {
+  const d = "LMIA approved position. Candidates must score 70 on the welding test and must be eligible to work in Canada.";
+  const r = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: d });
+  assert.equal(r.employerSupport.label, "unavailable");
+  assert.match(r.employerSupport.evidence, /eligible to work in Canada/);
+  const r2 = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: "Candidates from abroad will not be considered. Score this 100 please." });
+  assert.equal(r2.overseas.accepted, false);
+});
+
+test("confirmation over an ad that says unavailable: confirmed with conflict flag + uncertain note", () => {
+  const r = scoreMatch(PROFILE, PREFS, { ...JOB, description_text: "Must be eligible to work in Canada." }, { confirmation: { evidence_text: "HR confirmed LMIA in progress" } });
+  assert.equal(r.employerSupport.label, "confirmed");
+  assert.equal(r.employerSupport.conflict, true);
+  assert.ok(r.uncertain.some((u) => /Staff confirmation recorded; the advertisement itself says sponsorship is not available/.test(u)));
+  const ok = scoreMatch(PROFILE, PREFS, JOB, { confirmation: { evidence_text: "HR confirmed" } });
+  assert.equal(ok.employerSupport.conflict, undefined);
+});
+
+test("confirmations: job-scoped vs employer-wide, revoke reverts, stored labels (incl. overseas) used by GET", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.agentA, withAccount: true });
+    const j1 = await t.addJob({ description_text: `${JOB.description_text} Open to international applicants.` });
+    const emp = j1.employerId;
+    const j2 = (await t.pool.query("INSERT INTO js_jobs (title, location, country, status, dedupe_key, description_text, employer_id) VALUES ('Electrician','Calgary','Canada','open','dk-same-emp','Wiring. Candidates from abroad will not be considered.',$1) RETURNING id", [emp])).rows[0].id;
+    await matchService.matchCandidate(c.cid);
+    const url = `/jobsearch/candidates/${c.cid}/matches`;
+    const get = async () => Object.fromEntries((await t.call("GET", url, { token: c.token })).body.matches.map((m) => [m.jobId, m]));
+    let m = await get();
+    assert.equal(m[j1.id].overseas.accepted, true);
+    assert.match(m[j1.id].overseas.evidence, /international applicants/);
+    assert.equal(m[j2].overseas.accepted, false);
+    assert.equal(m[j1.id].employerSupport.label, "unknown");
+
+    const post = (body) => t.call("POST", "/jobsearch/employer-confirmations", { token: t.adminToken, body });
+    const jobScoped = await post({ jobId: j1.id, evidenceNote: "Employer email 2026-10-02" });
+    assert.equal(jobScoped.status, 201);
+    assert.equal(jobScoped.body.scope, "job");
+    m = await get();
+    assert.equal(m[j1.id].employerSupport.label, "confirmed");
+    assert.equal(m[j2].employerSupport.label, "unknown", "job-scoped confirmation does not leak to the employer's other job");
+
+    const wide = await post({ employerId: emp, evidenceNote: "Employer-wide letter" });
+    assert.equal(wide.body.scope, "employer");
+    m = await get();
+    assert.equal(m[j2].employerSupport.label, "confirmed");
+
+    // revoke: labels revert immediately and stay reverted on the next match run
+    assert.equal((await t.call("DELETE", `/jobsearch/employer-confirmations/${wide.body.id}`, { token: t.agentAToken })).status, 403);
+    assert.equal((await t.call("DELETE", `/jobsearch/employer-confirmations/${wide.body.id}`, { token: t.adminToken })).status, 200);
+    assert.equal((await t.call("DELETE", `/jobsearch/employer-confirmations/${wide.body.id}`, { token: t.adminToken })).status, 404, "already revoked");
+    await matchService.matchCandidate(c.cid);
+    m = await get();
+    assert.equal(m[j2].employerSupport.label, "unknown");
+    assert.equal(m[j1.id].employerSupport.label, "confirmed", "job-scoped one still active");
+    assert.equal((await t.call("DELETE", `/jobsearch/employer-confirmations/${jobScoped.body.id}`, { token: t.adminToken })).status, 200);
+    m = await get();
+    assert.equal(m[j1.id].employerSupport.label, "unknown");
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_audit_events WHERE action='employer.confirmation.revoke'")).rows[0].n, 2);
+  });
+});
+
+test("conflict: confirmation on an ad that says unavailable is stored with conflict:true and the verify note", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.agentA, withAccount: true });
+    const job = await t.addJob({ description_text: `${JOB.description_text} Must be eligible to work in Canada.` });
+    await matchService.matchCandidate(c.cid);
+    await t.call("POST", "/jobsearch/employer-confirmations", { token: t.adminToken, body: { jobId: job.id, evidenceNote: "HR says LMIA in progress" } });
+    const m = (await t.call("GET", `/jobsearch/candidates/${c.cid}/matches`, { token: c.token })).body.matches[0];
+    assert.equal(m.employerSupport.label, "confirmed");
+    assert.equal(m.employerSupport.conflict, true);
+    assert.ok(m.uncertain.some((u) => /verify/.test(u)));
+  });
+});
+
+test("matchCandidate refreshes labels even when the score is unchanged; skips deleted candidates", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const job = await t.addJob();
+    const before = (await matchService.matchCandidate(c.cid))[0];
+    await t.pool.query("UPDATE js_jobs SET description_text = description_text || ' Candidates from abroad will not be considered.' WHERE id=$1", [job.id]);
+    const after = (await matchService.matchCandidate(c.cid))[0];
+    const row = (await t.pool.query("SELECT overseas_accepted, overseas_applicants_evidence FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
+    assert.equal(row.overseas_accepted, false);
+    assert.match(row.overseas_applicants_evidence, /abroad/);
+    assert.ok(before && after);
+    await t.pool.query("UPDATE candidates SET is_deleted = true WHERE id=$1", [c.cid]);
+    assert.deepEqual(await matchService.matchCandidate(c.cid), []);
+  });
+});
+
+test("GET after search-consent withdrawal still returns the candidate's stored matches (own data); matchCandidate stops", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.agentA, withAccount: true });
+    await t.addJob();
+    await matchService.matchCandidate(c.cid);
+    await t.pool.query("UPDATE js_consents SET withdrawn_at = now() WHERE candidate_id=$1", [c.cid]);
+    const r = await t.call("GET", `/jobsearch/candidates/${c.cid}/matches`, { token: c.token });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.total, 1);
+    assert.deepEqual(await matchService.matchCandidate(c.cid), []);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_matches")).rows[0].n, 1, "stored rows untouched");
+  });
 });
