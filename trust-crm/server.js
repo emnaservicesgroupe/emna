@@ -1,16 +1,21 @@
 require("dotenv").config();
+require("./utils/preflight").runPreflight(); // NODE_ENV=production only: refuses to start on unsafe settings (Task 20)
 const app = require("./app");
+const db = require("./db");
 const { startAlertScheduler } = require("./jobs/alertScheduler");
+const { createShutdown } = require("./utils/shutdown");
 
+let alertTask = null;
 try {
-  startAlertScheduler();
+  alertTask = startAlertScheduler();
 } catch (err) {
   console.log("Scheduler not started:", err.message);
 }
 
+let jobSearch = null;
 try {
-  const { startJobSearchScheduler } = require("./modules/jobsearch/scheduler");
-  const task = startJobSearchScheduler();
+  jobSearch = require("./modules/jobsearch/scheduler");
+  const task = jobSearch.startJobSearchScheduler();
   console.log(task ? "Job-search scheduler started" : "Job-search scheduler disabled (JOBSEARCH_SCHEDULER=off or NODE_ENV=test)");
 } catch (err) {
   console.log("Job-search scheduler not started:", err.message);
@@ -18,6 +23,21 @@ try {
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 EMNA CRM running on port ${PORT}`);
 });
+
+// Graceful shutdown (Task 20): docker stop / compose down send SIGTERM.
+const shutdown = createShutdown({
+  server,
+  stop: [
+    () => jobSearch && jobSearch.stopJobSearchScheduler(),
+    () => alertTask && typeof alertTask.stop === "function" && alertTask.stop(),
+    () => require("./modules/jobsearch/eventsHub").shutdown(),
+  ],
+  isIdle: () => !jobSearch || typeof jobSearch.isIdle !== "function" || jobSearch.isIdle(),
+  closeDb: () => db.end(),
+  timeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS) > 0 ? Number(process.env.SHUTDOWN_TIMEOUT_MS) : 25000,
+});
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

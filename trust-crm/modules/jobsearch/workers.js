@@ -55,4 +55,9 @@ function stopWorkers() {
   timer = null;
 }
 
-module.exports = { handlers, tick, startWorkers, stopWorkers, enabled };
+/** True when no worker batch is running (graceful shutdown waits for it). */
+function isIdle() {
+  return !running;
+}
+
+module.exports = { handlers, tick, startWorkers, stopWorkers, enabled, isIdle };

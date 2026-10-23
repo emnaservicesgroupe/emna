@@ -72,8 +72,9 @@ async function generateAlerts() {
   });
 }
 
+/** Daily 08:00 expiry alerts; returns the cron task (server.js stops it on shutdown). */
 function startAlertScheduler() {
-  cron.schedule("0 8 * * *", async () => {
+  return cron.schedule("0 8 * * *", async () => {
     try {
       await generateAlerts();
     } catch (err) {

@@ -38,6 +38,26 @@ app.use("/jobsearch/inbound/mail", express.raw({ type: () => true, limit: Number
 app.use("/jobsearch", express.json({ limit: "10mb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
+// Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
+// {ok:true} (200) or {ok:false} (503, database not answering within 2 s) - never versions, hosts or errors.
+app.get("/healthz", async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  let timer;
+  try {
+    await Promise.race([
+      require("./db").query("SELECT 1"),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), 2000);
+      }),
+    ]);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(503).json({ ok: false });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 app.get("/", (_req, res) => {
   res.json({
     system: "EMNA Services CRM",

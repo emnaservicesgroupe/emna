@@ -858,6 +858,11 @@ function stopJobSearchScheduler() {
   require("./workers").stopWorkers();
 }
 
+/** True when neither a scheduler tick nor a worker batch is running (graceful shutdown waits for it). */
+function isIdle() {
+  return !ticking && require("./workers").isIdle();
+}
+
 async function status() {
   const last = (await db().query("SELECT value FROM js_module_state WHERE key = $1", [STATE_KEY])).rows[0];
   await searchRunner.ensureSources();
@@ -882,6 +887,7 @@ module.exports = {
   guardedTick,
   startJobSearchScheduler,
   stopJobSearchScheduler,
+  isIdle,
   status,
   schedulerEnabled,
   parseCron,
