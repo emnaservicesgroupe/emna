@@ -1,0 +1,1094 @@
+{
+ "support": [
+  {
+   "text": "Candidates requiring visa sponsorship will not be considered",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship isn't available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We cannot offer visa sponsorship for this role",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship is not something we offer",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Immigration assistance is not provided",
+   "expect": "unavailable"
+  },
+  {
+   "text": "This role does not qualify for an LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We do not have an LMIA for this position",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We will not apply for an LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA: no",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Work permit provided? No",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Le soutien à l'immigration n'est pas offert",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Ce poste n'est pas admissible à une EIMT",
+   "expect": "unavailable"
+  },
+  {
+   "text": "No visa or sponsorship",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We will not sponsor",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We don't sponsor visas",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship won't be provided",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Without LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship: not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Must have the legal right to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Réservé aux citoyens canadiens et résidents permanents seulement",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Réservé aux citoyens canadiens et résidents permanents",
+   "expect": "unavailable"
+  },
+  {
+   "text": "pas de parrainage",
+   "expect": "unavailable"
+  },
+  {
+   "text": "aucun soutien",
+   "expect": "unavailable"
+  },
+  {
+   "text": "sans EIMT",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA-exempt not offered",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Employer will NOT provide visa sponsorship",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We are not offering visa sponsorship",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA not provided for this role",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Not LMIA approved",
+   "expect": "unavailable"
+  },
+  {
+   "text": "This is not an LMIA position",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We are unfortunately not in a position to apply for an LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "aucun soutien à l'immigration",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Nous n'offrons pas de parrainage de visa",
+   "expect": "unavailable"
+  },
+  {
+   "text": "L'employeur ne fournit pas de permis de travail",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Aucune EIMT ne sera demandée",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship (not available)",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship - unavailable",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Never any visa sponsorship",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Applicants who need sponsorship need not apply",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We do not sponsor work permits",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We do not sponsor work visas, sorry",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Our company does not currently sponsor",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Do you need an LMIA? We don't provide one",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Immigration support not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We will not be applying for LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Candidates must be legally entitled to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "You must be authorized to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Must be eligible to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Citoyens canadiens et résidents permanents seulement",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Vous devez être autorisé à travailler au Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA-approved job. Must be eligible to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Only Canadian citizens and permanent residents may apply",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Applicants must be Canadian citizens or permanent residents",
+   "expect": "unavailable"
+  },
+  {
+   "text": "No LMIA",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA not available for this role",
+   "expect": "unavailable"
+  },
+  {
+   "text": "No sponsorship offered",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Canadian citizens or permanent residents only",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Autorisation de travail requise",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We do not offer visa sponsorship",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved position. Must be eligible to work in Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Previous LMIA was refused",
+   "expect": "unknown"
+  },
+  {
+   "text": "This position is LMIA exempt",
+   "expect": "unknown"
+  },
+  {
+   "text": "unLMIAted role",
+   "expect": "unknown"
+  },
+  {
+   "text": "lmiamarket job",
+   "expect": "unknown"
+  },
+  {
+   "text": "We sponsor local events",
+   "expect": "unknown"
+  },
+  {
+   "text": "Sponsorship available for our hockey team",
+   "expect": "unknown"
+  },
+  {
+   "text": "Sponsorship of the Toronto marathon",
+   "expect": "unknown"
+  },
+  {
+   "text": "Proud sponsorship of the Toronto marathon is available to staff",
+   "expect": "unknown"
+  },
+  {
+   "text": "We sponsor local events and the summer festival",
+   "expect": "unknown"
+  },
+  {
+   "text": "Proud sponsor of the community marathon",
+   "expect": "unknown"
+  },
+  {
+   "text": "Sponsorship available for our charity event",
+   "expect": "unknown"
+  },
+  {
+   "text": "We don't sponsor local events",
+   "expect": "unknown"
+  },
+  {
+   "text": "LMIA",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved position",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA-approved job.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "visa sponsorship",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "VISA SPONSORSHIP AVAILABLE",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Sponsorship available",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "permis de travail fourni",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "soutien à l'immigration",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA in process",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMÏA approved",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We sponsor work permits for qualified workers",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Poste avec EIMT",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available for the right candidate",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Soutien à l'immigration offert",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Permis de travail fourni par l'employeur",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Great team. LMIA approved position. Apply today.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available for the right candidate.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved position.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "EIMT approuvée.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Nous offrons un soutien à l'immigration.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "No experience needed; visa sponsorship available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "No experience needed, visa sponsorship available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "No experience needed and visa sponsorship available.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Not required: Canadian experience. LMIA approved.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We do not require Canadian experience and we offer visa sponsorship.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Don't worry about paperwork - we provide LMIA support.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We sponsor work permits for qualified welders.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "lmia approved",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Permis de travail fourni.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Positive LMIA obtained.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We have an LMIA. No relocation assistance.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved. Not suitable for students.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved. No students.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We do sponsor visas, no exceptions for unqualified applicants.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved, but candidates must be eligible to work in Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved but candidates must be eligible to work in Canada",
+   "expect": "unavailable"
+  },
+  {
+   "text": "VISA SPONSORSHIP IS NOT AVAILABLE.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "**Visa sponsorship:** _not available_",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship not available.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship is unavailable at this time.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We are unable to sponsor work permits.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship is not possible for this role.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "This position is not eligible for sponsorship.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Applicants who require sponsorship now or in the future need not apply.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We're not able to provide LMIA.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship? Unfortunately not.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship: Unavailable",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Must hold a valid Canadian work permit or PR.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Le parrainage n'est pas offert.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Nous ne parrainons pas les visas.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Nous n'offrons aucun parrainage.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Aucune EIMT pour ce poste.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Pas d'EIMT.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Le candidat doit être autorisé à travailler au Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "EIMT approuvée, mais les candidats doivent être autorisés à travailler au Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Nous ne fournissons pas de permis de travail.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Soutien à l'immigration : non.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Immigration support: none.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Immigration support - None",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship (not available)",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship — not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship / not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa Sponsorship\tNo",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We cannot sponsor.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship is not provided.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship isn't on offer.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sorry, sponsorship cannot be offered.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "The company will not provide sponsorship of any kind.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Applicants must be authorized to work for any employer in Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Must be legally entitled to work in Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Only candidates with Canadian work authorization will be considered.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Canadian citizenship required.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "PR or citizenship required.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Security clearance required; Canadian citizens only.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We sponsor the local hockey team. No visa support.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship available. (Note: sponsorship is not available for part-time roles.)",
+   "expect": "unavailable"
+  },
+  {
+   "text": "We will not hire anyone who does not need sponsorship.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "- Sponsorship: N/A",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship\n- Not offered",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA - not applicable.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA pending.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "We may consider LMIA in the future.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Candidates with a valid work permit are welcome.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Requires LMIA.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Open work permit holders only.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship may be available.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "LMIA approved. Canadian citizenship required.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship available. Applicants must be authorized to work for any employer in Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved. Only candidates with Canadian work authorization will be considered.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved. PR or citizenship required.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved. Must have Canadian citizenship.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved. You must be a citizen or permanent resident of Canada.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved. Must be a Canadian citizen or permanent resident.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship:\nNo",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship\nNot available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA:\nNo",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Work permit provided?\nNo",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship: _No_",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship: **no**",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship: *not available*",
+   "expect": "unavailable"
+  },
+  {
+   "text": "<b>Visa sponsorship:</b> <i>not available</i>",
+   "expect": "unavailable"
+  },
+  {
+   "text": "<h3>Work permit provided?</h3><p>No</p>",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship: ~~available~~ not available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship: NO.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA: N",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA – ✗",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Sponsorship available for Canadian citizens only.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Candidate requires their own LMIA.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "You need an LMIA to apply.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA is required from the candidate.",
+   "expect": "unavailable"
+  },
+  {
+   "text": "EIMT : non",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Visa sponsorship:\n__not__ available",
+   "expect": "unavailable"
+  },
+  {
+   "text": "Immigration assistance:\nNone",
+   "expect": "unavailable"
+  },
+  {
+   "text": "LMIA approved (expired).",
+   "expect": "unknown"
+  },
+  {
+   "text": "LMIA was approved in 2022.",
+   "expect": "unknown"
+  },
+  {
+   "text": "LMIA application in progress.",
+   "expect": "unknown"
+  },
+  {
+   "text": "LMIA may be considered.",
+   "expect": "unknown"
+  },
+  {
+   "text": "EIMT en cours.",
+   "expect": "unknown"
+  },
+  {
+   "text": "Hiring LMIA-exempt workers only.",
+   "expect": "unknown"
+  },
+  {
+   "text": "This job is LMIA exempt.",
+   "expect": "unknown"
+  },
+  {
+   "text": "LMIA not guaranteed.",
+   "expect": "!stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship: Yes",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Visa sponsorship available. Applicants from abroad welcome.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "We offer visa sponsorship for skilled trades.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "LMIA approved. Start immediately.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Employer-supported work permit provided.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Immigration support available for the right hire.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "EIMT approuvée pour ce poste.",
+   "expect": "stated_in_ad"
+  },
+  {
+   "text": "Work permit sponsorship for qualified applicants.",
+   "expect": "stated_in_ad"
+  }
+ ],
+ "overseas": [
+  {
+   "text": "International applicants are not considered.",
+   "expect": "false"
+  },
+  {
+   "text": "Applicants from abroad: no.",
+   "expect": "false"
+  },
+  {
+   "text": "Not open to international applicants.",
+   "expect": "false"
+  },
+  {
+   "text": "We are not currently accepting international applicants.",
+   "expect": "false"
+  },
+  {
+   "text": "International applicants welcome, but must reside in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Candidates outside Canada will not be considered.",
+   "expect": "false"
+  },
+  {
+   "text": "Only applicants currently in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Applicants must be located in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Must be living in Canada at the time of application.",
+   "expect": "false"
+  },
+  {
+   "text": "Local candidates only.",
+   "expect": "false"
+  },
+  {
+   "text": "Les candidats internationaux ne sont pas acceptés.",
+   "expect": "false"
+  },
+  {
+   "text": "Ouvert aux candidats internationaux, mais doit résider au Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "We do not consider candidates from abroad.",
+   "expect": "false"
+  },
+  {
+   "text": "Foreign applicants need not apply.",
+   "expect": "false"
+  },
+  {
+   "text": "Candidates outside Canada are not eligible unless they hold a work permit.",
+   "expect": "false"
+  },
+  {
+   "text": "OVERSEAS APPLICANTS WILL NOT BE CONSIDERED",
+   "expect": "false"
+  },
+  {
+   "text": "Applicants must be in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Must be in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "You must be physically present in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Les candidats doivent se trouver au Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Résidents canadiens seulement.",
+   "expect": "false"
+  },
+  {
+   "text": "Candidates from abroad will not be considered",
+   "expect": "false"
+  },
+  {
+   "text": "Applicants from outside Canada are not eligible",
+   "expect": "false"
+  },
+  {
+   "text": "Candidates outside Canada need not apply",
+   "expect": "false"
+  },
+  {
+   "text": "We do not accept candidates from abroad",
+   "expect": "false"
+  },
+  {
+   "text": "Applicants must currently be in Canada",
+   "expect": "false"
+  },
+  {
+   "text": "Currently in Canada",
+   "expect": "false"
+  },
+  {
+   "text": "Les candidats de l'étranger ne sont pas acceptés",
+   "expect": "false"
+  },
+  {
+   "text": "Must reside in Canada",
+   "expect": "false"
+  },
+  {
+   "text": "Canadian residents only",
+   "expect": "false"
+  },
+  {
+   "text": "Candidats locaux seulement",
+   "expect": "false"
+  },
+  {
+   "text": "Not open to international applicants",
+   "expect": "false"
+  },
+  {
+   "text": "International applicants welcome. Applicants must be in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Open to international candidates. Must be physically present in Canada for the interview.",
+   "expect": "false"
+  },
+  {
+   "text": "Overseas applicants welcome.\nApplicants must be in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "International applicants:\nNot accepted",
+   "expect": "false"
+  },
+  {
+   "text": "Overseas candidates: **not considered**",
+   "expect": "false"
+  },
+  {
+   "text": "Relocation provided. Must currently live in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Relocation provided for candidates within Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "Relocation assistance available for domestic hires only.",
+   "expect": "false"
+  },
+  {
+   "text": "Les candidats de l'étranger:\nNon",
+   "expect": "false"
+  },
+  {
+   "text": "Overseas applicants:\nNo",
+   "expect": "false"
+  },
+  {
+   "text": "Visa sponsorship available. Applicants from abroad welcome. Must reside in Canada.",
+   "expect": "false"
+  },
+  {
+   "text": "International applicants:\nNon",
+   "expect": "false"
+  },
+  {
+   "text": "Relocation is not provided.",
+   "expect": "null"
+  },
+  {
+   "text": "No relocation assistance.",
+   "expect": "null"
+  },
+  {
+   "text": "No relocation provided",
+   "expect": "null"
+  },
+  {
+   "text": "Relocation not offered",
+   "expect": "null"
+  },
+  {
+   "text": "International experience is an asset.",
+   "expect": "null"
+  },
+  {
+   "text": "We have offices abroad.",
+   "expect": "null"
+  },
+  {
+   "text": "International applicants welcome. Canadian residents preferred.",
+   "expect": "null"
+  },
+  {
+   "text": "Canadian vacancy in Calgary. Apply with your CV.",
+   "expect": "null"
+  },
+  {
+   "text": "Great job",
+   "expect": "null"
+  },
+  {
+   "text": "Applicants from abroad are welcome.",
+   "expect": "true"
+  },
+  {
+   "text": "We welcome international applicants.",
+   "expect": "true"
+  },
+  {
+   "text": "No experience needed; international applicants welcome.",
+   "expect": "true"
+  },
+  {
+   "text": "Ouvert aux candidats de l'étranger.",
+   "expect": "true"
+  },
+  {
+   "text": "Relocation assistance available.",
+   "expect": "true"
+  },
+  {
+   "text": "Candidates from overseas are encouraged to apply!",
+   "expect": "true"
+  },
+  {
+   "text": "Applicants from outside of Canada may apply.",
+   "expect": "true"
+  },
+  {
+   "text": "Open to international applicants",
+   "expect": "true"
+  },
+  {
+   "text": "Relocation provided",
+   "expect": "true"
+  },
+  {
+   "text": "Relocation provided for overseas hires",
+   "expect": "true"
+  },
+  {
+   "text": "Visa sponsorship available. Applicants from abroad welcome.",
+   "expect": "true"
+  },
+  {
+   "text": "We are open to international applicants.",
+   "expect": "true"
+  },
+  {
+   "text": "Overseas candidates welcome, relocation provided",
+   "expect": "true"
+  },
+  {
+   "text": "International applicants are welcome to apply. No experience needed.",
+   "expect": "true"
+  },
+  {
+   "text": "We hire foreign workers through the TFW program.",
+   "expect": "null|true"
+  },
+  {
+   "text": "Applicants outside Canada.",
+   "expect": "null|true"
+  },
+  {
+   "text": "Overseas applicants: considered.",
+   "expect": "null|true"
+  }
+ ]
+}

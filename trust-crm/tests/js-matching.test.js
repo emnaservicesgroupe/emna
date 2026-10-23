@@ -547,3 +547,80 @@ test("GET after search-consent withdrawal still returns the candidate's stored m
     assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_matches")).rows[0].n, 1, "stored rows untouched");
   });
 });
+
+// ---------- fix round 2: table-driven corpus + design properties ----------
+const corpus = require("./fixtures/label-corpus.json");
+const okExpect = (expect, got) => (expect.startsWith("!") ? got !== expect.slice(1) : expect.split("|").includes(got));
+
+test("label corpus: every employer-support sentence from both reviews", () => {
+  const bad = [];
+  for (const { text, expect } of corpus.support) {
+    const r = detectEmployerSupport(text);
+    if (!okExpect(expect, r.label)) bad.push(`${JSON.stringify(text)} expected ${expect} got ${r.label}`);
+    if (r.label !== "unknown" && !r.evidence) bad.push(`${JSON.stringify(text)} label without evidence`);
+  }
+  assert.deepEqual(bad, []);
+  assert.ok(corpus.support.length >= 200);
+});
+
+test("label corpus: every overseas sentence from both reviews", () => {
+  const bad = [];
+  for (const { text, expect } of corpus.overseas) {
+    const r = detectOverseas(text);
+    if (!okExpect(expect, String(r.accepted))) bad.push(`${JSON.stringify(text)} expected ${expect} got ${r.accepted}`);
+    if (r.accepted !== null && !r.evidence) bad.push(`${JSON.stringify(text)} accepted without evidence`);
+  }
+  assert.deepEqual(bad, []);
+});
+
+test("any exclusion/restriction anywhere overrides positive wording elsewhere", () => {
+  const pos = "LMIA approved position. Visa sponsorship available. International applicants welcome. Relocation provided.";
+  assert.equal(detectEmployerSupport(pos).label, "stated_in_ad");
+  assert.equal(detectOverseas(pos).accepted, true);
+  assert.equal(detectEmployerSupport(`${pos}\nCanadian citizenship required.`).label, "unavailable");
+  assert.equal(detectOverseas(`${pos}\nMust be in Canada.`).accepted, false);
+  assert.equal(detectEmployerSupport(`${pos}\nVisa sponsorship:\nNo`).label, "unavailable");
+});
+
+test("label detection stays linear on 200k chars of joined-line patterns", () => {
+  for (const s of ["Visa sponsorship:\n".repeat(11000), "Visa sponsorship\nNo\n".repeat(10000), "LMIA:\nN\n".repeat(20000), "International applicants:\n".repeat(8000), "**_".repeat(66000), "~~".repeat(100000), "Work permit provided?\n".repeat(9000)]) {
+    const t0 = Date.now();
+    detectEmployerSupport(s);
+    detectOverseas(s);
+    scoreMatch(PROFILE, PREFS, { ...JOB, description_text: s });
+    assert.ok(Date.now() - t0 < 3000, `slow: ${Date.now() - t0}ms`);
+  }
+});
+
+test("relabel (confirm/revoke) changes labels only: score, reasons and created_at stay; migration 006 backfills application-scoped rows", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.agentA, withAccount: true });
+    const job = await t.addJob({ description_text: `${JOB.description_text} Must be eligible to work in Canada.` });
+    await matchService.matchCandidate(c.cid);
+    const before = (await t.pool.query("SELECT * FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
+    const ok = await t.call("POST", "/jobsearch/employer-confirmations", { token: t.adminToken, body: { jobId: job.id, evidenceNote: "HR letter" } });
+    assert.equal(ok.status, 201);
+    const mid = (await t.pool.query("SELECT * FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
+    assert.equal(mid.employer_support, "confirmed");
+    assert.equal(mid.score, before.score);
+    assert.deepEqual(mid.reasons, before.reasons);
+    assert.equal(mid.created_at.toISOString(), before.created_at.toISOString());
+    assert.equal(mid.uncertain.filter((u) => /verify/.test(u)).length, 1);
+    await t.call("DELETE", `/jobsearch/employer-confirmations/${ok.body.id}`, { token: t.adminToken });
+    const after = (await t.pool.query("SELECT * FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0];
+    assert.equal(after.employer_support, "unavailable");
+    assert.equal(after.employer_support_conflict, false);
+    assert.equal(after.uncertain.filter((u) => /verify/.test(u)).length, 0);
+    // backfill: a pre-005 style application-only row gains job_id/employer_id
+    const app = (await t.pool.query("INSERT INTO js_applications (candidate_id, job_id, status) VALUES ($1,$2,'preparing') RETURNING id", [c.cid, job.id])).rows[0].id;
+    const row = (await t.pool.query("INSERT INTO js_employer_confirmations (application_id, kind, evidence_text) VALUES ($1,'staff','old') RETURNING id", [app])).rows[0].id;
+    const fs = require("fs");
+    const path = require("path");
+    const sql = fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "006_js_confirmation_backfill.sql"), "utf8");
+    await t.pool.query(sql);
+    await t.pool.query(sql); // idempotent
+    const fixed = (await t.pool.query("SELECT job_id, employer_id FROM js_employer_confirmations WHERE id=$1", [row])).rows[0];
+    assert.equal(fixed.job_id, job.id);
+    assert.equal(fixed.employer_id, job.employerId);
+  });
+});
