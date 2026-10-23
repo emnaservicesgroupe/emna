@@ -671,11 +671,23 @@ test("list filters return the correct subsets; bad filters are 400; pagination b
 // ---------------------------------------------------------------- fix round 1
 
 const documentPolicy = require("../modules/jobsearch/documentPolicy");
-const SENSITIVE_NAMES = ["ID", "ID copy", "CNI", "NID", "Pasaporte", "Reisepass", "Pasaport", "Bulletin n°3", "B3", "good conduct certificate", "bonne conduite", "Fiche anthropométrique", "casier judiciaire", "extrait de casier", "criminal record", "certificat médical", "medical report", "vaccination", "visa", "permis de séjour", "residence permit", "birth certificate", "acte de naissance", "marriage certificate", "carte d'identité", "driver's licence", "", "Scan 2024", "Health and Safety certificate", "medical certificate"];
+const SENSITIVE_NAMES = ["ID", "ID copy", "CNI", "NID", "Pasaporte", "Reisepass", "Pasaport", "Bulletin n°3", "B3", "good conduct certificate", "bonne conduite", "Fiche anthropométrique", "casier judiciaire", "extrait de casier", "criminal record", "certificat médical", "medical report", "vaccination", "visa", "permis de séjour", "residence permit", "birth certificate", "acte de naissance", "marriage certificate", "carte d'identité", "driver's licence", "", "Scan 2024", "Health and Safety certificate", "medical certificate",
+  // round 2: prefix-safe leaks, spacing/confusable/invisible tricks, more ID/medical/civil/finance terms, fail-closed names
+  "CV + pasport", "CV and pass port", "CV p\u0430ssport", "CV pass\u200Bport", "CV pass\u00ADport", "CV + CNIE", "CV + DNI", "CV + NIE", "CV + BI", "CV + iqama", "CV + tazkira", "CV + Aadhaar", "CV + carte consulaire",
+  "CV + numéro sécu", "CV + NIR", "CV + carte vitale", "CV + mutuelle", "Diploma + Führerschein", "CV / Aufenthaltstitel", "CV + HIV test", "CV + pregnancy test", "CV + test de grossesse",
+  "CV + handicap", "CV + disability", "Training certificate - drug test", "CV + relevé bancaire", "CV + fiche familiale", "Diploma + état civil", "CV + extrait d'acte", "Diploma + carte grise",
+  "CV + licence", "certificate", "licence", "Licence en informatique", "سيرة الموظف"];
+const SAFE_NAMES = ["CV", "Résumé", "CV_final.pdf", "CV (Arabic)", "cv english v2", "Curriculum Vitae FR", "Diplôme", "Degree", "Master", "Transcript", "Relevé de notes", "IELTS result", "Portfolio", "Trade licence", "Red Seal", "Training certificate", "Cover letter", "Lebenslauf", "السيرة الذاتية", "دبلوم"];
 
 test("document types are sensitive by default: every listed name is blocked without authorization; CV/cover letter/diploma pass", async () => {
   for (const n of SENSITIVE_NAMES) assert.ok(documentPolicy.sensitiveType(n), `${JSON.stringify(n)} must be sensitive`);
-  for (const n of ["CV", "Cover letter", "Diplôme", "Resume", "IELTS result", "Red Seal", "Lettre de motivation"]) assert.equal(documentPolicy.sensitiveType(n), null, n);
+  for (const n of [...SAFE_NAMES, "Lettre de motivation"]) assert.equal(documentPolicy.sensitiveType(n), null, n);
+  assert.equal(documentPolicy.sensitiveType("CV + iqama"), "national_id");
+  assert.equal(documentPolicy.sensitiveType("CV + HIV test"), "medical");
+  assert.equal(documentPolicy.sensitiveType("CV + relevé bancaire"), "financial");
+  assert.equal(documentPolicy.sensitiveType("Diploma + état civil"), "civil_status");
+  assert.equal(documentPolicy.sensitiveType("CV p\u0430ssport"), "passport");
+  assert.equal(documentPolicy.sensitiveType("Licence en informatique"), "unclassified");
   await withApp(async (t) => {
     const c = await t.newCandidate();
     const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
@@ -696,7 +708,7 @@ test("document types are sensitive by default: every listed name is blocked with
       assert.equal(p.body.package.included.filter((x) => x.kind === "document").length, 0);
     }
     const safe = [];
-    for (const n of ["CV", "Cover letter", "Diplôme"]) safe.push(await t.seedDoc(c.candidateId, n));
+    for (const n of ["CV", "Cover letter", "Diplôme", "CV_final.pdf", "Lebenslauf", "Trade licence"]) safe.push(await t.seedDoc(c.candidateId, n));
     const ok = await t.prepare(id, t.tok.agentA, { documents: safe.map((documentId) => ({ documentId })) });
     assert.equal(ok.body.application.status, "ready_for_review");
     assert.deepEqual(ok.body.package.included.filter((x) => x.kind === "document").map((x) => x.documentId).sort((a, b) => a - b), safe);
@@ -821,4 +833,53 @@ test("cover letter: hostile job title cannot inject a claim; Arabic letter token
   const allowed = new Set([...tokensOf(JSON.stringify(PROFILE)), ...tokensOf(job.title), ...tokensOf(job.employer), ...tokensOf(coverLetter.staticText("ar"))]);
   for (const w of tokensOf(letter)) assert.ok(allowed.has(w), `ar: "${w}" has no provenance`);
   assert.ok(letter.includes("كهربائي صناعي") && letter.includes("Karim Benali") && letter.includes("2016"));
+});
+
+test("CV bytes or recorded sha256 changed after packaging, and an authorization revoked by a direct DB update, are caught", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
+    await t.approveCv(c, cv, "en");
+    const row = (await t.pool.query("SELECT storage_key, sha256 FROM js_cv_files WHERE id=$1", [cv])).rows[0];
+    const file = path.join(process.env.STORAGE_DIR, row.storage_key);
+    const mk = async (k, documents = []) => {
+      const j = await t.newJob(c, { employer: `Bytes ${k}` });
+      const id = (await t.create(c, j.matchId)).body.application.id;
+      assert.equal((await t.prepare(id, t.tok.agentA, { documents })).body.application.status, "ready_for_review");
+      return id;
+    };
+    const original = fs.readFileSync(file);
+    // Bytes swapped on disk after packaging (row unchanged) -> cv_bytes_changed, at approval and after it.
+    const a = await mk("a");
+    const b = await mk("b");
+    assert.equal((await t.approve(b, t.tok.admin)).status, 200);
+    fs.writeFileSync(file, Buffer.concat([original, Buffer.from("tampered")]));
+    const r = await t.approve(a, t.tok.admin);
+    assert.equal(r.status, 409);
+    assert.match(r.body.error, /cv_bytes_changed/);
+    const appB = (await t.pool.query("SELECT * FROM js_applications WHERE id=$1", [b])).rows[0];
+    assert.deepEqual(await documentPolicy.revalidateStoredPackage(t.pool, appB), [{ code: "cv_bytes_changed", cvFileId: cv }]);
+    fs.writeFileSync(file, original);
+    // Recorded sha256 changed on the row -> cv_changed.
+    await t.pool.query("UPDATE js_cv_files SET sha256=$2 WHERE id=$1", [cv, "0".repeat(64)]);
+    assert.deepEqual(await documentPolicy.revalidateStoredPackage(t.pool, appB), [{ code: "cv_changed", cvFileId: cv }]);
+    const r2 = await t.approve(a, t.tok.admin);
+    assert.equal(r2.status, 409);
+    assert.match(r2.body.error, /cv_changed/);
+    await t.pool.query("UPDATE js_cv_files SET sha256=$2 WHERE id=$1", [cv, row.sha256]);
+
+    // Authorization revoked directly in the DB (not via revokeSharing): approval refuses.
+    const passport = await t.seedDoc(c.candidateId, "Passport");
+    const j = await t.newJob(c, { employer: "Bytes auth" });
+    const id = (await t.create(c, j.matchId)).body.application.id;
+    const g = await t.call("POST", `/jobsearch/applications/${id}/sharing-authorizations`, { token: c.token, body: { documentId: passport, legitimateNeed: "Employer books flights" } });
+    assert.equal(g.status, 201);
+    assert.equal((await t.prepare(id, t.tok.agentA, { documents: [{ documentId: passport }] })).body.application.status, "ready_for_review");
+    await t.pool.query("UPDATE js_sharing_authorizations SET revoked_at = now() WHERE id=$1", [g.body.id]);
+    const r3 = await t.approve(id, t.tok.admin);
+    assert.equal(r3.status, 409);
+    assert.match(r3.body.error, /sensitive_unauthorized/);
+    assert.equal(await status(t, id), "ready_for_review");
+    assert.equal((await t.approve(a, t.tok.admin)).status, 200, "restored bytes + sha -> valid again");
+  });
 });

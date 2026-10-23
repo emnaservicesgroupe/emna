@@ -16,45 +16,79 @@ const SENSITIVE_TYPES = ["passport", "national_id", "police_certificate", "medic
 const MAX_REQUESTED = 20;
 const LANG_ALIASES = { en: "en", eng: "en", english: "en", anglais: "en", fr: "fr", fra: "fr", french: "fr", francais: "fr", "français": "fr", ar: "ar", ara: "ar", arabic: "ar", arabe: "ar" };
 
-/** NFKC + accent/case/punctuation folding used for document-type matching. */
+// Common Cyrillic/Greek look-alikes folded to Latin (after lower-casing) so "pаssport" (Cyrillic а) matches.
+const CONFUSABLES = {
+  "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+  "і": "i", "ї": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "һ": "h", "ԛ": "q", "ԝ": "w", "ь": "b",
+  "α": "a", "β": "b", "ε": "e", "η": "n", "ι": "i", "κ": "k", "μ": "u", "ν": "v", "ο": "o", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "ϲ": "c",
+};
+
+/**
+ * Normalisation for document-type matching: NFKC, invisible characters removed (zero-width, soft
+ * hyphen, word joiner, BOM, bidi marks), lower-case, confusables folded, accents and Arabic
+ * diacritics/tatweel removed, punctuation -> space, spaces collapsed.
+ */
 function normDocType(v) {
   return String(v || "")
     .normalize("NFKC")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[­͏؜ᅟᅠ឴឵᠎​-‏‪-‮⁠-⁯﻿]/g, "")
     .toLowerCase()
+    .replace(/[Ͱ-ϿЀ-ԯ]/g, (ch) => CONFUSABLES[ch] || ch)
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[ً-ٰٟـ]/g, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
-// Layer 1 (always wins): anything that looks like identity, civil-status, immigration, police,
-// medical, financial or reference material. Canonical type first match.
+// Layer 1 (always wins): identity, civil-status, immigration, police, medical, financial, reference,
+// photo material. Canonical type = first matching rule.
 const SENSITIVE_RULES = [
-  ["passport", /\b(?:passports?|passeports?|pasaportes?|reisepass|pasaport|paspor|passaporto|passaporte)\b|جواز/],
-  ["national_id", /\b(?:id|ids|cni|nid|cin|nic|identity|identite|identidad|ausweis|personalausweis|national|carte d identite|id card|id copy|driver|drivers|driving|permis de conduire|licence de conduire|license de conduire|ssn|sin|nas|social security|securite sociale)\b|بطاقة|هوية/],
+  ["passport", /\b(?:passports?|passeports?|pasaportes?|reisepass|pasaport|paspor|passaporto|passaporte|pasport)\b|جواز/],
+  ["national_id", /\b(?:id|ids|cni|cnie|nid|cin|nic|dni|nie|iqama|tazkira|tazkera|aadhaar|aadhar|identity|identite|identidad|ausweis|personalausweis|national|carte d identite|carte consulaire|consulaire|id card|id copy|driver|drivers|driving|fuhrerschein|permis de conduire|licence de conduire|license de conduire|ssn|sin|nas|nir|social security|securite sociale|secu|numero secu|carte vitale|vitale)\b|بطاقة|هوية|اقامة|إقامة/],
   ["police_certificate", /\b(?:police|criminal|casier|judiciaire|bulletin|b3|b 3|good conduct|bonne conduite|anthropometrique|background|record check|antecedentes|fuhrungszeugnis)\b|سوابق|حسن السيرة/],
-  ["medical", /\b(?:medic\w*|medical|medicale|health|sante|hospital\w*|vaccin\w*|covid|blood|sang|xray|x ray|radiographie|fitness to work|aptitude)\b|طبي|صحي/],
-  ["immigration", /\b(?:visas?|permits?|permis|sejour|residence|residency|resident|green card|lmia|eimt|caq|immigration|asylum|refugee)\b|تأشيرة|إقامة|اقامة|تصريح/],
-  ["civil_status", /\b(?:birth|naissance|marriage|mariage|divorce|family book|livret de famille|death|deces|nationality|nationalite|citizenship)\b|ميلاد|زواج/],
-  ["financial", /\b(?:bank|banque|rib|iban|tax|impot|impots|salary slip|payslip|fiche de paie|bulletin de salaire)\b/],
+  ["medical", /\b(?:medic\w*|medical|medicale|health|sante|hospital\w*|vaccin\w*|covid|blood|sang|xray|x ray|radiographie|fitness to work|aptitude|hiv|vih|sida|aids|pregnan\w*|grossesse|handicap\w*|disabilit\w*|invalidite|drug|drugs|mutuelle|insurance|assurance)\b|طبي|صحي/],
+  ["immigration", /\b(?:visas?|permits?|permis|sejour|residence|residency|resident|aufenthaltstitel|aufenthalt\w*|green card|lmia|eimt|caq|immigration|asylum|refugee)\b|تأشيرة|تصريح/],
+  ["civil_status", /\b(?:birth|naissance|marriage|mariage|divorce|family book|livret de famille|fiche familiale|familiale|etat civil|extrait d acte|extrait|acte|death|deces|nationality|nationalite|citizenship)\b|ميلاد|زواج/],
+  ["financial", /\b(?:bank|banque|bancaire|releve bancaire|bank statement|rib|iban|tax|impot|impots|salary slip|payslip|fiche de paie|bulletin de salaire)\b/],
+  ["identity_other", /\b(?:carte grise|vehicle registration|registration)\b/],
   ["reference", /\b(?:references?|referees?|recommendation|recommandation|attestation de travail|employer letter)\b/],
   ["photo", /\b(?:photo|photos|picture|selfie)\b|صورة/],
 ];
 
-// Layer 2: the ONLY types considered shareable without a candidate authorization (prefix match).
-const SAFE_RE = /^(?:cv|c v|resume|curriculum vitae|curriculum|cover letter|lettre de motivation|motivation letter|diploma|diplome|degree|transcript|releve de notes|training certificate|professional certificate|certificat de formation|attestation de formation|language test|ielts|toefl|tcf|tef|celpip|delf|dalf|goethe|portfolio|red seal|trade licen[cs]e|trade certificate|professional licen[cs]e)\b/;
+// Layer 2: SAFE only if EVERY token is a safe term or a harmless tail, AND the name contains a
+// recognised document-kind anchor. Anything else (including blank) is 'unclassified' (fail-closed).
+const SAFE_TERMS = new Set(["cv", "resume", "curriculum", "vitae", "lebenslauf", "cover", "letter", "lettre", "motivation", "diploma", "diplome", "degree", "master", "masters", "bachelor", "transcript", "releve", "notes", "training", "professional", "certificate", "certificat", "formation", "portfolio", "red", "seal", "trade", "language", "test", "result", "results", "ielts", "toefl", "tcf", "tef", "celpip", "delf", "dalf", "goethe"]);
+const TAIL_TERMS = new Set(["final", "draft", "version", "pdf", "docx", "doc", "copy", "scan", "scanned", "signed", "updated", "new", "old", "eng", "english", "fr", "french", "ar", "arabic", "en", "de", "es", "it", "ro", "sq", "albanian", "romanian", "italian", "spanish", "german", "and", "et", "of", "du", "la", "le", "the", "for", "pour"]);
+const ANCHOR_RE = /\b(?:cv|resume|curriculum vitae|curriculum|lebenslauf|cover letter|lettre de motivation|motivation letter|diploma|diplome|degree|master|masters|bachelor|transcript|releve de notes|portfolio|ielts|toefl|tcf|tef|celpip|delf|dalf|goethe|language test|trade licen[cs]e|professional licen[cs]e|red seal|red seal licen[cs]e|training certificate|professional certificate|certificat de formation)\b/;
+// Tiny Arabic allowlist (exact phrases), mapped to a Latin anchor before tokenising.
+const ARABIC_SAFE = [["السيرة الذاتية", "cv"], ["سيرة ذاتية", "cv"], ["شهادة جامعية", "diploma"], ["دبلوم", "diploma"]];
+
+function isSafe(t) {
+  let x = ` ${t} `;
+  for (const [ar, latin] of ARABIC_SAFE) x = x.split(` ${normDocType(ar)} `).join(` ${latin} `);
+  const toks = x.trim().split(" ").filter(Boolean);
+  if (!toks.length || !ANCHOR_RE.test(toks.join(" "))) return false;
+  return toks.every((tok, i) => {
+    if (SAFE_TERMS.has(tok) || TAIL_TERMS.has(tok) || /^v\d{1,3}$/.test(tok) || /^\d{1,4}$/.test(tok)) return true;
+    // 'licence'/'license' is safe ONLY right after trade / professional / red seal.
+    if (tok === "licence" || tok === "license") return ["trade", "professional", "seal"].includes(toks[i - 1]);
+    return false;
+  });
+}
 
 /**
- * DENY BY DEFAULT. Returns null only for a document type on the small SAFE allowlist that matches no
- * sensitive rule; otherwise a canonical sensitive type (passport, national_id, police_certificate,
- * medical, immigration, civil_status, financial, reference, photo, or 'unclassified' for anything
- * unknown/blank). Sensitive types need a candidate-granted sharing authorization.
+ * DENY BY DEFAULT. Returns null only when the whole name is made of safe document-kind terms (plus
+ * harmless tails like "final", "v2", "pdf", a language); otherwise a canonical sensitive type
+ * (passport, national_id, police_certificate, medical, immigration, civil_status, financial,
+ * identity_other, reference, photo) or 'unclassified'. Sensitive types need a candidate-granted
+ * sharing authorization.
  */
 function sensitiveType(docType) {
   const t = normDocType(docType);
   for (const [type, re] of SENSITIVE_RULES) if (re.test(t)) return type;
-  if (t && SAFE_RE.test(t)) return null;
-  return "unclassified";
+  return t && isSafe(t) ? null : "unclassified";
 }
 
 function normLang(v) {
