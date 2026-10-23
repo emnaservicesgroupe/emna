@@ -20,6 +20,7 @@ const jobsearchInboxRoutes = require("./routes/jobsearchInbox");
 const jobsearchReportsRoutes = require("./routes/jobsearchReports");
 const jobsearchDirectoryRoutes = require("./routes/jobsearchDirectory");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
+const publicRoutes = require("./routes/public");
 const { mountVita } = require("./routes/vitaStatic");
 const { trustProxySetting } = require("./utils/trustProxy");
 
@@ -36,6 +37,8 @@ app.use(cors());
 // The inbound-mail webhook needs the RAW body (HMAC over the exact bytes) and its own size cap.
 app.use("/jobsearch/inbound/mail", express.raw({ type: () => true, limit: Number(process.env.INBOUND_MAIL_MAX_BYTES) > 0 ? Number(process.env.INBOUND_MAIL_MAX_BYTES) : "1mb" }), jobsearchBodyErrorHandler);
 app.use("/jobsearch", express.json({ limit: "10mb" }), jobsearchBodyErrorHandler);
+// /public (unauthenticated website API) has a tight 16 KB cap and answers parser errors itself.
+app.use("/public", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 // Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
@@ -67,6 +70,7 @@ app.get("/", (_req, res) => {
   });
 });
 
+app.use("/public", publicRoutes);
 app.use("/auth", authRoutes);
 app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
