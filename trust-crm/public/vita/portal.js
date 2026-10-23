@@ -13,7 +13,7 @@
   var CURRENCIES = ["CAD", "EUR", "ALL", "RON", "USD", "GBP", "TND", "MAD", "DZD", "EGP"];
   var SCALARS = ["name", "email", "phone", "profession"];
   var LISTS = ["skills", "education", "certificates"];
-  var STEPS = ["upload", "review", "prefs", "consent", "status"];
+  var STEPS = ["upload", "review", "prefs", "consent", "status", "payments"];
 
   var S = {
     session: null,
@@ -164,6 +164,7 @@
       b.addEventListener("click", function () { goStep(b.getAttribute("data-step"), true); });
     });
     initUpload();
+    $("#payments-refresh").addEventListener("click", function () { loadPayments(); });
     V.$all("#status-tabs [role=tab]").forEach(function (b, i, all) {
       b.addEventListener("click", function () { selectStatusTab(b.getAttribute("data-st"), true); });
       b.addEventListener("keydown", function (e) {
@@ -202,6 +203,7 @@
     if (step === "prefs") renderPrefs();
     if (step === "consent") renderConsent();
     if (step === "status") renderStatus();
+    if (step === "payments") loadPayments();
     if (focus) $("#step-" + step).focus();
   }
 
@@ -870,6 +872,82 @@
       });
       V.setContent(box, out);
     }).catch(function (err) { V.setContent(box, errorBox(err)); });
+  }
+
+  // ================================================================ my payments (read only)
+  // GET /finance/me answers with this candidate's invoices (items, payments) and per-currency totals. Everything is
+  // shown as the decimal strings the server sent (no sums here). Staff notes, references and refund details are never
+  // sent to a candidate. The print page is fetched with the bearer token and opened from a blob: URL.
+  var FU = window.VITA_FIN_UTIL;
+  var payState = { data: null, error: null };
+
+  function money(v, cur) { return h("span", { class: "ltr-island", text: FU.formatMoney(v, cur) }); }
+  function dateText(v) { return v ? h("span", { class: "ltr-island", text: String(v).slice(0, 10) }) : "\u2014"; }
+
+  function loadPayments() {
+    var box = $("#payments-box");
+    if (!payState.data) V.setContent(box, V.loading());
+    return V.api("GET", "/finance/me")
+      .then(function (d) { payState.data = d; payState.error = null; renderPayments(); })
+      .catch(function (err) { payState.error = err; V.setContent(box, errorBox(err)); });
+  }
+
+  function openInvoicePrint(inv, button) {
+    V.busy(button, function () {
+      return V.download("/finance/me/invoices/" + inv.id + "/print?lang=" + V.getLang(), "invoice.html", {
+        open: true,
+        rewrite: function (html) { return FU.rewriteDoc(html, window.location.origin); },
+      });
+    }).catch(function () {});
+  }
+
+  function renderPayments() {
+    var d = payState.data;
+    var box = $("#payments-box");
+    if (!d) return;
+    var out = [];
+    if (!d.invoices.length) {
+      V.setContent(box, V.empty(t("fin.me.none")));
+      return;
+    }
+    out.push(h("h3", { text: t("fin.me.totals") }));
+    out.push(d.totals.length ? tableOf(
+      [t("fin.currency"), { label: t("fin.me.invoiced"), num: true }, { label: t("fin.me.paid"), num: true }, { label: t("fin.me.refunded"), num: true }, { label: t("fin.me.remaining"), num: true }],
+      d.totals.map(function (x) {
+        return h("tr", null, h("td", null, h("strong", { text: x.currency })), h("td", { class: "num" }, money(x.invoiced, x.currency)), h("td", { class: "num" }, money(x.paid, x.currency)),
+          h("td", { class: "num" }, money(x.refunded, x.currency)), h("td", { class: "num" }, money(x.remaining, x.currency)));
+      }), t("fin.me.totals")) : V.empty(t("fin.me.none")));
+    out.push(h("p", { class: "small muted", text: t("fin.me.perCurrency") }));
+    out.push(h("h3", { text: t("fin.me.invoices") }));
+    d.invoices.forEach(function (inv) {
+      var print = h("button", { type: "button", class: "btn secondary small", text: t("fin.me.print") });
+      print.addEventListener("click", function () { openInvoicePrint(inv, print); });
+      var items = tableOf([t("fin.description"), { label: t("fin.quantity"), num: true }, { label: t("fin.unitPrice"), num: true }, { label: t("fin.lineTotal"), num: true }],
+        inv.items.map(function (it) {
+          return h("tr", null, h("td", { text: it.description }), h("td", { class: "num" }, h("span", { class: "ltr-island", text: FU.formatMoney(it.quantity) })), h("td", { class: "num" }, money(it.unit_price, inv.currency)), h("td", { class: "num" }, money(it.line_total, inv.currency)));
+        }), t("fin.me.items"));
+      var pays = inv.payments.length ? tableOf([t("fin.receipt"), t("fin.date"), t("fin.method"), { label: t("fin.amount"), num: true }, t("fin.status")],
+        inv.payments.map(function (p) {
+          return h("tr", null, h("td", { text: p.receipt_number || "\u2014" }), h("td", null, dateText(p.payment_date)), h("td", { text: t("fin.method." + p.method) }), h("td", { class: "num" }, money(p.amount, inv.currency)),
+            h("td", null, h("span", { class: "badge " + (p.voided ? "bad" : "ok"), text: p.voided ? t("fin.pay.voided") : t("fin.pay.valid") })));
+        }), t("fin.me.paymentsTable")) : h("p", { class: "small muted", text: t("fin.me.noPayments") });
+      out.push(h("article", { class: "card" },
+        h("div", { class: "card-head" }, h("h3", { text: inv.number || "#" + inv.id }), h("span", { class: "badge " + FU.statusClass(inv.status), text: t("fin.status." + inv.status) }), h("span", { class: "spacer" }), print),
+        h("dl", { class: "kv" },
+          h("dt", { text: t("fin.issued") }), h("dd", null, dateText(inv.issued_at)),
+          h("dt", { text: t("fin.dueDate") }), h("dd", null, dateText(inv.due_date)),
+          h("dt", { text: t("fin.total") }), h("dd", null, money(inv.total, inv.currency)),
+          h("dt", { text: t("fin.balance") }), h("dd", null, h("strong", null, money(inv.remaining, inv.currency)))),
+        items,
+        h("h4", { text: t("fin.me.payments") }),
+        pays));
+    });
+    V.setContent(box, out);
+  }
+
+  function tableOf(headers, rows, caption) {
+    var thead = h("thead", null, h("tr", null, headers.map(function (x) { return h("th", { scope: "col", class: x.num ? "num" : null, text: x.label || x }); })));
+    return h("div", { class: "table-wrap" }, h("table", null, h("caption", { class: "sr-only", text: caption }), thead, h("tbody", null, rows)));
   }
 
   // ================================================================ boot

@@ -314,8 +314,9 @@
   }
 
   function assertPath(path) {
-    // Staff console + candidate portal (/jobsearch, /auth, /crm) and the employer / agency portals (/employer, /agency).
-    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path))) throw new Error("API path not allowed");
+    // Staff console + candidate portal (/jobsearch, /auth, /crm), the employer / agency portals (/employer, /agency) and
+    // accounting (/finance/, plus the candidate name lookup /candidates/all used by the Accounting tab).
+    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path) || /^\/finance\//.test(path) || /^\/candidates\/all(?:\?|$)/.test(path))) throw new Error("API path not allowed");
   }
 
   /** JSON API call. opts: body, noAuth, raw (return Response), headers. */
@@ -371,20 +372,27 @@
     });
   }
 
-  /** Authenticated download (e.g. CSV export) through a Blob; the token never goes into a URL. */
-  function download(path, fallbackName) {
+  /**
+   * Authenticated download (e.g. CSV export) through a Blob; the token never goes into a URL.
+   * opts.open: show the document in a new tab instead of saving it (print pages); opts.rewrite(text) may adjust the
+   * fetched HTML first (the stylesheet link of a blob: page). Resolves {name, size, rows, truncated}; `truncated` is
+   * also true when the server cut a CSV at its row cap (X-Row-Limit-Hit).
+   */
+  function download(path, fallbackName, opts) {
+    var o = opts || {};
     return api("GET", path, { raw: true }).then(function (res) {
       var cd = res.headers.get("Content-Disposition") || "";
       var m = /filename="([A-Za-z0-9._-]{1,120})"/.exec(cd);
       var name = m ? m[1] : fallbackName || "download";
-      var meta = { rows: res.headers.get("X-Export-Rows"), truncated: res.headers.get("X-Export-Truncated") === "true" };
-      return res.blob().then(function (blob) {
+      var meta = { rows: res.headers.get("X-Export-Rows"), truncated: res.headers.get("X-Export-Truncated") === "true" || res.headers.get("X-Row-Limit-Hit") === "true" };
+      var body = o.open ? res.text().then(function (text) { return new Blob([o.rewrite ? o.rewrite(text) : text], { type: "text/html;charset=utf-8" }); }) : res.blob();
+      return body.then(function (blob) {
         var url = URL.createObjectURL(blob);
-        var a = h("a", { href: url, attrs: { download: name } });
+        var a = o.open ? h("a", { href: url, attrs: { target: "_blank", rel: "noopener noreferrer" } }) : h("a", { href: url, attrs: { download: name } });
         document.body.appendChild(a);
         a.click();
         a.remove();
-        window.setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+        window.setTimeout(function () { URL.revokeObjectURL(url); }, o.open ? 120000 : 10000);
         return { name: name, size: blob.size, rows: meta.rows, truncated: meta.truncated };
       });
     });

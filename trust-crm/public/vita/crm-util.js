@@ -19,10 +19,12 @@
   // Mirror of the permissions that matter to this UI (middleware/role.js; tests compare the two).
   var PERMS = {
     SuperAdmin: ["*"],
-    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write"],
-    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write"],
+    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export"],
+    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:export"],
     Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read"],
     Agent: ["candidates:read", "candidates:write", "leads:read"],
+    // Accountant uses only the Accounting tab (finance:* and the candidate lookup); see public/vita/fin-util.js.
+    Accountant: ["candidates:read", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export"],
   };
   function can(role, perm) {
     var list = Object.prototype.hasOwnProperty.call(PERMS, role) ? PERMS[role] : [];
