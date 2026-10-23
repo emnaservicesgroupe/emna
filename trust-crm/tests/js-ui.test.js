@@ -114,6 +114,36 @@ test("i18n: keys built at runtime (statuses, labels, sources, errors...) all exi
   assert.equal(en["otp.generic"], "If an account exists you will receive a code.");
 });
 
+test("Task 20: candidate timeline reason codes have ar/en/fr labels (reason.*); the portal uses V.reasonLabel with a humanised fallback", () => {
+  const svc = require("../modules/jobsearch/applicationService");
+  const codes = svc.CANDIDATE_REASON_CODES;
+  for (const must of ["reviewer_rejected", "cancelled_by_staff", "cancelled_by_candidate", "consent_withdrawn", "account_suspended", "job_closed", "reply_interview", "reply_offer", "reply_rejected", "held"]) assert.ok(codes.includes(must), must);
+  for (const lang of ["en", "ar", "fr"]) {
+    const d = I18N.dictionaries[lang];
+    const missing = codes.filter((c) => !(`reason.${c}` in d));
+    assert.deepEqual(missing, [], `${lang}: missing reason labels`);
+  }
+  // every code candidateReasonCode() can choose itself is labelled
+  const pick = svc._internal.candidateReasonCode;
+  const rows = [
+    { event: "review_rejected", actor: "staff:1", detail: { reason: "free text" } },
+    { event: "cancelled", actor: "staff:2", detail: {} },
+    { event: "cancelled", actor: "candidate:3", detail: {} },
+    { event: "cancelled", actor: "system:auto", detail: { reason: "consent_withdrawn:submit" } },
+    { event: "cancelled", actor: "system:auto", detail: { reason: "user_suspended" } },
+    { event: "cancelled", actor: "system:auto", detail: { reason: "candidate_deleted" } },
+    { event: "cancelled", actor: "system:auto", detail: { reason: "other" } },
+    { event: "status_changed", actor: "staff:1", detail: { to: "approved", reason: "looks good" } },
+  ];
+  for (const r of rows) assert.ok(codes.includes(pick(r)), `${JSON.stringify(r)} -> ${pick(r)}`);
+  const vita = read("vita.js");
+  assert.match(vita, /function reasonLabel\(code\)/);
+  assert.match(vita, /reasonLabel: reasonLabel/);
+  const portal = read("portal.js");
+  assert.match(portal, /if \(det\.reason\) bits\.push\(V\.reasonLabel\(det\.reason\)\)/);
+  assert.ok(!portal.includes('String(det.reason).replace(/_/g, " ")'), "raw reason text no longer shown");
+});
+
 // ---------------------------------------------------------------- page content
 
 test("pages: exact bilingual section title in admin and portal; portal references the disclaimer in all languages", () => {

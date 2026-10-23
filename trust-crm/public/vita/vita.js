@@ -107,6 +107,23 @@
     return has(k) ? t(k) : String(code).replace(/_/g, " ");
   }
 
+  /**
+   * Label for a candidate timeline reason code (Task 20): reason.<code>; "prefix:code" (held:module_paused)
+   * -> "<prefix label>: <code label>"; unknown codes fall back to the humanised code (never raw underscores).
+   */
+  function reasonLabel(code) {
+    if (code === null || code === undefined || code === "") return t("common.none");
+    var c = String(code);
+    if (has("reason." + c)) return t("reason." + c);
+    var i = c.indexOf(":");
+    if (i > 0) {
+      var prefix = c.slice(0, i), rest = c.slice(i + 1);
+      var head = has("reason." + prefix) ? t("reason." + prefix) : prefix.replace(/_/g, " ");
+      return rest ? head + ": " + reasonLabel(rest) : head;
+    }
+    return c.replace(/_/g, " ");
+  }
+
   function applyI18n(root) {
     var scope = root || document;
     scope.querySelectorAll("[data-i18n]").forEach(function (el) { el.textContent = t(el.getAttribute("data-i18n")); });
@@ -655,7 +672,7 @@
   }
 
   window.VITA = {
-    t: t, tc: tc, has: has, applyI18n: applyI18n, setLang: setLang, getLang: getLang, onLang: onLang, locale: locale,
+    t: t, tc: tc, has: has, reasonLabel: reasonLabel, applyI18n: applyI18n, setLang: setLang, getLang: getLang, onLang: onLang, locale: locale,
     getSession: getSession, setSession: setSession, clearSession: clearSession, token: token,
     fmtDateTime: fmtDateTime, fmtUtc: fmtUtc, fmtDate: fmtDate, fmtNumber: fmtNumber, fmtMoney: fmtMoney, userTz: userTz, validTz: validTz, timeZones: timeZones,
     h: h, append: append, clear: clear, setContent: setContent, $: $, $all: $all, safeLink: safeLink, loading: loading, empty: empty,

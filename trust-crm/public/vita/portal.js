@@ -772,7 +772,7 @@
         var det = e.detail || {};
         var bits = [];
         if (det.from || det.to) bits.push(tc("status", det.from) + " → " + tc("status", det.to));
-        if (det.reason) bits.push(String(det.reason).replace(/_/g, " "));
+        if (det.reason) bits.push(V.reasonLabel(det.reason));
         tl.appendChild(h("li", null, h("strong", { text: tc("event", e.event) }), bits.length ? h("div", { class: "small", text: bits.join(" · ") }) : null, h("div", { class: "when", text: V.fmtDateTime(e.at) })));
       });
       out.push((d.timeline || []).length ? tl : V.empty());

@@ -812,6 +812,23 @@ const REASON_CODE = /^[a-z][a-z0-9_]{1,63}(?::[a-z][a-z0-9_]{0,63})?$/;
 const CODE_KEYS = new Set(["from", "to", "status", "code", "handoff", "kind"]);
 const BY_USER = /^(staff|candidate):\d+$/;
 
+// Every reason code the candidate timeline can show, labelled in public/vita/i18n.js as reason.<code> (ar/en/fr;
+// tests/js-ui.test.js). "prefix:code" values (held:<code>, guard:<code>) are labelled as reason.<prefix> plus the
+// label of <code>; an unknown code falls back to the humanised code in the portal.
+const CANDIDATE_REASON_CODES = [
+  // fixed codes chosen by candidateReasonCode()
+  "reviewer_rejected", "cancelled_by_staff", "cancelled_by_candidate", "consent_withdrawn", "account_suspended",
+  "candidate_deleted", "cancelled", "approved_by_reviewer",
+  // system codes written by the services (pass REASON_CODE)
+  "created_from_match", "preparation_started", "re_preparation_requested", "package_complete",
+  "auto_approved_within_admin_rules", "queued_for_submission", "candidate_authorized_sharing",
+  "candidate_revoked_sharing", "sharing_authorization_revoked", "manual_completion", "interview_proposed",
+  "job_closed", "job_expired", "reply_interview", "reply_offer", "reply_rejected", "internal_error",
+  "mail_configuration_error", "provider_refused", "duplicate", "duplicate_submission",
+  // prefixes and hold codes
+  "held", "guard", "candidate_paused", "module_paused", "source_paused", "consent_missing", "user_suspended",
+];
+
 /** The fixed, candidate-safe reason code for one timeline row (or null). */
 function candidateReasonCode(e) {
   const d = (e && e.detail) || {};
@@ -914,7 +931,8 @@ module.exports = {
   revokeSharing,
   autoApproveEligibility,
   autoApprove,
-  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION, SCHEDULER_GRANT, sendBlockers },
+  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION, SCHEDULER_GRANT, sendBlockers, candidateReasonCode },
+  CANDIDATE_REASON_CODES,
   approveCvVersion,
   listApplications,
   getApplication,
