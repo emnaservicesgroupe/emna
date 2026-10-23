@@ -8,6 +8,9 @@
 const db = () => require("../../db");
 
 const STALE_LOCK_MS = 15 * 60 * 1000;
+// A handler may return {[RESCHEDULE]: Date}: the item goes back to 'pending' at that time WITHOUT
+// consuming an attempt (e.g. a per-source rate limit: the work was not done, nothing failed).
+const RESCHEDULE = Symbol("jobsearch.queue.reschedule");
 
 function validDate(d) {
   return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
@@ -56,6 +59,14 @@ async function fail(id, err) {
   );
 }
 
+/** Back to 'pending' at `runAt`, giving back the attempt the claim counted. */
+async function reschedule(id, runAt) {
+  await db().query(
+    "UPDATE js_queue SET status = 'pending', locked_at = NULL, run_at = $2, attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'running'",
+    [id, runAt]
+  );
+}
+
 /**
  * Stale-lock sweep: items left 'running' by a crashed worker (locked_at older than olderThanMs) go
  * back to 'pending' (their claim already counted an attempt), or to 'failed' once attempts reached
@@ -96,8 +107,10 @@ async function work(handlers, { kinds, batch, n, loop = false, now, max } = {}) 
     if (!jobs.length) return processed;
     for (const job of jobs) {
       try {
-        await handlers[job.kind](job);
-        await complete(job.id);
+        const out = await handlers[job.kind](job);
+        const at = out && typeof out === "object" ? validDate(out[RESCHEDULE]) : null;
+        if (at) await reschedule(job.id, at);
+        else await complete(job.id);
       } catch (err) {
         await fail(job.id, err);
       }
@@ -107,4 +120,4 @@ async function work(handlers, { kinds, batch, n, loop = false, now, max } = {}) 
   }
 }
 
-module.exports = { enqueue, claim, complete, fail, work, reclaimStale, STALE_LOCK_MS };
+module.exports = { enqueue, claim, complete, fail, reschedule, work, reclaimStale, STALE_LOCK_MS, RESCHEDULE };

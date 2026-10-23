@@ -854,7 +854,7 @@ module.exports = {
   revokeSharing,
   autoApproveEligibility,
   autoApprove,
-  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION, SCHEDULER_GRANT },
+  _internal: { SYSTEM_GRANT, MANUAL_COMPLETION, SCHEDULER_GRANT, sendBlockers },
   approveCvVersion,
   listApplications,
   getApplication,

@@ -32,16 +32,18 @@ const ACTOR = "system:scheduler";
 const DEFAULT_SCHEDULE = "0 */6 * * *";
 const LOCK_KEY = [19028, 1];
 const STATE_KEY = "scheduler_last_tick";
+const CURSOR_KEY = "scheduler_candidate_cursor";
 const HOUR_MS = 3600 * 1000;
 const MIN_BACKOFF_HOURS = 6;
-const { SCHEDULER_GRANT } = applicationService._internal;
+const { SCHEDULER_GRANT, sendBlockers } = applicationService._internal;
 const HOLD_CODES = new Set(["candidate_paused", "module_paused", "source_paused"]);
 const CLOSABLE = ["matched", "preparing", "ready_for_review"];
 
 // ---------------------------------------------------------------- minimal 5-field cron evaluator (UTC)
 // Fields: minute hour day-of-month month day-of-week. Each: '*', a number, a range a-b, a list a,b,c,
-// and steps (*/n, a-b/n, a/n = a..max step n). Day-of-week 0-7 (0 and 7 = Sunday). When both
-// day-of-month and day-of-week are restricted (neither starts with '*'), a day matches if EITHER does.
+// and steps (*/n, a-b/n, a/n = a..max step n). Day-of-week 0-7 (0 and 7 = Sunday). Names (jan, sun) are
+// not supported (invalid). When both day-of-month and day-of-week are restricted (neither starts with
+// '*'), a day matches if EITHER does; otherwise both must match (so '*/2' steps still apply).
 const FIELDS = [
   { name: "minute", min: 0, max: 59 },
   { name: "hour", min: 0, max: 23 },
@@ -91,11 +93,12 @@ function parseCron(expr) {
 }
 
 function dayMatches(c, d) {
+  // Vixie-cron rule: a field starting with '*' ('*' or '*/n') is a "star" field. If either field is a
+  // star, BOTH sets must match (the step of '*/n' still applies); only when both are restricted lists /
+  // ranges does a day match if EITHER does.
   const domOk = c.dom.set.has(d.getUTCDate());
   const dowOk = c.dow.set.has(d.getUTCDay());
-  if (c.dom.any && c.dow.any) return true;
-  if (c.dom.any) return dowOk;
-  if (c.dow.any) return domOk;
+  if (c.dom.any || c.dow.any) return domOk && dowOk;
   return domOk || dowOk;
 }
 
@@ -149,6 +152,8 @@ function limits(over = {}) {
     candidatesPerTick: envInt("SCHEDULER_CANDIDATES_PER_TICK", 200, 1),
     retryBatch: envInt("SCHEDULER_RETRY_BATCH", 20, 0),
     backoffHours: Math.max(MIN_BACKOFF_HOURS, envInt("SCHEDULER_REFUSAL_BACKOFF_HOURS", MIN_BACKOFF_HOURS, 1)),
+    pauseBackoffHours: 1, // a pause / transient error: retried after >= 1 h
+    rematchHours: 24, // matchCandidate runs again at least this often even when nothing changed
     ...over,
   };
 }
@@ -157,8 +162,10 @@ function emptySummary(at) {
   return {
     at: at.toISOString(),
     searchesQueued: 0,
+    searchesRescheduled: 0,
     queueProcessed: 0,
     matched: 0,
+    matchSkipped: 0,
     applicationsCreated: 0,
     prepared: 0,
     autoApproved: 0,
@@ -183,18 +190,33 @@ async function moduleIsPaused() {
   return r.rowCount > 0 && r.rows[0].value && r.rows[0].value.paused === true;
 }
 
-/** ONE open task per (application, reason); returns true when a new task was opened. */
-async function openTask(ctx, app, reason, detail) {
+async function setState(key, value) {
+  await db().query("INSERT INTO js_module_state (key, value) VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", [key, JSON.stringify(value)]);
+}
+async function getState(key) {
+  const r = await db().query("SELECT value FROM js_module_state WHERE key = $1", [key]);
+  return r.rowCount ? r.rows[0].value : null;
+}
+
+/**
+ * ONE open task per (application, reason) - or per (candidate, reason) when applicationId is null, keyed
+ * by the 'candidate:<id>:' prefix of the detail (js_tasks has no candidate column). Returns true when opened.
+ */
+async function openTask(ctx, { applicationId = null, candidateId, assignee }, reason, detail) {
   const c = await db().connect();
   try {
     await c.query("BEGIN");
-    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`js-task:${app.id}:${reason}`]);
-    const open = await c.query("SELECT id FROM js_tasks WHERE application_id = $1 AND reason = $2 AND status = 'open' LIMIT 1", [app.id, reason]);
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`js-task:${applicationId || `c${candidateId}`}:${reason}`]);
+    const prefix = `candidate:${candidateId}:`;
+    const open = applicationId
+      ? await c.query("SELECT id FROM js_tasks WHERE application_id = $1 AND reason = $2 AND status = 'open' LIMIT 1", [applicationId, reason])
+      : await c.query("SELECT id FROM js_tasks WHERE application_id IS NULL AND reason = $1 AND status = 'open' AND left(detail, $3) = $2 LIMIT 1", [reason, prefix, prefix.length]);
     let created = false;
     if (!open.rowCount) {
-      const assignee = app.responsible_user_id || (await c.query("SELECT assigned_to FROM candidates WHERE id = $1", [app.candidate_id])).rows[0]?.assigned_to || null;
-      const t = (await c.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to) VALUES ($1,$2,$3,$4) RETURNING id", [app.id, reason, detail ? String(detail).slice(0, 1000) : null, assignee])).rows[0];
-      await c.query("INSERT INTO js_audit_events (actor, action, candidate_id, application_id, detail) VALUES ($1,'scheduler.task_opened',$2,$3,$4::jsonb)", [ACTOR, app.candidate_id, app.id, JSON.stringify({ taskId: t.id, reason })]);
+      const to = assignee || (await c.query("SELECT assigned_to FROM candidates WHERE id = $1", [candidateId])).rows[0]?.assigned_to || null;
+      const text = `${applicationId ? "" : prefix} ${detail || ""}`.trim().slice(0, 1000);
+      const t = (await c.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to) VALUES ($1,$2,$3,$4) RETURNING id", [applicationId, reason, text || null, to])).rows[0];
+      await c.query("INSERT INTO js_audit_events (actor, action, candidate_id, application_id, detail) VALUES ($1,'scheduler.task_opened',$2,$3,$4::jsonb)", [ACTOR, candidateId, applicationId, JSON.stringify({ taskId: t.id, reason })]);
       created = true;
     }
     await c.query("COMMIT");
@@ -207,53 +229,75 @@ async function openTask(ctx, app, reason, detail) {
     c.release();
   }
 }
+const openAppTask = (ctx, app, reason, detail) => openTask(ctx, { applicationId: app.id, candidateId: app.candidate_id, assignee: app.responsible_user_id }, reason, detail);
 
-/** Refusal back-off: the latest 'scheduler.retry_deferred' row for the application, compared to the tick clock. */
-async function deferred(ctx, applicationId) {
-  const r = (await db().query("SELECT detail FROM js_audit_events WHERE application_id = $1 AND action = 'scheduler.retry_deferred' ORDER BY id DESC LIMIT 1", [applicationId])).rows[0];
-  if (!r || !r.detail || !r.detail.retryAfter) return false;
-  return new Date(r.detail.retryAfter).getTime() > ctx.now.getTime();
+async function resolveCandidateTask(candidateId, reason) {
+  const prefix = `candidate:${candidateId}:`;
+  await db().query("UPDATE js_tasks SET status = 'resolved', resolved_at = now() WHERE application_id IS NULL AND reason = $1 AND status = 'open' AND left(detail, $3) = $2", [reason, prefix, prefix.length]);
 }
 
-async function deferRetry(ctx, app, kind, code) {
-  const retryAfter = new Date(ctx.now.getTime() + ctx.L.backoffHours * HOUR_MS).toISOString();
+/** Back-off: a 'scheduler.retry_deferred' audit row; the latest one's retryAfter is compared to the tick clock (in SQL). */
+async function deferRetry(ctx, app, kind, code, hours = ctx.L.backoffHours) {
+  const retryAfter = new Date(ctx.now.getTime() + hours * HOUR_MS).toISOString();
   await audit("scheduler.retry_deferred", app.candidate_id, app.id, { kind, code, at: ctx.now.toISOString(), retryAfter });
   ctx.summary.refusals.push({ applicationId: app.id, kind, code, retryAfter });
 }
 
 const appRow = async (id) => (await db().query("SELECT * FROM js_applications WHERE id = $1", [id])).rows[0];
 
-/** Pause blockers for a re-queue (cheap SQL, before any network re-check): candidate / module / all job sources paused. */
+// SQL fragments (applied BEFORE any LIMIT, so blocked rows never take a batch slot).
+const JOB_SOURCES = (j) => `SELECT src.paused FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = ${j}
+     UNION ALL SELECT src.paused FROM js_jobs jj JOIN js_sources src ON src.key = jj.source_primary WHERE jj.id = ${j}`;
+const ALL_SOURCES_PAUSED = (j) => `(EXISTS (SELECT 1 FROM (${JOB_SOURCES(j)}) x) AND NOT EXISTS (SELECT 1 FROM (${JOB_SOURCES(j)}) x WHERE NOT x.paused))`;
+const NOT_DEFERRED = (a, nowParam) => `COALESCE((SELECT (e.detail->>'retryAfter')::timestamptz FROM js_audit_events e
+     WHERE e.application_id = ${a}.id AND e.action = 'scheduler.retry_deferred' ORDER BY e.id DESC LIMIT 1), '-infinity'::timestamptz) <= ${nowParam}`;
+const NOT_PAUSED = (a) => `NOT EXISTS (SELECT 1 FROM js_candidate_settings cs WHERE cs.candidate_id = ${a}.candidate_id AND cs.paused) AND NOT ${ALL_SOURCES_PAUSED(`${a}.job_id`)}`;
+const LATEST_STATUS_EVENT = (a) => `(SELECT t.event FROM js_timeline t WHERE t.application_id = ${a}.id AND t.event IN ('held_paused','status_changed') ORDER BY t.id DESC LIMIT 1)`;
+const APPROVER = (a) => `(SELECT t.actor FROM js_timeline t WHERE t.application_id = ${a}.id AND t.event = 'status_changed' AND t.detail->>'to' = 'approved' ORDER BY t.id DESC LIMIT 1)`;
+
+/** Pause blockers (cheap SQL, before any network re-check): candidate / module / all job sources paused. */
 async function pauseBlockers(app) {
   const out = [];
   const s = (await db().query("SELECT paused FROM js_candidate_settings WHERE candidate_id = $1", [app.candidate_id])).rows[0];
   if (s && s.paused) out.push("candidate_paused");
   if (await moduleIsPaused()) out.push("module_paused");
-  const srcs = (await db().query(
-    `SELECT src.paused FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = $1
-     UNION ALL SELECT src.paused FROM js_jobs j JOIN js_sources src ON src.key = j.source_primary WHERE j.id = $1`,
-    [app.job_id]
-  )).rows;
-  if (srcs.length && srcs.every((r) => r.paused)) out.push("source_paused");
+  if ((await db().query(`SELECT ${ALL_SOURCES_PAUSED("$1")} AS p`, [app.job_id])).rows[0].p) out.push("source_paused");
   return out;
 }
 
-/** Search-eligible, non-deleted candidates with a confirmed profile and a consent row (bounded, cached per tick). */
+// Eligibility prefilters in SQL (before the LIMIT): not deleted, confirmed profile, latest active consent
+// has search, not paused, no suspended account. searchEligible() is still applied to every returned id.
+const ELIGIBLE_SQL = `SELECT c.id FROM candidates c JOIN js_profiles p ON p.candidate_id = c.id AND p.status = 'confirmed'
+  WHERE c.is_deleted = false
+    AND (SELECT k.scope->>'search' FROM js_consents k WHERE k.candidate_id = c.id AND k.withdrawn_at IS NULL ORDER BY k.id DESC LIMIT 1) = 'true'
+    AND NOT EXISTS (SELECT 1 FROM js_candidate_settings cs WHERE cs.candidate_id = c.id AND cs.paused)
+    AND NOT EXISTS (SELECT 1 FROM js_candidate_accounts ca JOIN users u ON u.id = ca.user_id WHERE ca.candidate_id = c.id AND u.is_active = false)`;
+
+/**
+ * This tick's candidates: a ROTATING window of at most candidatesPerTick eligible candidates starting
+ * after the cursor (js_module_state 'scheduler_candidate_cursor' = {lastId}), wrapping to the start.
+ * The cursor advances once per tick (cached in ctx), so every eligible candidate is reached.
+ */
 async function eligibleCandidates(ctx) {
   if (ctx.eligible) return ctx.eligible;
-  const rows = (await db().query(
-    `SELECT c.id FROM candidates c JOIN js_profiles p ON p.candidate_id = c.id AND p.status = 'confirmed'
-      WHERE c.is_deleted = false AND EXISTS (SELECT 1 FROM js_consents k WHERE k.candidate_id = c.id AND k.withdrawn_at IS NULL)
-      ORDER BY c.id LIMIT $1`,
-    [ctx.L.candidatesPerTick]
-  )).rows;
+  const N = ctx.L.candidatesPerTick;
+  const cur = await getState(CURSOR_KEY);
+  const lastId = cur && Number.isSafeInteger(cur.lastId) ? cur.lastId : 0;
+  const first = (await db().query(`${ELIGIBLE_SQL} AND c.id > $1 ORDER BY c.id LIMIT $2`, [lastId, N])).rows.map((r) => r.id);
+  let wrapped = [];
+  if (first.length < N && lastId > 0) wrapped = (await db().query(`${ELIGIBLE_SQL} AND c.id <= $1 ORDER BY c.id LIMIT $2`, [lastId, N - first.length])).rows.map((r) => r.id);
+  const ids = [...first, ...wrapped];
+  const next = wrapped.length ? wrapped[wrapped.length - 1] : first.length ? first[first.length - 1] : 0;
+  await setState(CURSOR_KEY, { lastId: next, at: ctx.now.toISOString() });
   const out = [];
-  for (const r of rows) {
-    if ((await consentService.searchEligible(r.id)).eligible) out.push(r.id);
+  for (const id of ids) {
+    if ((await consentService.searchEligible(id)).eligible) out.push(id);
   }
   ctx.eligible = out;
   return out;
 }
+
+const isRateLimited = (r) => r && (r.status === "rate_limited" || ((r.runs || []).length > 0 && r.runs.some((x) => x.status === "rate_limited")));
 
 function handlersFor(ctx) {
   const d = ctx.deps;
@@ -265,6 +309,12 @@ function handlersFor(ctx) {
       for (const run of (r && r.runs) || []) {
         if (run.status === "failed") ctx.summary.errors.push({ step: "search", sourceKey: run.sourceKey, candidateId: (job.payload || {}).candidateId || null, message: run.error || "search failed" });
       }
+      if ((job.payload || {}).scheduled === true && isRateLimited(r)) {
+        // Not done (per-source limit / Retry-After): back to pending for the next window, attempt not consumed.
+        const waited = (r.runs || []).some((x) => x.status === "rate_limited" && x.attempts > 0);
+        ctx.summary.searchesRescheduled += 1;
+        return { [queue.RESCHEDULE]: new Date(ctx.now.getTime() + (waited ? 5 * 60000 : 60000)) };
+      }
       return r;
     },
     submit: (job) => submitter.handleSubmit(job, submitDeps),
@@ -275,14 +325,28 @@ function handlersFor(ctx) {
 
 async function stepDueSearches(ctx) {
   await searchRunner.ensureSources();
-  const sources = (await db().query("SELECT id, key, schedule_cron, last_run_at, paused FROM js_sources WHERE paused = false ORDER BY id")).rows;
+  const sources = (await db().query("SELECT id, key, schedule_cron, last_run_at, paused, last_error FROM js_sources WHERE paused = false ORDER BY id")).rows;
   const hourBucket = Math.floor(ctx.now.getTime() / HOUR_MS);
   let candidates = null;
   for (const src of sources) {
     try {
       const adapter = registry.getAdapter(src.key);
       if (!adapter || adapter.status().status !== "connected") continue; // manual / requires_setup: never scheduled
-      if (!isDue(src.schedule_cron || DEFAULT_SCHEDULE, src.last_run_at, ctx.now)) continue;
+      let due;
+      try {
+        due = isDue(src.schedule_cron || DEFAULT_SCHEDULE, src.last_run_at, ctx.now);
+      } catch (err) {
+        // Never silently replace an admin's schedule: mark the source once and skip it.
+        const msg = `invalid schedule_cron: ${errMsg(err)}`.slice(0, 500);
+        if (src.last_error !== msg) {
+          await db().query("UPDATE js_sources SET status = 'unavailable', last_error = $2 WHERE id = $1", [src.id, msg]);
+          await audit("scheduler.invalid_schedule", null, null, { sourceKey: src.key, schedule: src.schedule_cron });
+          console.warn(`jobsearch scheduler: source ${src.key} has an invalid schedule_cron; it is not scheduled`);
+          ctx.summary.errors.push({ step: "search", sourceKey: src.key, message: msg });
+        }
+        continue;
+      }
+      if (!due) continue;
       if (!candidates) candidates = await eligibleCandidates(ctx);
       for (const candidateId of candidates) {
         const key = `sched-search:${src.key}:${candidateId}:${hourBucket}`;
@@ -303,49 +367,129 @@ async function stepDrain(ctx, kinds) {
   ctx.summary.queueProcessed += await queue.work(handlersFor(ctx), { kinds, batch: 10, loop: true, max: ctx.L.queueBatch, now: ctx.now });
 }
 
+/** What a match run depends on; matchCandidate is skipped while it is unchanged (re-run at least every rematchHours). */
+async function matchSignature(candidateId, globalSig) {
+  const r = (await db().query(
+    `SELECT (SELECT updated_at FROM js_profiles WHERE candidate_id = $1) AS p,
+            (SELECT updated_at FROM js_preferences WHERE candidate_id = $1) AS pr,
+            (SELECT updated_at FROM js_candidate_settings WHERE candidate_id = $1) AS s,
+            (SELECT max(id) FROM js_consents WHERE candidate_id = $1) AS k,
+            (SELECT max(withdrawn_at) FROM js_consents WHERE candidate_id = $1) AS kw`,
+    [candidateId]
+  )).rows[0];
+  return JSON.stringify([globalSig, r.p, r.pr, r.s, r.k, r.kw]);
+}
+
 async function stepMatch(ctx) {
   const match = ctx.deps.matchCandidate || matchService.matchCandidate;
+  const g = (await db().query(
+    `SELECT (SELECT COALESCE(max(id), 0) FROM js_jobs) AS j, (SELECT count(*) FROM js_jobs WHERE status = 'open') AS o,
+            (SELECT max(last_checked_at) FROM js_jobs) AS lc, (SELECT COALESCE(max(id), 0) FROM js_employer_confirmations) AS ec,
+            (SELECT count(*) FROM js_employer_confirmations WHERE revoked_at IS NOT NULL) AS er`
+  )).rows[0];
+  const globalSig = [g.j, g.o, g.lc, g.ec, g.er];
   for (const candidateId of await eligibleCandidates(ctx)) {
     try {
+      const sig = await matchSignature(candidateId, globalSig);
+      const key = `scheduler_match:${candidateId}`;
+      const prev = await getState(key);
+      if (prev && prev.sig === sig && ctx.now.getTime() - new Date(prev.at).getTime() < ctx.L.rematchHours * HOUR_MS) {
+        ctx.summary.matchSkipped += 1;
+        continue;
+      }
       const rows = await match(candidateId, { now: ctx.now });
       ctx.summary.matched += rows.length;
+      await setState(key, { sig, at: ctx.now.toISOString() });
     } catch (err) {
       ctx.summary.errors.push({ step: "match", candidateId, message: errMsg(err) });
     }
   }
 }
 
-/** Queue an approved application for sending (system path). Refusals: task (deduped) + back-off; pauses: skipped quietly. */
+/** Queue an approved application (system path). Refusals: deduped task + back-off; pauses: quiet 1 h back-off. */
 async function tryQueue(ctx, app, counter) {
-  if ((await pauseBlockers(app)).length) return false;
-  const r = await submitter.queueSubmission(app.id, undefined, { recheck: ctx.deps.recheck, now: ctx.now });
+  if ((await pauseBlockers(app)).length) {
+    await deferRetry(ctx, app, "queue", "paused", ctx.L.pauseBackoffHours);
+    return false;
+  }
+  let r;
+  try {
+    r = await submitter.queueSubmission(app.id, undefined, { recheck: ctx.deps.recheck, now: ctx.now });
+  } catch (err) {
+    await deferRetry(ctx, app, "queue", "error", ctx.L.pauseBackoffHours); // never a per-minute retry loop
+    throw err;
+  }
   if (r.queued) {
     if (!r.existing) ctx.summary[counter] += 1;
     await audit(counter === "heldRequeued" ? "scheduler.requeued_after_hold" : "scheduler.queued_for_send", app.candidate_id, app.id, { submissionId: r.submissionId, attempt: r.attempt, existing: r.existing === true });
     return true;
   }
-  if (HOLD_CODES.has(r.reason)) return false; // a pause appeared meanwhile: retried once it is lifted
-  await openTask(ctx, app, r.reason, `Automatic queueing refused by the pre-send guard (${r.reason}${r.handoff ? `, handoff: ${r.handoff}` : ""}). ${r.detail || ""}`.trim());
+  if (HOLD_CODES.has(r.reason)) {
+    await deferRetry(ctx, app, "queue", r.reason, ctx.L.pauseBackoffHours); // a pause appeared meanwhile
+    return false;
+  }
+  await openAppTask(ctx, app, r.reason, `Automatic queueing refused by the pre-send guard (${r.reason}${r.handoff ? `, handoff: ${r.handoff}` : ""}). ${r.detail || ""}`.trim());
   await deferRetry(ctx, app, "queue", r.reason);
   return false;
 }
 
-/** automatic mode: auto-approve ONLY when eligible, then queue; otherwise ready_for_review + one task + back-off. */
+/**
+ * automatic mode: nothing is approved while a pause applies (no stranded 'approved' rows consuming caps);
+ * auto-approve ONLY when eligible, then queue; otherwise ready_for_review + one task + back-off.
+ */
 async function autoFlow(ctx, app) {
-  const elig = await applicationService.autoApproveEligibility(app.id);
-  let reasons = elig.reasons;
-  if (elig.allowed) {
-    const r = await applicationService.autoApprove(app.id);
-    if (r.approved) {
-      ctx.summary.autoApproved += 1;
-      await audit("scheduler.auto_approved", app.candidate_id, app.id, {});
-      return tryQueue(ctx, await appRow(app.id), "queuedForSend");
-    }
-    reasons = r.reasons;
+  const pauses = await pauseBlockers(app);
+  if (pauses.length) {
+    await deferRetry(ctx, app, "auto_approve", pauses.join(","), ctx.L.pauseBackoffHours);
+    return false;
   }
-  await openTask(ctx, app, "needs_human_approval", `Automatic approval not allowed: ${reasons.join(", ")}`);
+  let approved = false;
+  let reasons;
+  try {
+    const elig = await applicationService.autoApproveEligibility(app.id);
+    reasons = elig.reasons;
+    if (elig.allowed) {
+      const r = await applicationService.autoApprove(app.id);
+      approved = r.approved;
+      reasons = r.reasons;
+    }
+  } catch (err) {
+    await deferRetry(ctx, app, "auto_approve", "error", ctx.L.pauseBackoffHours);
+    throw err;
+  }
+  if (approved) {
+    ctx.summary.autoApproved += 1;
+    await audit("scheduler.auto_approved", app.candidate_id, app.id, {});
+    return tryQueue(ctx, await appRow(app.id), "queuedForSend");
+  }
+  await openAppTask(ctx, app, "needs_human_approval", `Automatic approval not allowed: ${reasons.join(", ")}`);
   await deferRetry(ctx, app, "auto_approve", reasons.join(",").slice(0, 300));
   return false;
+}
+
+/** Prepare a scheduler-created application; a refusal leaves it 'matched' with a >= 6 h back-off. */
+async function prepareAndContinue(ctx, mode, app) {
+  const prepare = ctx.deps.prepareApplication || applicationService.prepareApplication;
+  let p;
+  try {
+    p = await prepare({ id: app.id, actor: ACTOR, [SCHEDULER_GRANT]: true });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      await deferRetry(ctx, app, "prepare", String(err.status));
+      ctx.summary.refusals[ctx.summary.refusals.length - 1].message = errMsg(err);
+      return;
+    }
+    await deferRetry(ctx, app, "prepare", "error", ctx.L.pauseBackoffHours);
+    throw err;
+  }
+  const row = await appRow(app.id);
+  if (p.application.status !== "ready_for_review") {
+    await openAppTask(ctx, row, "preparation_blocked", `Automatic preparation left the application at ${p.application.status}: ${(p.package.blocked || []).map((b) => b.reason).join(", ")}`);
+    return;
+  }
+  ctx.summary.prepared += 1;
+  await audit("scheduler.prepared", row.candidate_id, row.id, { status: row.status });
+  if (mode === "automatic") await autoFlow(ctx, row); // prepare_for_approval: STOP at ready_for_review
 }
 
 async function processNewMatch(ctx, cand, matchId) {
@@ -353,15 +497,7 @@ async function processNewMatch(ctx, cand, matchId) {
   if (!created.created) return;
   ctx.summary.applicationsCreated += 1;
   await audit("scheduler.application_created", cand.candidate_id, created.id, { matchId, mode: cand.mode });
-  const p = await applicationService.prepareApplication({ id: created.id, actor: ACTOR, [SCHEDULER_GRANT]: true });
-  const app = await appRow(created.id);
-  if (p.application.status !== "ready_for_review") {
-    await openTask(ctx, app, "preparation_blocked", `Automatic preparation left the application at ${p.application.status}: ${(p.package.blocked || []).map((b) => b.reason).join(", ")}`);
-    return;
-  }
-  ctx.summary.prepared += 1;
-  await audit("scheduler.prepared", cand.candidate_id, app.id, { status: app.status });
-  if (cand.mode === "automatic") await autoFlow(ctx, app); // prepare_for_approval: STOP at ready_for_review
+  await prepareAndContinue(ctx, cand.mode, await appRow(created.id));
 }
 
 async function stepOrchestrate(ctx) {
@@ -374,6 +510,14 @@ async function stepOrchestrate(ctx) {
   for (const cand of cands) {
     const cid = cand.candidate_id;
     try {
+      // No application is created while it could not be prepared: no prepare consent -> one candidate task.
+      const blockers = await sendBlockers(db(), cid, "prepare");
+      if (blockers.includes("no_prepare_consent")) {
+        await openTask(ctx, { candidateId: cid }, "prepare_consent_missing", `Mode ${cand.mode} but no active 'prepare' consent: matches are kept, no application is created until the candidate consents.`);
+        continue;
+      }
+      if (blockers.length) continue; // paused / suspended / deleted: quietly skipped
+      await resolveCandidateTask(cid, "prepare_consent_missing");
       const matches = (await db().query(
         `SELECT m.id FROM js_matches m JOIN js_jobs j ON j.id = m.job_id
           WHERE m.candidate_id = $1 AND m.score >= $2 AND j.status = 'open'
@@ -385,11 +529,11 @@ async function stepOrchestrate(ctx) {
         try {
           await processNewMatch(ctx, cand, m.id);
         } catch (err) {
-          if (err instanceof HttpError) ctx.summary.refusals.push({ candidateId: cid, matchId: m.id, kind: "create_or_prepare", code: err.status, message: errMsg(err) });
+          if (err instanceof HttpError) ctx.summary.refusals.push({ candidateId: cid, matchId: m.id, kind: "create", code: err.status, message: errMsg(err) });
           else ctx.summary.errors.push({ step: "orchestrate", candidateId: cid, matchId: m.id, message: errMsg(err) });
         }
       }
-      if (cand.mode === "automatic") await retryAutomatic(ctx, cid);
+      await retryDeferred(ctx, cand);
     } catch (err) {
       ctx.summary.errors.push({ step: "orchestrate", candidateId: cid, message: errMsg(err) });
     }
@@ -397,26 +541,29 @@ async function stepOrchestrate(ctx) {
 }
 
 /**
- * Earlier automatic applications whose back-off expired: ready_for_review -> auto-approval attempt again;
- * system-approved ('system:auto') but not queued (refused queue) -> queue again. Pause holds are step 6.
+ * Earlier scheduler work whose back-off expired (filtered in SQL before the LIMIT, as are pauses):
+ *  - scheduler-created applications still 'matched' (preparation refused) -> prepare again;
+ *  - automatic: scheduler-deferred 'ready_for_review' -> auto-approval attempt again;
+ *  - automatic: approved by 'system:auto', not held, without a queued submission -> queue again
+ *    (whether or not a deferral row exists; its own back-off applies once one does).
+ * Pause holds are step 6.
  */
-async function retryAutomatic(ctx, candidateId) {
+async function retryDeferred(ctx, cand) {
   const rows = (await db().query(
     `SELECT a.* FROM js_applications a
-      WHERE a.candidate_id = $1 AND (
-        a.status = 'ready_for_review'
-        OR (a.status = 'approved'
-            AND (SELECT t.actor FROM js_timeline t WHERE t.application_id = a.id AND t.event = 'status_changed' AND t.detail->>'to' = 'approved' ORDER BY t.id DESC LIMIT 1) = 'system:auto'
-            AND COALESCE((SELECT t.event FROM js_timeline t WHERE t.application_id = a.id AND t.event IN ('held_paused','status_changed') ORDER BY t.id DESC LIMIT 1), '') <> 'held_paused'
+      WHERE a.candidate_id = $1 AND ${NOT_DEFERRED("a", "$2")} AND ${NOT_PAUSED("a")} AND (
+        (a.status = 'matched' AND EXISTS (SELECT 1 FROM js_audit_events e WHERE e.application_id = a.id AND e.action = 'scheduler.application_created'))
+        OR ($3 = 'automatic' AND a.status = 'ready_for_review' AND EXISTS (SELECT 1 FROM js_audit_events e WHERE e.application_id = a.id AND e.action = 'scheduler.retry_deferred'))
+        OR ($3 = 'automatic' AND a.status = 'approved' AND ${APPROVER("a")} = 'system:auto'
+            AND COALESCE(${LATEST_STATUS_EVENT("a")}, '') <> 'held_paused'
             AND NOT EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id AND s.status = 'queued')))
-        AND EXISTS (SELECT 1 FROM js_audit_events e WHERE e.application_id = a.id AND e.action = 'scheduler.retry_deferred')
-      ORDER BY a.id LIMIT $2`,
-    [candidateId, ctx.L.retryBatch]
+      ORDER BY a.id LIMIT $4`,
+    [cand.candidate_id, ctx.now, cand.mode, ctx.L.retryBatch]
   )).rows;
   for (const app of rows) {
     try {
-      if (await deferred(ctx, app.id)) continue;
-      if (app.status === "ready_for_review") await autoFlow(ctx, app);
+      if (app.status === "matched") await prepareAndContinue(ctx, cand.mode, app);
+      else if (app.status === "ready_for_review") await autoFlow(ctx, app);
       else await tryQueue(ctx, app, "queuedForSend");
     } catch (err) {
       ctx.summary.errors.push({ step: "orchestrate", applicationId: app.id, message: errMsg(err) });
@@ -428,14 +575,13 @@ async function retryAutomatic(ctx, candidateId) {
 async function stepRequeueHeld(ctx) {
   const rows = (await db().query(
     `SELECT a.* FROM js_applications a JOIN candidates c ON c.id = a.candidate_id AND c.is_deleted = false
-      WHERE a.status = 'approved'
-        AND (SELECT t.event FROM js_timeline t WHERE t.application_id = a.id AND t.event IN ('held_paused','status_changed') ORDER BY t.id DESC LIMIT 1) = 'held_paused'
-      ORDER BY a.id LIMIT $1`,
-    [ctx.L.retryBatch]
+      WHERE a.status = 'approved' AND ${LATEST_STATUS_EVENT("a")} = 'held_paused'
+        AND ${NOT_DEFERRED("a", "$1")} AND ${NOT_PAUSED("a")}
+      ORDER BY a.id LIMIT $2`,
+    [ctx.now, ctx.L.retryBatch]
   )).rows;
   for (const app of rows) {
     try {
-      if (await deferred(ctx, app.id)) continue;
       await tryQueue(ctx, app, "heldRequeued");
     } catch (err) {
       ctx.summary.errors.push({ step: "requeue_held", applicationId: app.id, message: errMsg(err) });
@@ -443,36 +589,61 @@ async function stepRequeueHeld(ctx) {
   }
 }
 
-/** Step 7: re-check stale open jobs; closed/expired ones close their not-yet-approved applications. */
+/**
+ * Step 7: re-check stale open jobs, skipping jobs whose every source is paused and never asking a paused
+ * source (its sightings read as "unknown", so they cannot close the job). Each source's rate_limit_per_min
+ * bounds its re-checks per tick. Closed/expired jobs close their not-yet-sent applications (matched,
+ * preparing, ready_for_review, and approved without a queued submission - incl. pause holds).
+ */
 async function stepExpiry(ctx) {
   if (!ctx.L.recheckBatch) return;
   const recheck = ctx.deps.recheckJob || jobStore.recheckJob;
   const cutoff = new Date(ctx.now.getTime() - ctx.L.recheckHours * HOUR_MS);
+  const srcRows = (await db().query("SELECT key, paused, rate_limit_per_min FROM js_sources")).rows;
+  const paused = new Set(srcRows.filter((s) => s.paused).map((s) => s.key));
+  const limitOf = new Map(srcRows.map((s) => [s.key, s.rate_limit_per_min]));
+  const used = new Map();
+  const filtered = { getAdapter: (key) => (paused.has(key) ? null : registry.getAdapter(key)), adapters: registry.adapters, keys: registry.keys };
   const jobs = (await db().query(
-    "SELECT id FROM js_jobs WHERE status = 'open' AND (last_checked_at IS NULL OR last_checked_at < $1) ORDER BY last_checked_at NULLS FIRST, id LIMIT $2",
-    [cutoff, ctx.L.recheckBatch]
+    `SELECT j.id FROM js_jobs j WHERE j.status = 'open' AND (j.last_checked_at IS NULL OR j.last_checked_at < $1) AND NOT ${ALL_SOURCES_PAUSED("j.id")}
+      ORDER BY j.last_checked_at NULLS FIRST, j.id LIMIT $2`,
+    [cutoff, ctx.L.recheckBatch * 5]
   )).rows;
+  let done = 0;
   for (const { id } of jobs) {
+    if (done >= ctx.L.recheckBatch) break;
     try {
-      const st = await recheck(id, { now: ctx.now });
+      const keys = [...new Set((await db().query(
+        "SELECT src.key FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = $1 AND NOT src.paused", [id]
+      )).rows.map((r) => r.key))];
+      if (keys.some((k) => limitOf.get(k) && (used.get(k) || 0) >= limitOf.get(k))) continue; // that source's budget is spent this tick
+      for (const k of keys) used.set(k, (used.get(k) || 0) + 1);
+      const st = await recheck(id, { now: ctx.now, registry: filtered });
       const status = typeof st === "string" ? st : st && st.status;
+      done += 1;
       ctx.summary.jobsRechecked += 1;
       if (status !== "closed" && status !== "expired") continue;
-      const apps = (await db().query("SELECT id, candidate_id FROM js_applications WHERE job_id = $1 AND status = ANY($2::text[]) ORDER BY id", [id, CLOSABLE])).rows;
+      const apps = (await db().query(
+        `SELECT a.id FROM js_applications a WHERE a.job_id = $1 AND (a.status = ANY($2::text[])
+           OR (a.status = 'approved' AND NOT EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id AND s.status = 'queued')))
+         ORDER BY a.id`,
+        [id, CLOSABLE]
+      )).rows;
       for (const a of apps) {
         try {
-          await applicationService.transition(a.id, "closed", ACTOR, { reason: `job_${status}`, expectFrom: CLOSABLE });
+          await applicationService.transition(a.id, "closed", ACTOR, { reason: `job_${status}`, expectFrom: [...CLOSABLE, "approved"] });
           ctx.summary.applicationsClosed += 1;
         } catch (err) {
           if (!(err instanceof HttpError)) throw err; // moved on concurrently: nothing to close
         }
       }
-      // approved/queued applications are stopped by the pre-send guard (job_closed) at send time.
+      // queued applications are stopped by the pre-send guard (job_closed) at send time.
     } catch (err) {
       ctx.summary.errors.push({ step: "expiry", jobId: id, message: errMsg(err) });
     }
   }
 }
+
 
 async function step(ctx, name, fn) {
   try {
@@ -501,7 +672,7 @@ let ticking = false;
 
 /**
  * @param {Date} [now] tick clock (searches, queue claims, back-off, job re-check cut-off)
- * @param {{deps?: {sleep?, fetch?, lookup?, recheck?, recheckJob?, matchCandidate?, handleSearchJob?, mailSend?, limits?: object}}} [opts]
+ * @param {{deps?: {sleep?, fetch?, lookup?, recheck?, recheckJob?, matchCandidate?, prepareApplication?, handleSearchJob?, mailSend?, onStep?, limits?: object}}} [opts]
  * @returns {Promise<object>} TickSummary, or {skipped: 'module_paused'|'already_running'}
  */
 async function tick(now = new Date(), { deps = {} } = {}) {

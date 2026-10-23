@@ -500,7 +500,7 @@ test("a failing step (search adapter throws; matching throws for one candidate) 
   const t0 = T0();
   await tick(t0); // jobs stored
   const b = await candidate(w, { mode: "prepare_for_approval" });
-  await q("UPDATE js_candidate_settings SET mode='prepare_for_approval' WHERE candidate_id=$1", [a.id]);
+  await q("UPDATE js_candidate_settings SET mode='prepare_for_approval', updated_at=now() WHERE candidate_id=$1", [a.id]);
   fixture._set({ failWith: "feed exploded" });
   const matchService = require("../modules/jobsearch/matchService");
   const s = await tick(new Date(t0.getTime() + 7 * HOUR), {
@@ -579,6 +579,252 @@ test("expiry: a stale open job that is gone from its source closes its not-yet-a
 });
 
 // ---------------------------------------------------------------- admin endpoints + startup
+
+// ---------------------------------------------------------------- fix round 1
+
+test("cron (I1): '*/n' in day-of-month / day-of-week keeps its step (star field => both must match)", () => {
+  const at = (iso) => new Date(iso);
+  assert.equal(scheduler.cronMatches("0 0 */2 * *", at("2026-10-21T00:00:00Z")), true);
+  assert.equal(scheduler.cronMatches("0 0 */2 * *", at("2026-10-22T00:00:00Z")), false);
+  assert.equal(scheduler.previousFire("0 0 */2 * *", at("2026-10-22T12:00:00Z")).toISOString(), "2026-10-21T00:00:00.000Z");
+  // Sun, Tue, Thu, Sat
+  assert.equal(scheduler.cronMatches("0 0 * * */2", at("2026-10-23T00:00:00Z")), false, "Friday");
+  assert.equal(scheduler.cronMatches("0 0 * * */2", at("2026-10-22T00:00:00Z")), true, "Thursday");
+  assert.equal(scheduler.cronMatches("0 0 * * */2", at("2026-10-25T00:00:00Z")), true, "Sunday");
+  // dom */7 (1,8,15,22,29) AND Monday
+  assert.equal(scheduler.cronMatches("0 0 */7 * 1", at("2026-06-01T00:00:00Z")), true, "Monday the 1st");
+  assert.equal(scheduler.cronMatches("0 0 */7 * 1", at("2026-10-26T00:00:00Z")), false, "Monday the 26th");
+  assert.equal(scheduler.cronMatches("0 0 */7 * 1", at("2026-10-22T00:00:00Z")), false, "Thursday the 22nd");
+  assert.equal(scheduler.previousFire("0 0 */31 * *", at("2026-10-23T15:00:00Z")).toISOString(), "2026-10-01T00:00:00.000Z");
+});
+
+async function bareCandidates(w, count, { consent = true } = {}) {
+  const ids = (await q(
+    `INSERT INTO candidates (full_name, passport_number, assigned_to) SELECT 'Bulk ' || g, 'PP-BULK-' || g || '-' || $2, $1 FROM generate_series(1, $3) g RETURNING id`,
+    [w.managerId, n++, count]
+  )).rows.map((r) => r.id);
+  await q("INSERT INTO js_profiles (candidate_id, confirmed, status, confirmed_at) SELECT unnest($1::int[]), $2::jsonb, 'confirmed', now()", [ids, JSON.stringify(PROFILE)]);
+  if (consent) await q(`INSERT INTO js_consents (candidate_id, scope, version) SELECT unnest($1::int[]), '{"search": true}'::jsonb, 'v1'`, [ids]);
+  return ids;
+}
+
+test("rotation (I2): 450 eligible candidates, 200 per tick -> three ticks cover all; ineligible ones take no slot; the cursor wraps", async () => {
+  const w = await world();
+  const ineligibleA = await bareCandidates(w, 60, { consent: false });
+  const eligibleA = await bareCandidates(w, 225);
+  const paused = await bareCandidates(w, 40);
+  await q("INSERT INTO js_candidate_settings (candidate_id, paused) SELECT unnest($1::int[]), true", [paused]);
+  const eligibleB = await bareCandidates(w, 225);
+  const all = [...eligibleA, ...eligibleB];
+  await require("../modules/jobsearch/searchRunner").ensureSources();
+  await q("UPDATE js_sources SET paused=true"); // this test is about the candidate window only
+  const seen = [];
+  const spy = async (cid) => { seen.push(cid); return []; };
+  const t0 = T0();
+  const limits = { candidatesPerTick: 200, rematchHours: 0 }; // re-match every tick so the spy sees each window
+  for (let i = 0; i < 3; i += 1) await tick(new Date(t0.getTime() + i * 60000), { matchCandidate: spy, limits });
+  const perTick = [seen.slice(0, 200), seen.slice(200, 400), seen.slice(400)];
+  assert.equal(perTick[0].length, 200, "ineligible / paused candidates did not consume slots");
+  assert.equal(perTick[1].length, 200);
+  assert.equal(perTick[2].length, 200, "third tick: the last 50 + 150 after wrapping");
+  const byNum = (x, y) => x - y;
+  assert.deepEqual([...new Set(seen)].sort(byNum), [...all].sort(byNum), "every eligible candidate covered in three ticks");
+  assert.ok(!seen.some((id) => ineligibleA.includes(id) || paused.includes(id)));
+  assert.deepEqual(perTick[2].slice(50, 52), all.slice(0, 2), "wrapped to the start");
+  assert.equal((await q("SELECT value FROM js_module_state WHERE key='scheduler_candidate_cursor'")).rows[0].value.lastId, all[149]);
+});
+
+test("rate-limited scheduled search (I2) is rescheduled to the next window without consuming an attempt", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  await candidate(w);
+  await candidate(w);
+  await require("../modules/jobsearch/searchRunner").ensureSources();
+  await q("UPDATE js_sources SET rate_limit_per_min=1 WHERE key='test_fixture'");
+  const t0 = T0();
+  const s1 = await tick(t0);
+  assert.equal(s1.searchesQueued, 2);
+  assert.equal(s1.searchesRescheduled, 1);
+  const pending = (await q("SELECT * FROM js_queue WHERE kind='search' AND status='pending'")).rows;
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].attempts, 0, "attempt not consumed");
+  assert.equal(new Date(pending[0].run_at).getTime(), t0.getTime() + 60000);
+  await tick(new Date(t0.getTime() + 2 * 60000));
+  assert.equal(await count("SELECT count(*) AS n FROM js_queue WHERE kind='search' AND status='done'"), 2);
+  assert.equal(fixture._state.calls, 2, "each candidate searched once");
+});
+
+test("stranded approvals (I3a): a job whose only source is paused is NOT auto-approved (stays ready_for_review, caps untouched); after resume it is sent exactly once", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "automatic" });
+  const t0 = T0();
+  const pauseSrc = (on) => q("UPDATE js_sources SET paused=$1 WHERE key='test_fixture'", [on]);
+  await tick(t0, { onStep: async (name) => { if (name === "orchestrate") await pauseSrc(true); } });
+  let [a] = await appsOf(c.id);
+  assert.equal(a.status, "ready_for_review");
+  assert.equal(await count("SELECT count(*) AS n FROM js_applications WHERE status IN ('approved','queued')"), 0, "nothing stranded in approved (caps not consumed)");
+  assert.equal((await tasksOf(a.id)).length, 0, "a pause opens no task");
+  await tick(new Date(t0.getTime() + 30 * 60000));
+  assert.equal((await appsOf(c.id))[0].status, "ready_for_review");
+  await pauseSrc(false);
+  const s = await tick(new Date(t0.getTime() + 61 * 60000));
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.autoApproved, 1);
+  [a] = await appsOf(c.id);
+  assert.equal(a.status, "sent");
+  await tick(new Date(t0.getTime() + 3 * HOUR));
+  assert.equal(await mails(), 1);
+});
+
+test("stranded approvals (I3c): an application approved by system:auto with no submission (and no deferral) is queued by the next tick", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "prepare_for_approval", automaticRules: true });
+  const t0 = T0();
+  await tick(t0);
+  const [a] = await appsOf(c.id);
+  assert.equal(a.status, "ready_for_review");
+  await q("UPDATE js_candidate_settings SET mode='automatic', updated_at=now() WHERE candidate_id=$1", [c.id]);
+  const r = await require("../modules/jobsearch/applicationService").autoApprove(a.id); // e.g. a crash before queueing
+  assert.equal(r.approved, true, JSON.stringify(r.reasons));
+  const s = await tick(new Date(t0.getTime() + 60000));
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.queuedForSend, 1);
+  assert.equal((await appsOf(c.id))[0].status, "sent");
+  assert.equal(await mails(), 1);
+});
+
+test("prepare consent (I4): search-only consent -> no application rows, ONE candidate task; granting prepare consent -> next tick prepares", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp), feedJob(emp, { title: "Electrician Maintenance" })] });
+  const c = await candidate(w, { mode: "prepare_for_approval", consent: { search: true } });
+  const t0 = T0();
+  await tick(t0);
+  await tick(new Date(t0.getTime() + HOUR));
+  assert.ok((await count("SELECT count(*) AS n FROM js_matches WHERE candidate_id=$1", [c.id])) >= 2);
+  assert.equal((await appsOf(c.id)).length, 0, "no 'matched' rows created");
+  const tasks = (await q("SELECT * FROM js_tasks WHERE reason='prepare_consent_missing'")).rows;
+  assert.equal(tasks.length, 1, "one task per candidate, not per match");
+  assert.equal(tasks[0].application_id, null);
+  assert.ok(tasks[0].detail.startsWith(`candidate:${c.id}:`));
+  assert.equal(tasks[0].assigned_to, w.managerId);
+  await consentService.grantConsent({ user: w.admin, candidateId: c.id, scope: { search: true, prepare: true, submit: false }, version: "v2", recordedBy: "Front desk", evidenceNote: "Signed form" });
+  const s = await tick(new Date(t0.getTime() + 2 * HOUR));
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.prepared, 2);
+  assert.ok((await appsOf(c.id)).every((a) => a.status === "ready_for_review"));
+  assert.equal((await q("SELECT status FROM js_tasks WHERE id=$1", [tasks[0].id])).rows[0].status, "resolved");
+});
+
+test("refused preparation (I4): a scheduler-created application left 'matched' is retried after the >= 6 h back-off and prepared once", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "prepare_for_approval" });
+  const { HttpError } = require("../modules/jobsearch/httpError");
+  const t0 = T0();
+  const s1 = await tick(t0, { prepareApplication: async () => { throw new HttpError(409, "transient refusal"); } });
+  assert.equal(s1.applicationsCreated, 1);
+  assert.equal((await appsOf(c.id))[0].status, "matched");
+  assert.equal((await tick(new Date(t0.getTime() + HOUR))).prepared, 0, "inside the back-off");
+  assert.equal((await appsOf(c.id))[0].status, "matched");
+  const s3 = await tick(new Date(t0.getTime() + 6 * HOUR + 60000));
+  assert.equal(s3.prepared, 1);
+  assert.equal((await appsOf(c.id))[0].status, "ready_for_review");
+  assert.equal(await mails(), 0);
+});
+
+test("head-of-line (I5): 30 held applications behind a still-paused source do not block another candidate's lifted hold", async () => {
+  const w = await world();
+  const blocked = (await q("INSERT INTO candidates (full_name, passport_number) VALUES ('Blocked','PP-HOL') RETURNING id")).rows[0].id;
+  const srcId = (await q("INSERT INTO js_sources (key, adapter, status, paused) VALUES ('paused_src','partner_feed','connected',true) RETURNING id")).rows[0].id;
+  for (let i = 0; i < 30; i += 1) {
+    const jobId = (await q("INSERT INTO js_jobs (title, country, source_primary, dedupe_key, last_checked_at) VALUES ('Welder','Canada','paused_src',$1,now()) RETURNING id", [`dk-hol-${i}`])).rows[0].id;
+    await q("INSERT INTO js_job_sightings (job_id, source_id, source_job_id) VALUES ($1,$2,$3)", [jobId, srcId, `hol-${i}`]);
+    const appId = (await q("INSERT INTO js_applications (candidate_id, job_id, status) VALUES ($1,$2,'approved') RETURNING id", [blocked, jobId])).rows[0].id;
+    await q("INSERT INTO js_timeline (application_id, actor, event, detail) VALUES ($1,'system:submitter','held_paused','{}'::jsonb)", [appId]);
+  }
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "automatic" });
+  const t0 = T0();
+  await tick(t0, { onStep: async (name) => { if (name === "send") await settingsService.pauseCandidate(c.id, true); } });
+  assert.equal((await appsOf(c.id))[0].status, "approved");
+  await settingsService.pauseCandidate(c.id, false);
+  const s = await tick(new Date(t0.getTime() + 60000), { limits: { retryBatch: 20 } });
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.heldRequeued, 1, "re-queued in the same tick despite 30 older blocked rows");
+  assert.equal(await mails(), 1);
+});
+
+test("expiry (I6): jobs whose every source is paused are not re-checked; per-source rate limits bound re-checks per tick", async () => {
+  const w = await world();
+  const mk = async (key, paused, rl) => (await q("INSERT INTO js_sources (key, adapter, status, paused, rate_limit_per_min) VALUES ($1,'partner_feed','connected',$2,$3) RETURNING id", [key, paused, rl])).rows[0].id;
+  const pausedSrc = await mk("p_src", true, null);
+  const rlSrc = await mk("rl_src", false, 2);
+  const addJob = async (src, key, i) => {
+    const id = (await q("INSERT INTO js_jobs (title, country, source_primary, dedupe_key) VALUES ('Welder','Canada',$1,$2) RETURNING id", [key, `dk-exp-${key}-${i}`])).rows[0].id;
+    await q("INSERT INTO js_job_sightings (job_id, source_id, source_job_id) VALUES ($1,$2,$3)", [id, src, `${key}-${i}`]);
+    return id;
+  };
+  const pausedJob = await addJob(pausedSrc, "p_src", 0);
+  const rlJobs = [];
+  for (let i = 0; i < 4; i += 1) rlJobs.push(await addJob(rlSrc, "rl_src", i));
+  const calls = [];
+  const recheckJob = async (id, opts) => {
+    calls.push(id);
+    assert.equal(opts.registry.getAdapter("p_src"), null, "a paused source is never asked");
+    return "open";
+  };
+  const s = await tick(T0(), { recheckJob });
+  assert.ok(!calls.includes(pausedJob));
+  assert.equal(calls.length, 2, "rate_limit_per_min=2 for rl_src");
+  assert.equal(s.jobsRechecked, 2);
+});
+
+test("minor: invalid schedule_cron marks the source unavailable once (never silently replaced); unchanged candidates are not re-matched", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  await candidate(w, { mode: "search_only" });
+  await require("../modules/jobsearch/searchRunner").ensureSources();
+  await q("UPDATE js_sources SET schedule_cron='0 0 ? * *' WHERE key='test_fixture'");
+  const t0 = T0();
+  const s1 = await tick(t0);
+  assert.equal(s1.errors.filter((e) => /invalid schedule_cron/.test(e.message)).length, 1);
+  const src = (await q("SELECT status, last_error, schedule_cron FROM js_sources WHERE key='test_fixture'")).rows[0];
+  assert.equal(src.status, "unavailable");
+  assert.match(src.last_error, /invalid schedule_cron/);
+  assert.equal(src.schedule_cron, "0 0 ? * *", "schedule left as the admin wrote it");
+  assert.equal(fixture._state.calls, 0);
+  const s2 = await tick(new Date(t0.getTime() + 60000));
+  assert.equal(s2.errors.length, 0, "reported once");
+  assert.equal(s2.matched, 0);
+  assert.equal(s2.matchSkipped, 1, "nothing changed: matchCandidate not re-run");
+});
+
+test("minor: a held 'approved' application whose job closed is closed by the expiry step", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "automatic" });
+  const t0 = T0();
+  await tick(t0, { onStep: async (name) => { if (name === "send") await settingsService.pauseCandidate(c.id, true); } });
+  assert.equal((await appsOf(c.id))[0].status, "approved");
+  fixture._set({ jobs: [] });
+  const s = await tick(new Date(t0.getTime() + 25 * HOUR));
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.applicationsClosed, 1);
+  assert.equal((await appsOf(c.id))[0].status, "closed");
+  await settingsService.pauseCandidate(c.id, false);
+  await tick(new Date(t0.getTime() + 26 * HOUR));
+  assert.equal(await mails(), 0);
+});
 
 test("admin endpoints: POST /jobsearch/scheduler/tick (admin only) and GET /jobsearch/scheduler/status", async () => {
   const w = await world();
