@@ -11,6 +11,7 @@ const auditRoutes = require("./routes/audit");
 const jobsearchAuthRoutes = require("./routes/jobsearchAuth");
 const jobsearchProfileRoutes = require("./routes/jobsearchProfile");
 const jobsearchConsentRoutes = require("./routes/jobsearchConsent");
+const jobsearchSourcesRoutes = require("./routes/jobsearchSources");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 
 const app = express();
@@ -41,6 +42,7 @@ app.use("/audit-logs", auditRoutes);
 app.use("/jobsearch", jobsearchAuthRoutes);
 app.use("/jobsearch", jobsearchProfileRoutes);
 app.use("/jobsearch", jobsearchConsentRoutes);
+app.use("/jobsearch", jobsearchSourcesRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);
