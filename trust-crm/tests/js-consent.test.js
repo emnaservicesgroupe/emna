@@ -337,3 +337,89 @@ test("deactivated user is ineligible and queued work is cancelled", async () => 
     assert.equal(await consentService.cancelQueuedForCandidate(c.candidateId, "again"), 0);
   });
 });
+
+const GRANT_NARROW = { search: true, prepare: false, submit: false, countries: [] };
+const appStatus = async (t, id) => (await t.pool.query("SELECT status FROM js_applications WHERE id=$1", [id])).rows[0].status;
+const pendingQueue = async (t) => Number((await t.pool.query("SELECT count(*) n FROM js_queue WHERE status='pending'")).rows[0].n);
+
+test("re-granting a narrower consent cancels sendable work; later withdraw stays consistent", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate(t.agentA);
+    const url = `/jobsearch/candidates/${c.candidateId}/consent`;
+    await t.call("POST", url, { token: c.token, body: { scope: SCOPE_ALL, version: "v1" } });
+    const q = await t.seedApp(c.candidateId, "queued", "q");
+    const a = await t.seedApp(c.candidateId, "approved", "a");
+    assert.equal((await t.call("POST", url, { token: c.token, body: { scope: GRANT_NARROW, version: "v2" } })).status, 201);
+    assert.equal(await appStatus(t, q), "cancelled");
+    assert.equal(await appStatus(t, a), "cancelled");
+    assert.equal(await pendingQueue(t), 0);
+    assert.equal((await t.pool.query("SELECT count(*) n FROM js_audit_events WHERE action='consent.work_stopped'")).rows[0].n, "1");
+    const w = await t.call("POST", `${url}/withdraw`, { token: c.token, body: { scopeKey: "submit" } });
+    assert.equal(w.status, 200);
+    assert.equal(w.body.cancelledApplications, 0);
+    assert.equal(await appStatus(t, q), "cancelled");
+    assert.equal((await t.pool.query("SELECT paused FROM js_candidate_settings WHERE candidate_id=$1", [c.candidateId])).rowCount, 0, "search kept, not paused");
+  });
+});
+
+test("narrowing away search pauses; withdraw with no consent still cancels stray work", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate(t.agentA);
+    const url = `/jobsearch/candidates/${c.candidateId}/consent`;
+    await t.call("POST", url, { token: c.token, body: { scope: SCOPE_ALL, version: "v1" } });
+    await t.call("POST", url, { token: c.token, body: { scope: { search: false, prepare: true, submit: true, countries: [] }, version: "v2" } });
+    assert.equal((await t.pool.query("SELECT paused FROM js_candidate_settings WHERE candidate_id=$1", [c.candidateId])).rows[0].paused, true);
+
+    const d = await t.newCandidate(t.agentA);
+    const stray = await t.seedApp(d.candidateId, "approved", "stray");
+    await t.pool.query("INSERT INTO js_queue (kind,payload) VALUES ('followup',$1::jsonb)", [JSON.stringify({ candidateId: d.candidateId })]);
+    const w = await t.call("POST", `/jobsearch/candidates/${d.candidateId}/consent/withdraw`, { token: d.token, body: { scopeKey: "submit" } });
+    assert.equal(w.body.cancelledApplications, 1);
+    assert.equal(await appStatus(t, stray), "cancelled");
+    assert.equal((await t.pool.query("SELECT count(*) n FROM js_queue WHERE status='pending' AND kind IN ('submit','followup')")).rows[0].n, "0");
+  });
+});
+
+test("soft-deleted candidate is ineligible", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate(t.agentA);
+    await t.seedProfile(c.candidateId);
+    await t.call("POST", `/jobsearch/candidates/${c.candidateId}/consent`, { token: c.token, body: { scope: SCOPE_ALL, version: "v1" } });
+    await t.pool.query("UPDATE candidates SET is_deleted=true WHERE id=$1", [c.candidateId]);
+    const e = await consentService.searchEligible(c.candidateId);
+    assert.equal(e.eligible, false);
+    assert.ok(e.reasons.includes("candidate_deleted"));
+  });
+});
+
+test("admin suspend cancels work, revokes sessions, audits; reinstate resurrects nothing", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate(t.agentA);
+    await t.seedProfile(c.candidateId);
+    await t.call("POST", `/jobsearch/candidates/${c.candidateId}/consent`, { token: c.token, body: { scope: SCOPE_ALL, version: "v1" } });
+    const q = await t.seedApp(c.candidateId, "queued", "q");
+    assert.equal((await t.call("GET", `/jobsearch/candidates/${c.candidateId}/eligibility`, { token: c.token })).status, 200);
+    const base = `/jobsearch/admin/users/${c.userId}`;
+    assert.equal((await t.call("POST", base + "/suspend", { token: t.agentAToken })).status, 403);
+    assert.equal((await t.call("POST", base + "/suspend", { token: c.token })).status, 403);
+    assert.equal((await t.call("POST", "/jobsearch/admin/users/999999/suspend", { token: t.adminToken })).status, 404);
+    const s = await t.call("POST", base + "/suspend", { token: t.adminToken });
+    assert.equal(s.status, 200);
+    assert.equal(s.body.cancelledApplications, 1);
+    assert.equal((await t.call("GET", `/jobsearch/candidates/${c.candidateId}/eligibility`, { token: c.token })).status, 401, "old token revoked");
+    assert.equal(await appStatus(t, q), "cancelled");
+    assert.equal(await pendingQueue(t), 0);
+    assert.ok(Number((await t.pool.query("SELECT count(*) n FROM js_audit_events WHERE action IN ('account.suspend','account.suspend_cancel')")).rows[0].n) >= 2);
+    assert.equal((await t.pool.query("SELECT count(*) n FROM js_events WHERE kind='account.suspended'")).rows[0].n, "1");
+    assert.equal((await t.pool.query("SELECT count(*) n FROM audit_logs WHERE action='jobsearch.account.suspend'")).rows[0].n, "1");
+    assert.deepEqual((await eligibility(t, c, t.adminToken)).reasons, ["account_inactive"]);
+    assert.equal((await t.call("POST", base + "/suspend", { token: t.adminToken })).status, 200, "idempotent");
+
+    const r = await t.call("POST", base + "/reinstate", { token: t.adminToken });
+    assert.equal(r.status, 200);
+    assert.equal(await appStatus(t, q), "cancelled", "not resurrected");
+    assert.ok(await consentService.activeConsent(c.candidateId, "submit"), "consent untouched");
+    assert.equal((await eligibility(t, c, t.adminToken)).eligible, true);
+    assert.equal((await t.call("POST", "/jobsearch/admin/users/999999/reinstate", { token: t.adminToken })).status, 404);
+  });
+});

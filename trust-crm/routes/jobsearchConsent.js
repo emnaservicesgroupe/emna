@@ -52,6 +52,14 @@ router.get("/candidates/:id/eligibility", verifyToken, asyncHandler(async (req, 
   res.json(await consent.eligibilityFor({ user: req.user, candidateId: req.params.id }));
 }));
 
+router.post("/admin/users/:id/suspend", verifyToken, asyncHandler(async (req, res) => {
+  res.json(await consent.setUserActive({ user: req.user, userId: req.params.id, active: false }));
+}));
+
+router.post("/admin/users/:id/reinstate", verifyToken, asyncHandler(async (req, res) => {
+  res.json(await consent.setUserActive({ user: req.user, userId: req.params.id, active: true }));
+}));
+
 router.use(jobsearchErrorHandler);
 
 module.exports = router;
