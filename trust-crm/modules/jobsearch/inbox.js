@@ -2,11 +2,13 @@
 //
 //   normalizeInbound(raw)                 validates/sanitizes a pushed or polled message (UNTRUSTED)
 //   ingest(mail)                          idempotent by Message-ID; matched -> attached + timeline + events
-//                                         (+ employer_acknowledgement evidence for 'high' acknowledgements);
+//                                         (+ for an eligible 'high' acknowledgement: a confirm_acknowledgement staff
+//                                         task by default; automatic evidence only with INBOUND_AUTO_ACK_EVIDENCE=true);
 //                                         otherwise review_state 'needs_review' + one 'unmatched_reply' task
 //   pollAndStore()                        polls the configured provider (sandbox) and ingests
 //   ingestDeliveryStatus(evt)             provider delivery event -> delivery_receipt evidence (system-only)
 //   assignReview({messageId, applicationId, actor})   staff (jobsearch:approve + scope on BOTH)
+//   confirmAcknowledgement({messageId, actor})        staff click -> employer_acknowledgement evidence (user actor)
 //   shareWithCandidate({messageId, actor})            releases the neutral summary to the candidate
 //   applyClassification({messageId, actor, status, reason})  staff-made status change (never automatic)
 //   listMessages({user, query}) / getMessage({user, id})     scoped
@@ -100,6 +102,9 @@ function normalizeInbound(raw) {
     replyTo: listOf(m.replyTo, 5).join(", ").slice(0, 600),
     subject: sanitizeUntrusted(oneLine(m.subject, 400), 300),
     text: sanitizeUntrusted(text, BODY_MAX),
+    // classification copy: same sanitizer, but leading '>' quote prefixes survive (the sanitizer strips them),
+    // so the classifier can tell a real trailing quoted block from prose; never stored
+    classText: typeof m.text === "string" && m.text.trim() ? classifiableText(m.text) : null,
     receivedAt: received && !isNaN(received) ? received.toISOString() : new Date().toISOString(),
     attachments: attachmentMeta(m.attachments),
     // raw value kept for the matcher's evaluation (see replyMatcher field contract); never stored raw
@@ -110,6 +115,13 @@ function normalizeInbound(raw) {
   };
   NORMALIZED.add(out);
   return out;
+}
+
+const QMARK = "vitaquotemark";
+/** Sanitized text with line-leading '>' quote prefixes kept (as '> ' x depth). Writing the marker literally = writing '>'. */
+function classifiableText(raw) {
+  const prot = String(raw).slice(0, 60000).replace(/^[ \t]*((?:>[ \t]?)+)/gm, (_m, g) => `${QMARK}${Math.min((g.match(/>/g) || []).length, 20)} `);
+  return sanitizeUntrusted(prot, BODY_MAX).replace(/(^|\n)[ \t]*vitaquotemark(\d+) ?/g, (_m, nl, d) => `${nl}${">".repeat(Number(d))} `);
 }
 
 function quotedIdsOf(rawText) {
@@ -243,7 +255,7 @@ async function ingest(mail) {
   const m = NORMALIZED.has(mail) ? mail : normalizeInbound(mail);
   const existing = (await S.db().query("SELECT id, application_id, review_state FROM js_messages WHERE direction = 'in' AND message_id = $1", [m.messageId])).rows[0];
   if (existing) return { id: existing.id, duplicate: true, matched: Boolean(existing.application_id), confidence: null, reason: "duplicate" };
-  const cls = matcher.classifyReply(m.text);
+  const cls = matcher.classifyReply(m.classText || m.text);
   const sender = matcher.parseFrom(m.from);
   const preAuth = matcher.evaluateAuth(m.authResults, sender.ok ? sender.domain : null);
   const plausibleBounce = matcher.isPlausibleBounce(m) && !preAuth.failed;
@@ -283,10 +295,74 @@ async function ingest(mail) {
     // whole-message veto over body (classifyReply) AND subject
     const ack = cls.acknowledgement && !matcher.ackVeto(m.subject.replace(/^(?:\s*(?:re|aw|tr|fwd?)\s*:)+/i, ""));
     const why = !ack ? null : out.res.confidence !== "high" ? "not_high" : out.res.authenticated !== true ? "not_authenticated" : autoReply ? "auto_reply" : bounceLike ? "bounce" : !out.res.submissionId ? "no_submission" : "";
-    if (why === "") result.evidence = await acknowledge(out.row, out.res.submissionId);
+    if (why === "") result.evidence = autoAckEvidence() ? await acknowledge(out.row, out.res.submissionId) : await suggestAcknowledgement(out.row, out.res.submissionId, m);
     else if (why) result.evidence = { recorded: false, reason: why };
   }
   return result;
+}
+
+/**
+ * INBOUND_AUTO_ACK_EVIDENCE (controller ruling, round 4): default false in EVERY environment. Only
+ * 'true' (any case) turns on automatic employer_acknowledgement evidence from inbound mail - use it only if
+ * you accept the classifier's residual false-accept risk. Otherwise an eligible acknowledgement only
+ * opens a 'confirm_acknowledgement' staff task; a human confirms (POST /messages/:id/confirm-acknowledgement
+ * or POST /submissions/:id/evidence).
+ */
+function autoAckEvidence() {
+  return String(process.env.INBOUND_AUTO_ACK_EVIDENCE || "").trim().toLowerCase() === "true";
+}
+
+/**
+ * Default mode: NO evidence. Flags the message (classification.suggested_ack = true) and opens ONE
+ * deduped 'confirm_acknowledgement' task for the responsible staff member (per message, and at most one
+ * open per application) + a staff-audience event + audit. Nothing candidate-visible.
+ */
+async function suggestAcknowledgement(row, submissionId, m) {
+  const sub = (await S.db().query("SELECT status FROM js_submissions WHERE id = $1", [submissionId])).rows[0];
+  if (!sub || !["sent", "outcome_unknown"].includes(sub.status)) return { recorded: false, reason: sub ? `submission_${sub.status}` : "no_submission" };
+  return S.inTx(async (client) => {
+    const { app, cand } = await S.lockApplication(client, row.application_id);
+    const responsible = S.responsibleOf(app, cand);
+    await client.query("UPDATE js_messages SET classification = COALESCE(classification, '{}'::jsonb) || '{\"suggested_ack\": true}'::jsonb WHERE id = $1", [row.id]);
+    const excerpt = oneLine(sanitizeUntrusted(m.text, 2000), 200);
+    const existing = (await client.query("SELECT id FROM js_tasks WHERE application_id = $1 AND reason = 'confirm_acknowledgement' AND status = 'open' LIMIT 1", [app.id])).rows[0];
+    const created = existing
+      ? null
+      : (await client.query(
+          `INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES ($1,'confirm_acknowledgement',$2,$3,$4)
+           ON CONFLICT (message_id, reason) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+          [app.id, `message:${row.id}: ${excerpt}`, responsible, row.id]
+        )).rows[0];
+    const taskId = existing ? existing.id : created ? created.id : null;
+    await S.auditEvent(client, SYSTEM_ACTOR, "message.ack_suggested", app.candidate_id, app.id, { messageId: row.id, submissionId, taskId, deduped: !created });
+    if (created) await S.staffEvent(client, app.candidate_id, responsible, "staff.ack_suggested", { applicationId: app.id, messageId: row.id, submissionId, taskId });
+    return { recorded: false, reason: "staff_confirmation_required", suggested: true, taskId };
+  });
+}
+
+/**
+ * Staff confirm that a matched reply is the employer's acknowledgement (jobsearch:approve + scope).
+ * The message must be inbound, matched to an application, and from the employer's verified domain /
+ * contact (recordEvidence re-checks this). Records employer_acknowledgement with the USER as actor
+ * (never the system grant) and resolves the confirm_acknowledgement task.
+ */
+async function confirmAcknowledgement({ messageId, actor }) {
+  if (!S.isUser(actor)) throw httpErr(404, "Not found");
+  if (actor.role === "Candidate") throw httpErr(403, "Confirming an acknowledgement requires a manager or administrator");
+  const msg = await draftService.loadMessageScoped(actor, messageId); // 404 outside scope
+  requireApprover(actor, "Confirming an acknowledgement");
+  if (msg.direction !== "in" || !msg.application_id || !["matched", "resolved"].includes(msg.review_state)) throw httpErr(409, "Only an inbound message matched to an application can be confirmed", "not_matched");
+  if (msg.message_kind === "bounce") throw httpErr(409, "A delivery notification is not an acknowledgement", "not_acknowledgement");
+  const subs = (await S.db().query("SELECT id, status FROM js_submissions WHERE application_id = $1 ORDER BY id DESC", [msg.application_id])).rows;
+  const sub = (msg.submission_id && subs.find((x) => x.id === msg.submission_id)) || subs.find((x) => ["sent", "outcome_unknown"].includes(x.status)) || null;
+  if (!sub) throw httpErr(409, "The application has no sent submission to confirm", "no_submission");
+  const out = await submitter.recordEvidence({ submissionId: sub.id, kind: "employer_acknowledgement", detail: { messageId: msg.id }, actor });
+  await S.inTx(async (client) => {
+    await client.query("UPDATE js_tasks SET status = 'resolved', resolved_at = now() WHERE application_id = $1 AND reason = 'confirm_acknowledgement' AND status = 'open'", [msg.application_id]);
+    await S.auditEvent(client, actor, "message.ack_confirmed", null, msg.application_id, { messageId: msg.id, submissionId: sub.id });
+  });
+  await S.auditLog(actor, "jobsearch.message.confirm_acknowledgement", "js_messages", msg.id, { applicationId: msg.application_id, submissionId: sub.id });
+  return { messageId: msg.id, ...out };
 }
 
 /** Records employer_acknowledgement evidence (once per submission; failures audited). Callers check eligibility. */
@@ -510,4 +586,4 @@ async function getMessage({ user, id }) {
   return out;
 }
 
-module.exports = { normalizeInbound, fromPolled, ingest, pollAndStore, ingestDeliveryStatus, assignReview, shareWithCandidate, applyClassification, listMessages, getMessage, presentMessage, attachmentMeta, classifyReply: matcher.classifyReply, SYSTEM_ACTOR };
+module.exports = { normalizeInbound, fromPolled, ingest, pollAndStore, ingestDeliveryStatus, assignReview, confirmAcknowledgement, autoAckEvidence, shareWithCandidate, applyClassification, listMessages, getMessage, presentMessage, attachmentMeta, classifyReply: matcher.classifyReply, SYSTEM_ACTOR };

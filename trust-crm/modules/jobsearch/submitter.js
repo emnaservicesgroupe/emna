@@ -651,7 +651,7 @@ async function recordEvidence({ submissionId, kind, detail, actor, [EVIDENCE_GRA
     } else {
       await timeline(client, app.id, actor, "evidence_recorded", { submissionId: sub.id, kind });
     }
-    await client.query("UPDATE js_tasks SET status = 'resolved', resolved_at = now() WHERE application_id = $1 AND reason = 'verify_delivery' AND status = 'open'", [app.id]);
+    await client.query("UPDATE js_tasks SET status = 'resolved', resolved_at = now() WHERE application_id = $1 AND reason IN ('verify_delivery', 'confirm_acknowledgement') AND status = 'open'", [app.id]);
     await audit(client, actor, "submission.evidence", app.candidate_id, app.id, { submissionId: sub.id, kind, detail: clean });
     await event(client, app.candidate_id, "submission.confirmed", { applicationId: app.id, submissionId: sub.id, kind });
     return { submissionId: sub.id, status: "confirmed_submitted", applicationStatus: moved || app.status, confirmations: evidence.confirmations.length };

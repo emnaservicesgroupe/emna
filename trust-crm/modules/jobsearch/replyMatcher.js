@@ -428,14 +428,25 @@ const BENIGN = [
   /\baucune action (?:n'est |est )?(?:requise|necessaire)\b/g,
   /\bwill not hear back (?:from us )?unless\b/g,
   /\bnous ne manquerons pas de\b/g,
+  /\b(?:match(?:es)?|meets?) (?:our|the) (?:requirements|criteria|needs)\b/g,
 ];
+// Closed-vacancy / future-opportunity words (round 4). Checked on the RAW text - quoted blocks and the
+// subject included - so nothing can hide them, and they are also excluded from every open word slot.
+const BLOCK_TERMS = [
+  "\\bexpir", "\\barchiv", "\\bfuture\\b", "\\bre-?apply", "\\btalent pool\\b", "\\bvivier\\b", "\\bprochaine campagne\\b", "\\bstaffed\\b",
+  "\\bappointed\\b", "\\bconclu", "\\bpaused?\\b", "\\bfrozen\\b", "\\bfreez", "\\bgele", "\\bclotur", "\\bpourvu", "\\bfilled\\b", "\\bclosed\\b",
+  "\\bclos\\b", "\\bcancel", "\\bwithdrawn\\b", "\\bon file\\b", "\\bkeep your (?:cv|resume|application|details|profile)\\b", "\\binternal (?:applicant|candidate|hire|promotion)",
+  "\\binternally\\b", "\\bwent with\\b", "\\bsuccessful (?:applicant|candidate)", "\\bheadcount\\b", "\\breallocat", "\\bterminat", "\\bon ice\\b", "\\bno longer\\b",
+  "\\bunsuccessful\\b", "\\bnot (?:been )?(?:selected|shortlisted|successful|progress)", "\\bvacancy (?:is|was|has)\\b",
+];
+const BLOCK = new RegExp(BLOCK_TERMS.join("|"));
 const VETO = new RegExp([
   "\\bnot\\b", "n't\\b", "\\b(?:havent|hasnt|hadnt|didnt|dont|doesnt|cant|wont|couldnt|wouldnt|shouldnt|isnt|arent|wasnt|werent)\\b",
   "\\bnever\\b", "\\bno longer\\b", "\\bunable\\b", "\\bcannot\\b", "\\bfail", "\\bmissing\\b", "\\bincomplet", "\\bcorrupt", "\\bblank\\b", "\\bempty\\b",
   "\\bunreadable\\b", "\\billisible\\b", "\\bcould\\b", "\\bcan you\\b", "\\bplease\\b", "\\bkindly\\b", "\\bhowever\\b", "\\bbut\\b", "\\btoutefois\\b", "\\bcependant\\b",
   "\\bmais\\b", "\\bmalheureusement\\b", "\\bunfortunately\\b", "\\bsadly\\b", "\\bregret", "\\bsorry\\b", "\\bdesole", "\\bpas\\b", "\\bne\\b", "\\bn'", "\\baucun",
   "\\bsans\\b", "\\bmanqu", "\\bveuillez\\b", "\\bmerci de\\b", "\\brenvoy", "\\benvoy", "\\bresend", "\\bre-send", "\\bresubmit", "\\bre-?upload", "\\bupload",
-  "\\bfilled\\b", "\\bpourvu", "\\bposition has been\\b", "\\bclosed\\b", "\\bdeclin", "\\breject", "\\bnot selected\\b", "\\bmoving forward\\b",
+  "\\bfilled\\b", "\\bpourvu", "\\bposition has been\\b(?! (?:successfully |safely )?received\\b)", "\\bclosed\\b", "\\bdeclin", "\\breject", "\\bnot selected\\b", "\\bmoving forward\\b",
   "\\bretenu", "\\bretenons\\b", "\\banother candidate\\b", "\\bother candidates\\b", "\\bwrong\\b", "\\btoo (?:large|big|small)\\b", "\\berror\\b", "\\bproblem",
   "\\bissue\\b", "\\bwaiting\\b", "\\bawait", "\\bpending\\b", "\\byet\\b", "\\bstill\\b", "\\battente\\b", "\\bencore\\b", "\\binvalid\\b", "\\bwhether\\b", "\\bunable\\b", "\\bimpossible\\b", "\\bdid you\\b", "\\bno idea\\b", "\\bexcept\\b",
   "\\bhold\\b", "\\bwithdrawn\\b", "\\bdenied\\b", "\\bunsuccessful\\b", "\\bfrozen\\b", "\\bsuspend", "\\bcancel", "\\bineligib", "\\bunsuitab", "\\bnot suitable\\b",
@@ -445,6 +456,7 @@ const VETO = new RegExp([
   "\\bsend\\b", "\\bshare\\b", "\\bcomplete\\b", "\\bfill\\b", "\\breply with\\b", "\\bon file\\b", "\\bchosen\\b", "\\bothers\\b",
   "\\bmismatch\\b", "\\boverqualif", "\\bunderqualif", "\\bdiscontinu", "\\babolish", "\\bnegative\\b", "\\bafraid\\b", "\\bregrettably\\b", "\\bsuspendu", "\\bcorrespond pas\\b",
   "\\?",
+  ...BLOCK_TERMS,
 ].join("|"));
 const PUNCT_MAP = { "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'", "“": '"', "”": '"', "„": '"', "«": '"', "»": '"', "–": "-", "—": "-", "…": "...", " ": " ", " ": " " };
 
@@ -467,31 +479,46 @@ function ackVeto(...texts) {
 
 // ---------------------------------------------------------------- acknowledgement ALLOWLIST
 //
-// Round 3: a reply is eligible for acknowledgement evidence only when EVERY sentence/fragment (after
-// removing quoted reply blocks) is one of a few recognised classes: ACK ("we have received your
-// application", "application received", "accusé de réception", "bien reçu"...), COURTESY ("thank you
-// for applying", "merci pour votre candidature"), PROCESS-NEUTRAL ("we will review it", "we will be in
-// touch if your profile matches", "nous reviendrons vers vous"), BOILERPLATE ("do not reply", "no
-// action is required", "this is an automated message"), GREETING ("dear karim") or a team line; after
-// a SIGN-OFF ("kind regards", "cordialement") up to 12 short lines are ignored. Anything else - a
-// request, question, requirement, status, rejection, scheduling, attachment mention - and the reply
-// is NOT eligible (staff confirm by hand). At least one ACK (or application-specific courtesy)
-// fragment is required, and the denylist (ackVeto) still applies on top.
-// Every pattern is anchored, words are separated by mandatory single spaces (no ambiguous splits),
-// and fragments over 300 chars are refused: linear in practice.
-const STOP = "(?:we|you|your|our|is|are|was|were|has|have|had|will|would|not|no|but|however|unfortunately|please|hired|filled|closed|hold|position|role|application|candidate|candidates|interview|offer|selected|someone|else|regret|sorry|send|provide|need|needs|needed|require|required|attach|attached|reply|thank|thanks|nous|vous|votre|est|sont|pas|ne|merci|poste|withdrawn|denied|cancelled|canceled|frozen|declined|rejected|other|others|another|which|that|who|if|unless|only|until|before|after|missing|lacks|lack|form|complete|submit)";
+// A reply is ELIGIBLE as an acknowledgement only when the WHOLE message is recognised. NOTE (round 4,
+// controller ruling): eligibility alone never records evidence - by default (INBOUND_AUTO_ACK_EVIDENCE
+// unset/false) an eligible reply only opens a 'confirm_acknowledgement' staff task; a human click records
+// the evidence. Only the opt-in mode records it automatically.
+//
+//  1. Quoted text (splitQuoted): only a TRAILING block that starts at a quote header ("On ... wrote:",
+//     "Le ... a écrit :", "-----Original Message-----", a "From:" header line, a "_____" rule) and whose
+//     every following non-empty line is '>'-quoted or a header line (From/Sent/To/Cc/Subject/Date...) is
+//     set aside. Prose after a quote marker, or '>' lines outside such a block -> NOT eligible.
+//  2. The closed-vacancy BLOCK list runs on the RAW text (quoted block included); the full denylist
+//     (ackVeto) and the category rules run on the non-quoted content.
+//  3. A P.S./PS/N.B./Postscript anywhere in the content -> not eligible (checked before any splitting).
+//  4. Content before a SIGN-OFF must be fragments of the recognised classes (ACK, application courtesy
+//     with a CLOSED list of objects, process-neutral, boilerplate, greeting, team line). After the
+//     sign-off: at most 4 short lines shaped like a name / title / company / phone / URL / e-mail, with
+//     no verb, vacancy, hiring or closed words.
+// Every pattern is anchored, words are separated by mandatory single spaces and fragments are capped:
+// linear in practice.
+const STOP = "(?:we|you|your|our|is|are|was|were|has|have|had|will|would|not|no|but|however|unfortunately|please|hired|filled|closed|hold|position|role|application|candidate|candidates|interview|offer|selected|someone|else|regret|sorry|send|provide|need|needs|needed|require|required|attach|attached|reply|thank|thanks|nous|vous|votre|est|sont|pas|ne|merci|poste|withdrawn|denied|cancelled|canceled|frozen|declined|rejected|other|others|another|which|that|who|if|unless|only|until|before|after|missing|lacks|lack|form|complete|submit"
+  + "|expired|expire|expires|expiring|archived|archive|future|reapply|reapplying|re-apply|talent|pool|vivier|prochaine|campagne|staffed|appointed|concluded|paused|pause|freeze|gele|gelee|cloture|cloturee|pourvu|pourvue|clos|file|keep|hiring|hire|headcount|reallocated|recruitment|recruiting|vacancy|vacancies|vacant|internal|internally|next|later|update|status|outcome|decision|result|elsewhere|scheme|pipeline|again|soon|cancel|suspended|terminated|ended|over|now|defunct|former|old|previous|past|obsolete|abandoned|scrapped|dropped|removed|deleted|retired|inactive|dead|legacy|outdated|superseded|lapsed|finished|completed|postponed|delayed|deferred|unavailable|unfunded|defunded|eliminated|redundant|discontinued|abolished|cut|ex|waitlist|waiting|list|reserve|backup|standby|unrelated|different|wrong|duplicate|unsuccessful|rejected|declined|failed|temporary|cancelled|gone|taken|occupied|supprime|annule|reporte|ancien)";
 const WORD = `(?!${STOP}\\b)[a-z0-9&.'-]+`;
 const WORDS = (n) => `${WORD}(?: ${WORD}){0,${n - 1}}`;
 const DOC = "(?:application|applications|cv|resume|submission|candidacy|message|email|e-mail|application form)";
-const TITLE = `(?: (?:for|to) (?:the |our |this |your )?${WORDS(4)}(?: (?:position|role|job|vacancy|post|opening|opportunity))?)?`;
+const TERMINAL = "(?: (?:position|role|job|vacancy|post|opening|opportunity))?";
+const TITLE = `(?: (?:for|to) (?:the |our |this |your )?${WORDS(4)}${TERMINAL})?`;
 const FRDOC = "(?:candidature|dossier(?: de candidature)?|cv|message|courriel|e-mail|email|envoi)";
 const FRTITLE = `(?: (?:pour|au) (?:le |du )?poste(?: (?:d'|de |d )?${WORDS(4)})?)?`;
 const TEAM = "(?:we|our (?:recruitment |recruiting |hiring |hr |talent |selection )?team|our recruiters?|a recruiter|a member of our team|our hiring team|the hiring team|the recruitment team|the team|our hr team|hr|someone from our team)";
-const WHEN = "(?: (?:shortly|soon|promptly|carefully|in detail|in due course|as soon as possible|within (?:the next )?\\d{1,2} (?:business |working )?(?:days|weeks)|no later than (?:[a-z0-9]+)(?: [a-z0-9]+){0,2}))?";
+const WILL = `(?:${TEAM} (?:will|shall|is going to|are going to) |${TEAM}'ll |(?:will|shall) )`;
+const MONTH = "(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)";
+const DATE = `(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|\\d{1,2}(?:st|nd|rd|th)? (?:of )?${MONTH}(?: \\d{4})?|${MONTH} \\d{1,2}(?:st|nd|rd|th)?(?: \\d{4})?|\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?|the end of (?:the |this |next )?(?:week|month))`;
+const WHEN = `(?: (?:shortly|soon|promptly|carefully|in detail|in due course|as soon as possible|within (?:the next )?\\d{1,2} (?:business |working )?(?:days|weeks)|no later than ${DATE}))?`;
 const IFOK = "(?: (?:only )?if (?:your (?:profile|application|experience|skills)|you|your profile and experience) (?:is a (?:good )?(?:fit|match)|are a (?:good )?(?:fit|match)|matches?(?: (?:our|the) (?:requirements|needs|criteria))?|meets? (?:our|the) (?:requirements|criteria)|(?:is|are) shortlisted|(?:is|are) selected|(?:is|are) successful))?";
+const THANKS = "(?:thank you|thanks|many thanks|thank you very much|thank you so much)(?: again)?";
+// CLOSED list of courtesy objects (no open word slot).
+const INTEREST = "your interest(?: in (?:the (?:position|role|job|opening|vacancy|post)|this (?:position|role|job|opening)|us|our company|our team|joining (?:us|our team)))?";
 const re = (src) => new RegExp(`^(?:${src})$`);
 const ACK_CLASS = [
-  re(`(?:we|i) (?:can |hereby )?(?:confirm (?:that )?(?:we )?|are pleased to confirm (?:that )?(?:we )?)?(?:have |'ve |'ve )?(?:successfully |safely )?received your ${DOC}${TITLE}`),
+  re(`(?:we|i) (?:can |hereby )?(?:confirm (?:that )?(?:we )?|are pleased to confirm (?:that )?(?:we )?)?(?:have )?(?:successfully |safely )?received your ${DOC}${TITLE}`),
+  re(`(?:we've|we have) (?:successfully |safely )?received your ${DOC}${TITLE}`),
   re(`we(?:'ve| have)? (?:successfully )?received it`),
   re(`(?:we )?(?:hereby )?(?:confirm|acknowledge) (?:the )?receipt of your ${DOC}${TITLE}`),
   re(`(?:your|the) ${DOC}${TITLE} (?:has been|was|is|have been) (?:successfully |safely |now )?received`),
@@ -503,22 +530,23 @@ const ACK_CLASS = [
   re(`nous accusons (?:bonne )?reception de votre ${FRDOC}`),
 ];
 const COURTESY_ACK = [ // application-specific: count as the required acknowledgement
-  re(`(?:thank you|thanks|many thanks|thank you very much|thank you so much)(?: again)? for (?:applying|your application|submitting your application|your submission|applying (?:to|for|with) (?:the |our |this )?${WORDS(5)}(?: (?:position|role|job|vacancy|post|opening|opportunity))?)`),
+  re(`${THANKS} for (?:applying|your application${TITLE}|submitting your application${TITLE}|your submission|your candidacy|applying (?:to|for|with) (?:the |our |this )?${WORDS(5)}${TERMINAL})`),
   re(`merci (?:beaucoup )?(?:pour|de) votre candidature`),
   re(`nous vous remercions (?:pour|de) votre candidature`),
 ];
 const OTHER_CLASS = [
-  // courtesy
-  re(`(?:thank you|thanks|many thanks|thank you very much|thank you so much)(?: again)?(?: for (?:your interest(?: in (?:the |our )?${WORDS(5)})?|your time|contacting us|considering ${WORDS(3)}))?`),
-  re(`we appreciate your interest(?: in (?:the |our )?${WORDS(5)})?`),
-  re(`merci(?: beaucoup)?(?: (?:pour|de) (?:votre |l')?(?:interet|message|envoi|confiance|temps)(?: (?:pour|porte a) (?:notre |le |la )?${WORDS(4)})?)?`),
-  re(`nous vous remercions (?:pour|de) (?:votre |l')?(?:interet|message|confiance)(?: (?:pour|porte a) (?:notre |le |la )?${WORDS(4)})?`),
+  // courtesy (closed objects)
+  re(`${THANKS}(?: for (?:${INTEREST}|your time|your cv|your submission|contacting us))?`),
+  re(`we appreciate ${INTEREST}`),
+  re(`merci(?: beaucoup)?(?: (?:pour|de) (?:votre |l')?(?:interet|message|envoi|confiance|temps)(?: pour (?:le|ce|notre) (?:poste|offre))?)?`),
+  re(`nous vous remercions (?:pour|de) (?:votre |l')?(?:interet|message|confiance)(?: pour (?:le|ce|notre) (?:poste|offre))?`),
   re(`(?:good luck|best of luck|bonne chance|bonne journee)`),
   // process-neutral
   re(`(?:${TEAM} )?(?:will|'ll|shall|is going to|are going to) (?:now )?(?:carefully )?(?:review|examine|consider|assess|evaluate|look (?:at|over)|read|go through)(?: (?:it|your (?:application|profile|cv|resume|candidacy)|all applications|applications))?${WHEN}`),
+  re(`${TEAM}'ll (?:now )?(?:carefully )?(?:review|examine|consider|assess|evaluate|look (?:at|over)|read|go through)(?: (?:it|your (?:application|profile|cv|resume|candidacy)))?${WHEN}`),
   re(`${TEAM} (?:is|are) (?:now )?(?:currently )?(?:reviewing|examining|considering|assessing|evaluating)(?: (?:it|your (?:application|profile|cv|resume)|all applications|applications))?`),
   re(`${TEAM} (?:is|are) (?:excited|happy|looking forward) to (?:review|read)(?: it| your (?:application|profile))?`),
-  re(`(?:${TEAM} )?(?:will|'ll|shall) (?:get back to you|be in touch|contact you|reach out(?: to you)?|respond(?: to you)?|follow up(?: with you)?|let you know)${WHEN}${IFOK}${WHEN}`),
+  re(`${WILL}?(?:get back to you|be in touch|contact you|reach out(?: to you)?|respond(?: to you)?|follow up(?: with you)?|let you know)${WHEN}${IFOK}${WHEN}`),
   re(`(?:respond|reply) (?:soon|shortly)`),
   re(`(?:your (?:application|profile|cv|candidacy)|it) (?:is|will be) (?:now )?(?:being )?(?:reviewed|processed|considered|under review|in review|in process)(?: (?:shortly|carefully))?`),
   re(`(?:is )?(?:now )?being (?:processed|reviewed)`),
@@ -537,31 +565,103 @@ const OTHER_CLASS = [
   re(`(?:merci de )?ne pas repondre(?: a ce (?:message|courriel|mail|e-mail))?`),
   re(`(?:ceci est un |ce message est un )?(?:message|courriel|e-mail|mail) automatique`),
   re(`nous ne manquerons pas de revenir vers vous`),
-  re(`(?:unsubscribe|privacy policy|privacy notice|terms of use|manage (?:your )?preferences|politique de confidentialite|se desabonner)(?: ${WORDS(6)})?`),
-  // greeting / team line
+  re(`(?:unsubscribe|privacy policy|privacy notice|terms of use|manage (?:your )?preferences|politique de confidentialite|se desabonner)`),
+  // greeting / team line (no hiring/headcount/paused words: they are STOP words)
   re(`(?:dear|hello|hi|hey|greetings|good (?:morning|afternoon|day)|bonjour|bonsoir|madame|monsieur|cher|chere)(?: ${WORDS(3)})?`),
-  re(`(?:the )?(?:${WORDS(3)} )?(?:team|recruitment|recruiting|hr|human resources|talent acquisition|careers|people team|equipe rh|l'equipe rh|ressources humaines|service rh|l'equipe recrutement)(?: team)?`),
+  re(`(?:the )?(?:${WORDS(3)} )?(?:(?:recruitment|recruiting|hiring|talent acquisition|talent|hr|people|selection|careers) )?team`),
+  re(`(?:the )?(?:${WORDS(2)} )?(?:hr|human resources|talent acquisition|careers|equipe rh|l'equipe rh|ressources humaines|service rh|l'equipe recrutement)`),
 ];
-const SIGNOFF = re(`(?:best regards|kind regards|warm regards|warmest regards|regards|best|sincerely|yours sincerely|yours faithfully|yours truly|respectfully|best wishes|all the best|cheers|cordialement|bien cordialement|tres cordialement|salutations|salutations distinguees|sinceres salutations|meilleures salutations|respectueusement|bien a vous)`);
-const MAX_AFTER_SIGNOFF = 12;
-const SIGWORD = `(?!${STOP}\\b)[a-z0-9&.'/@+()-]+`;
-const SIGLINE = new RegExp(`^${SIGWORD}(?: ${SIGWORD}){0,5}$`);
+const SIGNOFF_WORDS = "best regards|kind regards|warm regards|warmest regards|yours sincerely|yours faithfully|yours truly|best wishes|all the best|bien cordialement|tres cordialement|salutations distinguees|sinceres salutations|meilleures salutations|bien a vous|regards|best|sincerely|respectfully|cheers|cordialement|salutations|respectueusement";
+const SIGNOFF_SCAN = new RegExp(`(?:^|[.!?;:,\\n]|\\s-\\s)[ \\t]*(?:${SIGNOFF_WORDS})[ \\t]*(?=[.!,:;\\n-]|$)`);
+const MAX_SIG_LINES = 4;
+const SIG_LINE_MAX = 60;
+// words never allowed in a signature line (verbs, vacancy/hiring/closed words) on top of STOP
+const SIG_STOP = new RegExp(`^(?:${STOP.slice(3, -1)}|be|been|being|do|does|did|done|can|may|must|shall|should|it|its|they|them|this|these|those|there|he|she|his|her|went|got|gone|given|taken|made|found|chose|chosen|moved|moving|closing|ending|finished|complete|completed|staffing|recruit|recruiter-led|now|already|last|yesterday|today|tomorrow|week|weeks|month|months|year|years|spring|summer|autumn|fall|winter|vacances|sadly|alas|regrettably|note|ps|nb|postscript|post-scriptum|update|position|positions|job|jobs|opening|openings|role|roles|post|poste|recrutement|termine|terminee|annule|annulee|suspendu|attribue|attribuee|retenu|retenue|interne|internal|hired|hiring|closed|filled|done|over|no|yes|not|us|me|him|them|you|won|wins|win|starts|start|started|joins|join|joined|took|takes|take|picked|picks|accepted|accepts|selected|gets|left|leaves|signed|signs|begins|begin|seats|seat|spot|spots|slot|slots|place|places|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|lundi|mardi|mercredi|jeudi|vendredi)$`);
+const SIG_WORD_ED = /^[a-z]{3,}ed$/;
+const SIG_ED_OK = new Set(["limited", "united", "incorporated", "ted", "fred", "reed", "ned", "jared", "mohammed", "mohamed", "ahmed", "hamed", "saeed", "rasheed", "majed", "zayed", "khaled", "walid", "red", "bed"]);
+const SIG_TEAM = /^(?:(?:the )?(?:[a-z][a-z&'-]* )?(?:recruitment|recruiting|hiring|talent acquisition|talent|hr|people|selection|careers) team|recruitment|recruiting|talent acquisition|hr|human resources|ressources humaines|service rh|equipe rh|l'equipe rh|service recrutement|l'equipe recrutement|recruiter|recruitment (?:manager|officer|coordinator|consultant|specialist|lead|partner)|talent acquisition (?:manager|partner|specialist|lead)|hr (?:manager|officer|business partner|generalist|coordinator)|chargee? de recrutement|responsable (?:rh|recrutement))$/;
+const SIG_PHONE = /^(?:(?:tel|tel\.|phone|mobile|mob|fax|t|m|p|f)\s?[:.]?\s?)?\+?[\d(][\d\s().\/-]{5,24}$/;
+const SIG_EMAIL = /^(?:e-?mail\s?:\s?)?[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,120}\.[a-z]{2,24}$/;
+const SIG_URL = /^(?:web\s?:\s?)?(?:https?:\/\/)?(?:www\.)?[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,5}(?:\/[a-z0-9._~\/-]{0,100})?$/;
+const SIG_NAMEWORD = /^(?:[a-z0-9][a-z0-9&'-]{0,30}|[a-z]{1,3}\.)$/;
+// P.S. / PS: / N.B. / Postscript anywhere in the content (checked BEFORE any splitting on dots)
+const POSTSCRIPT = /(?:^|[\s.,;:!?()])(?:p\.? ?s\.?|p\.p\.s\.?|n\.? ?b\.?|postscript|post-scriptum)(?=[\s.:,;!-]|$)/m;
 
-/** NFKD + accent fold + lowercase + ASCII punctuation, newlines kept; quoted reply blocks removed. */
-function dequote(text) {
-  let t = String(text || "").normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase();
-  t = t.replace(/[‘’‚‛′“”„«»–—…  ]/g, (c) => PUNCT_MAP[c]);
-  const lines = t.split(/\r?\n/);
-  const out = [];
+/** One signature part (a line, or a comma-separated piece of it): name / title / company / phone / URL / e-mail. */
+function sigPartOk(cased) {
+  if (!cased) return true;
+  const p = cased.toLowerCase();
+  if (SIG_TEAM.test(p) || SIG_PHONE.test(p) || SIG_EMAIL.test(p) || SIG_URL.test(p)) return true;
+  const words = p.split(" ");
+  const casedWords = cased.split(" ");
+  if (words.length > 5) return false;
+  // name / title / company: every word capitalised as written (Jane Doe, HR Manager, Acme Corp, 12 Rue X)
+  if (!casedWords.every((w) => /^[A-Z0-9&+(]/.test(w) || /^[a-z]\.$/.test(w) || /^(?:de|du|des|la|le|van|von|da|di|del|of|and|et|the)$/.test(w) || /^[dl]'[A-Z]/.test(w))) return false;
+  return words.every((w) => SIG_NAMEWORD.test(w) && !SIG_STOP.test(w.replace(/\.$/, "")) && !(SIG_WORD_ED.test(w) && !SIG_ED_OK.has(w)));
+}
+
+/** @returns {string|null} reason when the text after the sign-off is NOT a plain signature. */
+function signatureProblem(sigText) {
+  const lines = sigText.replace(/^[\s.,!:;-]+/, "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length > MAX_SIG_LINES) return "signature_too_long";
   for (const line of lines) {
-    const l = line.trim();
-    if (/^(?:-{2,} ?original message ?-{2,}|-{2,} ?message d'origine ?-{2,}|_{5,})$/.test(l)) break;
-    if (/^on .{1,300} wrote:$/.test(l) || /^le .{1,300} a ecrit ?:$/.test(l)) break;
-    if (/^(?:from|de|sent|envoye|to|a|subject|objet) ?: /.test(l) && out.length && /^(?:from|de) ?: /.test(l)) break;
-    if (l.startsWith(">")) continue;
-    out.push(l);
+    if (line.length > SIG_LINE_MAX) return "signature_line_too_long";
+    const parts = line.replace(/[.,;]+$/, "").split(/\s*(?:,|\s\|\s|\s-\s|\s\/\s)\s*/).map((x) => x.trim().replace(/\s+/g, " "));
+    if (!parts.every(sigPartOk)) return "signature_not_plain";
   }
-  return out.join("\n");
+  return null;
+}
+
+/** NFKD + accent fold + lowercase + ASCII punctuation; newlines kept. */
+function foldLines(text, keepCase = false) {
+  const t = String(text || "").normalize("NFKD").replace(/\p{M}+/gu, "");
+  return (keepCase ? t : t.toLowerCase()).replace(/[\u2018\u2019\u201a\u201b\u2032\u201c\u201d\u201e\u00ab\u00bb\u2013\u2014\u2026\u00a0\u202f]/g, (c) => PUNCT_MAP[c]).replace(/\r\n?/g, "\n");
+}
+
+const QUOTE_MARKER = [
+  /^on .{1,300} wrote ?:?$/, /^le .{1,300} a ecrit ?:?$/, /^-{2,} ?(?:original message|message d'origine|forwarded message|message transfere) ?-{2,}$/,
+  /^_{5,}$/, /^(?:from|de) ?: ?\S/,
+];
+const QUOTE_HEADER = /^(?:from|sent|to|cc|bcc|subject|date|reply-to|de|envoye|a|objet|date d'envoi) ?: ?/;
+
+/**
+ * Splits folded text into the reply content and a trailing quoted block.
+ * @returns {{content: string, quoted: string, ineligible: string|null}}
+ */
+function splitQuoted(text) {
+  const cased = foldLines(text, true).split("\n");
+  const lines = cased.map((l) => l.toLowerCase());
+  let marker = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = lines[i].trim();
+    if (QUOTE_MARKER.some((r) => r.test(l))) {
+      marker = i;
+      break;
+    }
+    if (l.startsWith(">")) return { content: lines.join("\n"), quoted: "", ineligible: "quote_without_header" };
+  }
+  if (marker < 0) return { content: lines.join("\n"), cased: cased.join("\n"), quoted: "", ineligible: null };
+  const quoted = [];
+  for (const line of lines.slice(marker + 1)) {
+    const l = line.trim();
+    if (!l) continue;
+    if (l.startsWith(">")) quoted.push(l.replace(/^(?:>\s?)+/, ""));
+    else if (QUOTE_HEADER.test(l)) quoted.push(l);
+    else return { content: lines.join("\n"), quoted: "", ineligible: "prose_after_quote" };
+  }
+  return { content: lines.slice(0, marker).join("\n"), cased: cased.slice(0, marker).join("\n"), quoted: quoted.join("\n"), ineligible: null };
+}
+
+/** Back-compat: the reply content without a valid trailing quoted block (the whole text when not valid). */
+function dequote(text) {
+  return splitQuoted(text).content;
+}
+
+/** Closed-vacancy BLOCK list over the RAW text (quoted block included). @returns {string|null} */
+function blockVeto(...texts) {
+  const t = texts.map(ackFold).join("\n");
+  const v = BLOCK.exec(t);
+  return v ? `block:${v[0].trim().slice(0, 30)}` : null;
 }
 
 /**
@@ -570,21 +670,25 @@ function dequote(text) {
 function ackAllow(text) {
   const raw = String(text || "");
   if (raw.length > 20000) return { ok: false, reason: "too_long" };
-  const t = dequote(raw);
+  const sq = splitQuoted(raw);
+  if (sq.ineligible) return { ok: false, reason: sq.ineligible };
+  let t = sq.content;
   if (/[^\x00-\x7f]/.test(t)) return { ok: false, reason: "non_ascii" };
+  if (POSTSCRIPT.test(t)) return { ok: false, reason: "postscript" };
+  const sig = SIGNOFF_SCAN.exec(t);
+  if (sig) {
+    // the signature is judged on the text as written (case kept): real signatures are capitalised
+    if (sq.cased.length !== t.length || /[^\x00-\x7f]/.test(sq.cased)) return { ok: false, reason: "non_ascii" };
+    const problem = signatureProblem(sq.cased.slice(sig.index + sig[0].length));
+    if (problem) return { ok: false, reason: problem };
+    t = t.slice(0, sig.index);
+  }
   const frags = t.split(/[.!?;:,\n]+|\s-\s|\s(?:and|et)\s/).map((x) => x.replace(/["()[\]*_~]+/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
   if (!frags.length) return { ok: false, reason: "empty" };
   if (frags.length > 80) return { ok: false, reason: "too_many_sentences" };
   let hasAck = false;
-  for (let i = 0; i < frags.length; i += 1) {
-    const f = frags[i];
+  for (const f of frags) {
     if (f.length > 300) return { ok: false, reason: "sentence_too_long" };
-    if (SIGNOFF.test(f)) {
-      const rest = frags.slice(i + 1);
-      // signature only: short lines of names/titles/company/phone/url - no sentence words, no "PS"
-      if (rest.length > MAX_AFTER_SIGNOFF || rest.some((x) => x.length > 80 || !SIGLINE.test(x) || /^(?:ps|p\.s|nb|n\.b)\b/.test(x))) return { ok: false, reason: "after_signoff" };
-      break;
-    }
     if (ACK_CLASS.some((r) => r.test(f)) || COURTESY_ACK.some((r) => r.test(f))) {
       hasAck = true;
       continue;
@@ -601,29 +705,33 @@ function isAcknowledgement(text) {
 }
 
 /**
- * Deterministic, injection-safe classification of a SANITIZED reply body. Only proposes.
+ * Deterministic, injection-safe classification of a SANITIZED reply body. Only proposes. Category rules
+ * run on the reply content (a valid trailing quoted block - e.g. the candidate's own mail - is not
+ * classified); `acknowledgement` = eligible for an acknowledgement (see the ALLOWLIST notes above).
  * @returns {{category: string, evidence: {category: string, phrase: string}[], proposedStatus: string|null, instructionLike: boolean, acknowledgement: boolean}}
  */
 function classifyReply(text) {
-  const t = foldText(text);
+  const raw = String(text || "");
+  const sq = splitQuoted(raw.slice(0, 20000));
+  const t = foldText(sq.ineligible ? raw : sq.content);
   const evidence = [];
   for (const [category, patterns] of RULES) {
-    for (const re of patterns) {
-      const hit = re.exec(t);
+    for (const rx of patterns) {
+      const hit = rx.exec(t);
       if (hit) evidence.push({ category, phrase: hit[0].trim().slice(0, 80) });
     }
   }
-  const allow = ackAllow(text);
+  const allow = ackAllow(raw);
   const hasAck = allow.ok || evidence.some((e) => e.category === "acknowledgement");
   const otherCategory = evidence.some((e) => e.category !== "acknowledgement");
-  const veto = hasAck ? (otherCategory ? "other_category" : !allow.ok ? `not_allowlisted:${allow.reason}` : ackVeto(dequote(text))) : null;
+  const veto = hasAck ? (otherCategory ? "other_category" : !allow.ok ? `not_allowlisted:${allow.reason}` : ackVeto(sq.content) || blockVeto(raw)) : null;
   const acknowledgement = hasAck && !veto;
   if (acknowledgement && !evidence.some((e) => e.category === "acknowledgement")) evidence.push({ category: "acknowledgement", phrase: "allowlisted acknowledgement" });
   // a vetoed acknowledgement is not reported as one
   const kept = acknowledgement ? evidence : evidence.filter((e) => e.category !== "acknowledgement");
   const first = RULES.map(([cat]) => cat).find((cat) => kept.some((e) => e.category === cat));
   const category = first || "other";
-  return { category, evidence: kept.slice(0, 20), proposedStatus: PROPOSED_STATUS[category] || null, instructionLike: INSTRUCTION_LIKE.some((re) => re.test(t)), acknowledgement, ...(veto ? { ackVeto: veto } : {}) };
+  return { category, evidence: kept.slice(0, 20), proposedStatus: PROPOSED_STATUS[category] || null, instructionLike: INSTRUCTION_LIKE.some((rx) => rx.test(foldText(raw))), acknowledgement, ...(veto ? { ackVeto: veto } : {}) };
 }
 
-module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, isPlausibleBounce, bounceStatus, ackVeto, ackAllow, dequote, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };
+module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, isPlausibleBounce, bounceStatus, ackVeto, blockVeto, ackAllow, splitQuoted, dequote, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };

@@ -6,6 +6,9 @@
 //   GET  /messages?state=&applicationId=     scoped (unmatched: Admin/SuperAdmin/Manager; Candidate: released only)
 //   GET  /messages/:id
 //   POST /messages/:id/assign                {applicationId}            jobsearch:approve + scope (message AND application)
+//   POST /messages/:id/confirm-acknowledgement {}                       jobsearch:approve + scope; matched message from the
+//                                            employer's verified domain -> employer_acknowledgement evidence (user actor);
+//                                            404 outside scope, 403 Candidate / no approve, 409 not matched / wrong sender
 //   POST /messages/:id/share-with-candidate  {}                         staff jobsearch:write + scope
 //   POST /messages/:id/apply-classification {status, reason?}          jobsearch:approve + scope; status interview|offer|rejected
 //   POST /messages/:id/draft                 {lang?}                    staff jobsearch:write + scope
@@ -101,6 +104,11 @@ router.get("/messages/:id", verifyToken, asyncHandler(async (req, res) => {
 router.post("/messages/:id/assign", verifyToken, asyncHandler(async (req, res) => {
   const b = pick(req, ["applicationId"]);
   res.json(await inbox.assignReview({ messageId: req.params.id, applicationId: b.applicationId, actor: req.user }));
+}));
+
+router.post("/messages/:id/confirm-acknowledgement", verifyToken, asyncHandler(async (req, res) => {
+  pick(req, []);
+  res.json(await inbox.confirmAcknowledgement({ messageId: req.params.id, actor: req.user }));
 }));
 
 router.post("/messages/:id/share-with-candidate", verifyToken, asyncHandler(async (req, res) => {

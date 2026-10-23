@@ -21,6 +21,9 @@ process.env.INBOUND_MAIL_MAX_BYTES = String(256 * 1024);
 delete process.env.CLAMAV_HOST;
 delete process.env.MAIL_REAL_SEND;
 delete process.env.JOBSEARCH_INBOX_REVIEWER_ID;
+// The tests written for rounds 1-3 exercise the OPT-IN automatic acknowledgement path, so it is turned on
+// explicitly here; the round-4 tests switch it off (the default) with withAutoAck(undefined, ...).
+process.env.INBOUND_AUTO_ACK_EVIDENCE = "true";
 
 const applicationService = require("../modules/jobsearch/applicationService");
 const jobStore = require("../modules/jobsearch/jobStore");
@@ -1536,13 +1539,15 @@ test("I1 round 3 (allowlist): classifier tables - reviewer NEG/POS/cls2 + own ro
   for (const [exp, text, src] of all) {
     const got = replyMatcher.classifyReply(text).acknowledgement;
     if (got && !exp) fa.push(`${src}: ${text}`);
-    if (!got && exp) fr.push(`${src}: ${text}`);
+    if (!got && exp && !RULED_OUT.has(text)) fr.push(`${src}: ${text}`);
   }
   assert.deepEqual(fa, [], "false accepts");
   assert.deepEqual(fr, [], "false rejects");
   assert.ok(ROUND3_NEW.filter(([e]) => !e).length >= 30);
   // signature blocks are ignored only when they look like signatures
-  assert.equal(replyMatcher.classifyReply("We have received your application. Kind regards,\nJane Doe\nHR Manager\nNorthwind Energy\n+1 555-123-4567\nwww.northwind.example").acknowledgement, true);
+  // round 4: at most 4 lines after the sign-off
+  assert.equal(replyMatcher.classifyReply("We have received your application. Kind regards,\nJane Doe\nHR Manager\nNorthwind Energy\n+1 555-123-4567").acknowledgement, true);
+  assert.equal(replyMatcher.classifyReply("We have received your application. Kind regards,\nJane Doe\nHR Manager\nNorthwind Energy\n+1 555-123-4567\nwww.northwind.example").acknowledgement, false);
   assert.equal(replyMatcher.classifyReply("We have received your application. Regards,\nJane\nPS we filled the role").acknowledgement, false);
   // quoted original message below the reply is ignored
   assert.equal(replyMatcher.classifyReply("We have received your application.\n\nOn Mon, 3 Nov 2026, VITA wrote:\n> I am not available on Mondays, please call me").acknowledgement, true);
@@ -1557,7 +1562,7 @@ test("I1 round 3: end-to-end evidence over the reviewer's 109 probe items (align
     const r = await inbox.ingest(reply(w, { text, authResults: authOk(w) }));
     const confirmed = (await subStatus(w.sub.id)) === "confirmed_submitted";
     if (confirmed && !exp) fa.push(`${text} -> ${JSON.stringify(r.evidence)}`);
-    if (!confirmed && exp) fr.push(`${text} -> ${JSON.stringify(r.evidence)}`);
+    if (!confirmed && exp && !RULED_OUT.has(text)) fr.push(`${text} -> ${JSON.stringify(r.evidence)}`);
   }
   assert.deepEqual(fa, []);
   assert.deepEqual(fr, []);
@@ -1623,4 +1628,445 @@ test("bounce round 3 (reviewer bounce.js/b2.js): staff task only for a provider-
   } finally {
     delete process.env.INBOUND_BOUNCE_DOMAINS;
   }
+});
+
+// ---------------------------------------------------------------- round 4 (controller ruling: staff-confirmed acknowledgements)
+
+// Reviewer round-3 probe (t13r3/probe.js): 86 negatives (+3 spoofed-DKIM rows below) and 31 genuine replies.
+const PROBE3_NEG = [
+ "We have received your application for the expired vacancy.",
+ "We received your application for the archived Electrician posting.",
+ "Your application for the expired posting was received.",
+ "We have received your application. We appreciate your interest in reapplying next year.",
+ "Thank you for applying. Thank you for your interest in future openings with Northwind.",
+ "Application received. We appreciate your interest in our talent pool for future vacancies.",
+ "Merci pour votre candidature. Merci pour votre intérêt pour notre prochaine campagne de recrutement.",
+ "Thank you for applying to our expired graduate scheme.",
+ "We have received your application. We will get back to you no later than never.",
+ "We have received your application. We will get back to you no later than next spring.",
+ "Thank you for applying. Headcount reallocated to HR.",
+ "Thank you for applying. Electrician hiring paused recruitment.",
+ "We have received your application.\nKind regards,\nAnna\nUpdate: vacancy staffed internally",
+ "We have received your application.\nBest regards,\nAnna Smith\nVacancy now staffed internally",
+ "Thank you for applying.\nCordialement,\nMarie\nPoste attribuée en interne",
+ "We have received your application.\nRegards,\nHR\nRole went to internal applicant",
+ "We have received your application.\nRegards\nAnna\nPostscript: hiring concluded already",
+ "We have received your application.\nRegards,\nAnna\nP.S. hiring concluded",
+ "Thank you for applying. Kind regards, Anna. Hiring concluded last Friday",
+ "We have received your application.\n\nOn Mon, 3 Nov 2026 at 10:00, Karim Ben <karim@mail.example> wrote:\n> Dear HR, please find my CV attached.\n\nSadly the vacancy was staffed internally last week.",
+ "We have received your application.\nOn Mon, Karim wrote:\nThe vacancy was filled internally, sorry.",
+ "Thank you for applying.\nOn Tue, 4 Nov 2026, HR wrote:\nWe will not be progressing your candidacy.",
+ "Thank you for your application.\n> We regret that the post is filled.\n> We wish you luck elsewhere.",
+ "Thank you for applying.\n> Your application was declined.",
+ "Thank you for applying.\n-----Original Message-----\nThe vacancy is closed and we will not proceed.",
+ "We have received your application.\n__________\nHiring for this vacancy is frozen; no decision will be made.",
+ "Nous avons bien reçu votre candidature.\nLe lun. 3 nov. 2026, Karim a écrit :\nLe poste est déjà pourvu, désolé.",
+ "We have received your application.\nFrom: HR\nFrom: HR\nThe vacancy was staffed internally, sorry.",
+ "We have received your application.\nOn Mon, X wrote:\nCould you send your diploma?",
+ "Thank you for applying.\n> Please send your references by Friday.",
+ "We appreciate your interest and will keep your CV on file.",
+ "We will contact you if there are updates; otherwise please assume you were not selected.",
+ "Thank you for applying. Applicants who do not hear from us within two weeks should assume their application was unsuccessful.",
+ "Application received. We will review it once you submit the missing form.",
+ "Thanks, the role is closed.",
+ "Thank you for applying; the vacancy went to an internal applicant.",
+ "Thank you for applying, the vacancy went to an internal applicant",
+ "Thank you for applying - vacancy staffed",
+ "Thank you for applying and the vacancy is staffed",
+ "THANK YOU FOR APPLYING. THE VACANCY HAS BEEN STAFFED INTERNALLY",
+ "Thank you for applying\nWe went with an internal applicant",
+ "Thank you for applying. We went with an internal applicant.",
+ "Thank you for applying. We hired internally.",
+ "Thank you for applying. We have appointed someone.",
+ "Thank you for applying. We have appointed another applicant.",
+ "Thank you for applying. The vacancy was staffed.",
+ "Thank you for applying. The successful applicant has been notified.",
+ "Thank you for applying. Your profile was not shortlisted.",
+ "Thank you for applying. We will review it.\n- vacancy staffed internally\n- recruitment concluded",
+ "<p>Thank you for applying.</p><p>The vacancy is now staffed.</p>",
+ "Thank you for applying. We will review your application after you take the online test.",
+ "We have received your application. We will review it after the hiring freeze is lifted.",
+ "We have received your application. We will contact you to arrange a phone screen.",
+ "We have received your application. Our team will review it and call you Monday at 9.",
+ "We have received your application. Expect a call from our recruiter on Monday.",
+ "Thank you for applying. Your application has been forwarded to our partner agency.",
+ "Thank you for applying. We received your application via the wrong portal.",
+ "We received your application twice. We will only consider the second one.",
+ "We have received your application. Salary expectations?",
+ "We have received your application. Tell us your notice period.",
+ "We have received your application. Your references will be contacted.",
+ "We have received your application. A security clearance is mandatory.",
+ "Thank you for applying. We will review your application. Note: French fluency is mandatory.",
+ "Thank you for applying. Unluckily we went another way.",
+ "Thank you for applying. Alas, we chose an internal applicant.",
+ "Thank you for applying. Your application is under review. Update: vacancy staffed.",
+ "Thank you for applying. We have received your application. Status: archived",
+ "Thank you for applying. We have received your application. Outcome: no",
+ "Thank you for applying. Good luck in your future job search.",
+ "Thank you for applying. Best of luck with your search elsewhere.",
+ "Thank you for your time. We have received your application. We wish you every success in your future endeavours.",
+ "We have received your application.\u200b The vacancy is filled.",
+ "We have received your applic\u0430tion. Vacancy staffed.",
+ "We have received your application.\u00a0Hiring concluded.",
+ "Nous avons bien reçu votre candidature. Le recrutement est clôturé.",
+ "Nous avons bien reçu votre candidature. Le poste a été attribué à un candidat interne.",
+ "Merci pour votre candidature. Nous avons choisi un autre profil.",
+ "Merci pour votre candidature. Nous reviendrons vers vous si un poste se libère.",
+ "Accusé de réception. Votre profil sera conservé dans notre vivier.",
+ "Nous avons bien reçu votre dossier. Merci d'envoyer votre diplôme.",
+ "Bonjour, nous avons bien reçu votre candidature. Le poste est gelé.",
+ "Nous avons bien reçu votre candidature. Nous vous contacterons pour un test technique.",
+ "Merci pour votre candidature. Recrutement terminé.",
+ "Nous avons bien reçu votre candidature / We have received your application. Hiring concluded.",
+ "Thank you for applying. Merci pour votre candidature. Le poste est attribué.",
+ "Thank you for applying. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Our team will review your application. Vacancy staffed internally.",
+];
+const PROBE3_POS = [
+ "We have received your application for the Site Supervisor position.",
+ "Thank you for applying to Acme Logistics. We have received your application.",
+ "Hello Sami, we have successfully received your CV.",
+ "Thank you for your application to the Welder role. Our recruitment team will review it shortly.",
+ "Dear Ms Haddad,\n\nThank you for applying. We have received your application and will be in touch if your profile matches our requirements.\n\nKind regards,\nTalent Acquisition\nAcme Logistics",
+ "Your application for the Warehouse Operative position has been received.",
+ "We confirm receipt of your application.",
+ "This email confirms that we have received your application.",
+ "Thanks for applying! Our hiring team will review your application within 5 business days.",
+ "Thank you for applying. This is an automated message from our ATS. Please do not reply to this email.",
+ "Thank you for submitting your application. We will be in touch.",
+ "Many thanks for your application. It is being processed.",
+ "Good morning, we have received your application. Best regards, HR team",
+ "We have received your application and will contact you if you are shortlisted.",
+ "Application received. Our team will review it carefully.",
+ "We acknowledge receipt of your CV for the Driver position.",
+ "Thank you for applying. Your application is now under review. Best wishes, The Recruitment Team",
+ "Thank you for applying. We've received your application. Cheers, Tom",
+ "Hi Karim,\nThanks for applying to the Plumber role.\nWe will get back to you soon.\nRegards,\nJane Doe\nRecruiter\nAcme Corp\n+33 1 23 45 67 89\nwww.acme.example",
+ "Nous avons bien reçu votre candidature pour le poste de technicien. Nous reviendrons vers vous prochainement.",
+ "Bonjour Karim,\nNous accusons réception de votre candidature.\nBien cordialement,\nService RH",
+ "Votre candidature a bien été enregistrée. Merci pour votre intérêt.",
+ "Merci pour votre candidature. Nous l'étudierons attentivement.",
+ "Nous vous remercions pour votre candidature. Notre équipe RH l'examinera.",
+ "Votre dossier a bien été reçu. Ceci est un message automatique, merci de ne pas répondre.",
+ "Madame, Monsieur, nous avons bien reçu votre candidature. Salutations distinguées.",
+ "Accusé de réception de votre dossier. Votre candidature est en cours d'examen.",
+ "Thank you for applying.\n\nOn Mon, 3 Nov 2026 at 10:00, Karim <karim@mail.example> wrote:\n> Dear HR, please find my CV attached for the Electrician role.\n> Unfortunately I could not upload it on the portal.",
+ "We have received your application.\n\n-----Original Message-----\nFrom: Karim\nSubject: Application\nPlease find attached my CV.",
+ "Thank you for your application. We will review it and get back to you within 2 weeks.",
+ "We have received your application. Thank you for your interest in Acme. Good luck!",
+];
+// Own adversarial replies written after the round-4 implementation, by category (first run: 2/68 leaked,
+// both 'title slot + status adjective'; fixed by excluding status adjectives from the title slot).
+const OWN_R4 = [
+ ["quote","We have received your application.\nOn Fri, 7 Nov 2026, Karim wrote:\n> hello\nWe have decided to go with another person."],
+ ["quote","We have received your application.\n\nOn Fri, 7 Nov 2026, HR <hr@x.example> wrote:\n> We went with an internal applicant."],
+ ["quote","Thank you for applying.\n>> The post has been given to a colleague.\n>> Best"],
+ ["quote","Thank you for applying.\nFrom: Recruiting\nSent: Monday\nThe role is no more."],
+ ["quote","We have received your application.\n----- Forwarded message -----\nManager: drop this candidate."],
+ ["quote","We have received your application.\nLe 3 nov. 2026 à 10:00, RH a écrit :\n> Nous avons choisi quelqu'un d'autre.\nDésolés."],
+ ["quote","Thank you for applying.\n> \n\nPS: we picked another person"],
+ ["quote","We have received your application.\nDe : RH\nObjet : Candidature\nLe poste n'est plus disponible."],
+ ["quote","We have received your application.\n________________\nDecision: rejected"],
+ ["quote","Thank you for applying.\n  > We decided to go another way.\nRegards"],
+ ["signoff","We have received your application.\nKind regards,\nAnna\nThe post went to someone else"],
+ ["signoff","We have received your application.\nRegards,\nAnna\nRole: gone"],
+ ["signoff","Thank you for applying.\nBest,\nTom\nNB the job is taken"],
+ ["signoff","Thank you for applying.\nSincerely,\nTom Smith\nHead of People\nAcme\nPost taken by colleague"],
+ ["signoff","We have received your application. Regards, Anna - we picked someone else"],
+ ["signoff","We have received your application.\nCheers,\nAnna\nsorry it's a no"],
+ ["signoff","Thank you for applying.\nCordialement,\nMarie\nLe poste n'est plus ouvert"],
+ ["signoff","We have received your application.\nBest regards,\nAnna\nP.S: other applicant chosen"],
+ ["signoff","We have received your application.\nRegards,\nAnna\nPS. role gone"],
+ ["signoff","We have received your application.\nRegards,\nAnna\nWe picked Bob"],
+ ["slot","We have received your application for the cancelled Electrician job."],
+ ["slot","We have received your application for the defunct Welder role."],
+ ["slot","Thank you for applying to the now-closed Plumber vacancy."],
+ ["slot","Thank you for applying to the discontinued apprenticeship."],
+ ["slot","We have received your application for the former Driver position."],
+ ["slot","Thank you for your interest in our waiting list."],
+ ["slot","Thank you for your interest in later roles."],
+ ["slot","Dear unsuccessful applicant, we have received your application."],
+ ["slot","Hello rejected candidate, thank you for applying."],
+ ["slot","Thank you for applying to Northwind. The Northwind hiring freeze team"],
+ ["softrej","Thank you for applying. We have decided to go with someone else."],
+ ["softrej","We have received your application. We picked another person."],
+ ["softrej","Thank you for applying. The post is no more available."],
+ ["softrej","Thank you for applying. The successful candidate starts Monday."],
+ ["softrej","We have received your application. Another person got the job."],
+ ["softrej","Thank you for applying. You were not the right fit."],
+ ["softrej","Thank you for applying. It is a no from us."],
+ ["softrej","Thank you for applying. The job is gone."],
+ ["hold","We have received your application. Hiring is on pause."],
+ ["hold","Thank you for applying. Everything is postponed until 2027."],
+ ["hold","We have received your application. The opening is delayed indefinitely."],
+ ["hold","Thank you for applying. Recruitment for this role is suspended."],
+ ["hold","Thank you for applying. The budget for this role was cut."],
+ ["request","We have received your application. Reply to confirm your interest."],
+ ["request","Thank you for applying. Mail us your diploma."],
+ ["request","We have received your application. Email us your passport copy."],
+ ["request","Thank you for applying. We would appreciate your references."],
+ ["request","We have received your application. Fill out the attached survey."],
+ ["request","Thank you for applying. Visit the portal to finish your profile."],
+ ["schedule","We have received your application. Join us on Teams Monday 10:00."],
+ ["schedule","Thank you for applying. Let's talk on Monday at 9."],
+ ["schedule","We have received your application. Come to our office Tuesday."],
+ ["schedule","Thank you for applying. Book a slot via the Calendly link."],
+ ["schedule","We have received your application. A phone screen is booked for Friday."],
+ ["fren","Nous avons bien reçu votre candidature. Nous avons retenu un autre candidat."],
+ ["fren","Merci pour votre candidature. Le poste a été supprimé."],
+ ["fren","Nous avons bien reçu votre candidature. Merci de nous appeler."],
+ ["fren","Accusé de réception. Le recrutement est reporté."],
+ ["fren","Nous avons bien reçu votre candidature. Votre profil a été transmis à un autre service."],
+ ["fren","Thank you for applying. Merci, mais le poste est déjà occupé."],
+ ["fren","Merci pour votre candidature. We picked someone else."],
+ ["unicode","We have received your application. The vacancy is \ufb01lled."],
+ ["unicode","We have received your application. \uff26\uff49\uff4c\uff4c\uff45\uff44."],
+ ["unicode","We have received your application.\u200b\nRegards,\nAnna\nrole gone"],
+ ["unicode","We have received your application. The role is fil\u00adled."],
+ ["unicode","We have received your application. \u0422he job is taken."],
+ ["unicode","Thank you for applying\u2028The vacancy was staffed."],
+ ["unicode","We have received your application.\u00a0We picked another person."],
+];
+// Genuine replies that the round-4 ruling deliberately makes INELIGIBLE (staff confirm them by hand):
+const RULED_OUT = new Set([
+  "Application received. Thank you for your interest in Northwind.", // courtesy objects: closed list (no company slot)
+  "We have received your application. Thank you for your interest in Acme. Good luck!", // idem
+  PROBE3_POS.find((t) => t.startsWith("Hi Karim,\nThanks for applying to the Plumber role.")), // 5 lines after the sign-off (max 4)
+  PROBE3_POS.find((t) => t.includes("-----Original Message-----")), // unquoted prose after a quote marker
+]);
+assert.equal(RULED_OUT.size, 4);
+// Signature-line probes written after the first fix (post-sign-off category, second batch).
+const SIG_R4 = [
+  [false, "Bob starts Monday"], [false, "Bob joins us"], [false, "Bob won"], [false, "Bob Starts Soon"], [false, "bob got it"], [false, "Bob Got It"],
+  [false, "Bob Took Over"], [false, "Role Gone"], [false, "Bob Is In"], [false, "Bob Has It"], [false, "Seat Taken"], [false, "Bob Replaces You"],
+  [false, "Bob Got There First"], [false, "No vacancy left"], [false, "Try elsewhere"], [false, "Not hiring"], [false, "Bob accepted the offer"],
+  [false, "position taken"], [false, "all seats taken"], [false, "Bob hired"], [false, "Anna\nUpdate: vacancy staffed internally"],
+  [false, "Anna\nB\nC\nD\nE"],
+  [true, "Anna Smith"], [true, "Jane Doe\nHR Manager\nNorthwind Energy\n+1 555-123-4567"], [true, "Talent Acquisition\nAcme Logistics"],
+  [true, "Jean de la Fontaine\nService RH"], [true, "J. Doe, Recruiter"], [true, "The Recruitment Team"], [true, "Tom"], [true, "Jane Doe\nwww.northwind.example\njane@northwind.example"],
+];
+
+async function withAutoAck(value, fn) {
+  const prev = process.env.INBOUND_AUTO_ACK_EVIDENCE;
+  if (value === undefined) delete process.env.INBOUND_AUTO_ACK_EVIDENCE;
+  else process.env.INBOUND_AUTO_ACK_EVIDENCE = value;
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.INBOUND_AUTO_ACK_EVIDENCE;
+    else process.env.INBOUND_AUTO_ACK_EVIDENCE = prev;
+  }
+}
+const SPOOFED_DKIM = [
+  () => "mx.ours; dkim=pass header.d=evil.example; spf=pass; dmarc=pass",
+  (w) => `mx.ours; dkim=pass header.d=${w.domain}.evil.example; spf=pass`,
+  (w) => `mx.ours; dkim=pass header.d=evil${w.domain}; spf=pass`,
+];
+const ackTasks = async (appId) => (await q("SELECT * FROM js_tasks WHERE application_id=$1 AND reason='confirm_acknowledgement' ORDER BY id", [appId])).rows;
+
+test("round 4: INBOUND_AUTO_ACK_EVIDENCE defaults to false in every environment; only 'true' opts in; .env.example documents it", async () => {
+  const nodeEnv = process.env.NODE_ENV;
+  try {
+    for (const env of ["test", "production", "development", undefined]) {
+      if (env === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = env;
+      await withAutoAck(undefined, () => assert.equal(inbox.autoAckEvidence(), false, `NODE_ENV=${env}`));
+      for (const v of ["", "false", "0", "1", "yes", "on", "truthy"]) await withAutoAck(v, () => assert.equal(inbox.autoAckEvidence(), false, `value ${v}`));
+      for (const v of ["true", " TRUE ", "True"]) await withAutoAck(v, () => assert.equal(inbox.autoAckEvidence(), true, `value ${v}`));
+    }
+  } finally {
+    process.env.NODE_ENV = nodeEnv;
+  }
+  const example = fs.readFileSync(path.join(__dirname, "..", ".env.example"), "utf8");
+  assert.match(example, /^INBOUND_AUTO_ACK_EVIDENCE=false$/m);
+  assert.match(example, /residual false-accept risk/);
+});
+
+test("round 4 classifier: every reviewer table + PROBE3 + own adversarial set -> 0 false accepts; genuine >= 90% (only the ruled-out ones refused)", () => {
+  const neg = [
+    ...PROBE2_NEG, ...CLS2, ...PROBE3_NEG, ...OWN_R4.map(([, t]) => t),
+    ...ROUND3_NEW.filter(([e]) => !e).map(([, t]) => t), ...CLS_CASES.filter(([e]) => !e).map(([, t]) => t),
+    ...SIG_R4.filter(([e]) => !e).map(([, s]) => `We have received your application.\nRegards,\n${s}`),
+  ];
+  const pos = [
+    ...PROBE2_POS, ...PROBE3_POS, ...ROUND3_NEW.filter(([e]) => e).map(([, t]) => t), ...CLS_CASES.filter(([e]) => e).map(([, t]) => t),
+    ...SIG_R4.filter(([e]) => e).map(([, s]) => `We have received your application.\nRegards,\n${s}`),
+  ];
+  assert.ok(OWN_R4.length >= 60);
+  assert.deepEqual([...new Set(OWN_R4.map(([c]) => c))].sort(), ["fren", "hold", "quote", "request", "schedule", "signoff", "slot", "softrej", "unicode"]);
+  const fa = neg.filter((t) => replyMatcher.classifyReply(t).acknowledgement);
+  assert.deepEqual(fa, [], "false accepts");
+  const refused = pos.filter((t) => !replyMatcher.classifyReply(t).acknowledgement);
+  assert.deepEqual(refused.sort(), [...RULED_OUT].sort(), "only the ruled-out genuine replies are refused");
+  assert.ok((pos.length - refused.length) / pos.length >= 0.9);
+  const p3 = PROBE3_POS.filter((t) => replyMatcher.classifyReply(t).acknowledgement).length;
+  assert.ok(p3 / PROBE3_POS.length >= 0.9, `${p3}/${PROBE3_POS.length}`);
+});
+
+test("round 4 structure: quoted blocks, sign-off/P.S., closed slots, cheap false rejects", () => {
+  const ack = (t) => replyMatcher.classifyReply(t).acknowledgement;
+  // (a) quoted text: only a trailing header-introduced block of '>' / header lines is set aside
+  assert.equal(replyMatcher.splitQuoted("Thanks.\nOn Mon, X wrote:\nThe vacancy was filled.").ineligible, "prose_after_quote");
+  assert.equal(replyMatcher.splitQuoted("Thanks.\n> quoted").ineligible, "quote_without_header");
+  assert.equal(replyMatcher.splitQuoted("Thanks.\n-----Original Message-----\nFrom: A\nSubject: B\n> x").ineligible, null);
+  assert.equal(replyMatcher.splitQuoted("Thanks.\nOn Mon, X wrote:\n> a\n>> b").content, "thanks.");
+  assert.equal(ack("We have received your application.\nOn Mon, X wrote:\n> please call me, I could not upload"), true, "candidate's quoted words do not veto");
+  assert.equal(replyMatcher.classifyReply("Thank you for applying.\nOn Mon, X wrote:\n> Unfortunately I could not upload it").category, "acknowledgement", "no rejection from quoted text");
+  assert.equal(ack("We have received your application.\nOn Mon, X wrote:\n> The vacancy is staffed."), false, "the BLOCK list still sees quoted text");
+  assert.equal(ack("Thank you for applying.\nFrom: HR\nThe role went elsewhere."), false);
+  // (b) P.S. before splitting; signature max 4 short lines, no prose
+  for (const ps of ["P.S. hiring concluded", "PS: role gone", "N.B. role gone", "Postscript: role gone", "ps role gone"]) assert.equal(ack(`We have received your application. Regards, Anna. ${ps}`), false, ps);
+  assert.equal(ack("We have received your application.\nKind regards,\nAnna\nVacancy now staffed internally"), false);
+  assert.equal(ack("Thank you for applying. Kind regards, Anna. Hiring concluded last Friday"), false);
+  // (c) closed courtesy objects + no closed-vacancy words in slots
+  for (const t of ["Thank you for your interest in future openings with Northwind.", "We appreciate your interest in our talent pool.", "Thank you for applying to our expired graduate scheme.", "Thank you for applying. Headcount reallocated to HR.", "Thank you for applying. Electrician hiring paused recruitment."]) assert.equal(ack(t), false, t);
+  for (const t of ["Thank you for your interest in the position.", "We appreciate your interest in joining our team.", "Thank you for your time.", "Thank you for your CV."]) assert.equal(ack(`We have received your application. ${t}`), true, t);
+  // (d) cheap false rejects fixed
+  for (const t of [
+    "We've received your application.", "Your application for the Warehouse Operative position has been received.", "Thank you for your application to the Welder role.",
+    "Thank you for your application. We will review it and get back to you within 2 weeks.", "We have received your application and will be in touch if your profile matches our requirements.",
+  ]) assert.equal(ack(t), true, t);
+  assert.equal(ack("We have received your application. We will get back to you no later than next spring."), false, "no open date slot");
+  assert.equal(ack("We have received your application. We will get back to you no later than 15 November."), true);
+});
+
+test("round 4 opt-in (INBOUND_AUTO_ACK_EVIDENCE=true): reviewer PROBE3 89 negatives + own set -> no evidence; genuine recorded (>= 90%)", async () => {
+  await withAutoAck("true", async () => {
+    const fa = [];
+    const recorded = [];
+    const run = async (text, authOf) => {
+      const w = await world();
+      const r = await inbox.ingest(reply(w, { text, authResults: authOf ? authOf(w) : authOk(w) }));
+      const ok = (await subStatus(w.sub.id)) === "confirmed_submitted";
+      return { ok, r };
+    };
+    const negatives = [...PROBE3_NEG.map((t) => [t]), ...SPOOFED_DKIM.map((a) => ["We have received your application.", a]), ...OWN_R4.map(([, t]) => [t])];
+    assert.equal(PROBE3_NEG.length + SPOOFED_DKIM.length, 89);
+    for (const [t, a] of negatives) if ((await run(t, a)).ok) fa.push(t);
+    for (const t of PROBE3_POS) if ((await run(t)).ok) recorded.push(t);
+    assert.deepEqual(fa, [], "false accepts");
+    assert.deepEqual(PROBE3_POS.filter((t) => !recorded.includes(t)).sort(), [...RULED_OUT].filter((t) => PROBE3_POS.includes(t)).sort());
+    assert.ok(recorded.length / PROBE3_POS.length >= 0.9, `${recorded.length}/${PROBE3_POS.length}`);
+  });
+});
+
+test("round 4 default (flag unset): NO evidence for any reply; a suggestion task only for eligible genuine acknowledgements; submission stays 'sent'", async () => {
+  await withAutoAck(undefined, async () => {
+    const wrong = [];
+    const cases = [
+      ...PROBE3_NEG.map((t) => [t, false]), ...SPOOFED_DKIM.map((a) => ["We have received your application.", false, a]),
+      ...PROBE3_POS.map((t) => [t, !RULED_OUT.has(t)]),
+    ];
+    for (const [text, expectSuggestion, authOf] of cases) {
+      const w = await world();
+      const r = await inbox.ingest(reply(w, { text, authResults: authOf ? authOf(w) : authOk(w) }));
+      const sub = (await q("SELECT * FROM js_submissions WHERE id=$1", [w.sub.id])).rows[0];
+      const tasks = await ackTasks(w.appId);
+      const flagged = Boolean(((await msgRow(r.id)).classification || {}).suggested_ack);
+      const confirmedEv = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND kind='submission.confirmed'", [w.candidateId])).rows[0].n;
+      if (sub.status !== "sent" || (await statusOf(w.appId)) !== "sent" || (sub.evidence.confirmations || []).length || confirmedEv
+        || tasks.length !== (expectSuggestion ? 1 : 0) || flagged !== expectSuggestion) {
+        wrong.push(`${JSON.stringify(text).slice(0, 90)}: sub=${sub.status} tasks=${tasks.length} flagged=${flagged} ev=${JSON.stringify(r.evidence)}`);
+      }
+    }
+    assert.deepEqual(wrong, []);
+  });
+});
+
+test("round 4 default: suggestion task (deduped, staff-only, sanitized excerpt); staff confirm endpoint is the human click", async () => {
+  await withAutoAck(undefined, async () => {
+    const w = await world();
+    const text = "<p>Thank you for applying.</p><script>alert(1)</script><p>We have received your application.</p>";
+    const candEvents = async () => (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate' AND kind <> 'application.update'", [w.candidateId])).rows[0].n;
+    const ev0 = await candEvents();
+    const r = await inbox.ingest(reply(w, { text, authResults: authOk(w) }));
+    assert.equal(r.evidence.recorded, false);
+    assert.equal(r.evidence.reason, "staff_confirmation_required");
+    assert.equal(r.evidence.suggested, true);
+    const [task] = await ackTasks(w.appId);
+    assert.equal(task.id, r.evidence.taskId);
+    assert.equal(task.status, "open");
+    assert.equal(task.message_id, r.id);
+    assert.equal(task.assigned_to, w.managerId);
+    assert.ok(task.detail.startsWith(`message:${r.id}: `), task.detail);
+    assert.ok(task.detail.length <= `message:${r.id}: `.length + 200);
+    assert.ok(!/[<>]|script|alert/.test(task.detail), task.detail);
+    assert.equal((await msgRow(r.id)).classification.suggested_ack, true);
+    const staffEv = (await q("SELECT * FROM js_events WHERE kind='staff.ack_suggested' AND payload->>'messageId'=$1", [String(r.id)])).rows;
+    assert.equal(staffEv.length, 1);
+    assert.equal(staffEv[0].audience, "staff");
+    assert.equal(staffEv[0].user_id, w.managerId);
+    assert.equal(await candEvents(), ev0, "nothing candidate-visible beyond the neutral update");
+    // dedupe: replay -> duplicate; a second acknowledgement for the same application -> the same open task
+    assert.equal((await inbox.ingest(reply(w, { messageId: (await msgRow(r.id)).message_id, text, authResults: authOk(w) }))).duplicate, true);
+    const r2 = await inbox.ingest(reply(w, { text: "We have received your application.", authResults: authOk(w) }));
+    assert.equal(r2.evidence.taskId, task.id);
+    assert.equal((await ackTasks(w.appId)).length, 1);
+    assert.equal((await q("SELECT count(*)::int n FROM js_events WHERE kind='staff.ack_suggested' AND candidate_id=$1", [w.candidateId])).rows[0].n, 1);
+    // not eligible -> no suggestion: auto-reply, unauthenticated, negative
+    const w3 = await world();
+    await inbox.ingest(reply(w3, { text: "We have received your application.", authResults: authOk(w3), headers: { "Auto-Submitted": "auto-replied" } }));
+    await inbox.ingest(reply(w3, { text: "We have received your application.", authResults: "mx.vita.test; dkim=pass; spf=pass" }));
+    await inbox.ingest(reply(w3, { text: "We have received your application. The vacancy is staffed.", authResults: authOk(w3) }));
+    assert.equal((await ackTasks(w3.appId)).length, 0);
+    assert.equal(await subStatus(w3.sub.id), "sent");
+
+    // ---- the human click: POST /jobsearch/messages/:id/confirm-acknowledgement
+    const url = `/jobsearch/messages/${r.id}/confirm-acknowledgement`;
+    assert.equal((await http("POST", url, await candidateToken(w.userId), {})).status, 403, "Candidate");
+    const otherManager = await mkUser("Manager");
+    assert.equal((await http("POST", url, tok(otherManager, "Manager"), {})).status, 404, "staff B (not in scope)");
+    const agent = await mkUser("Agent");
+    await q("UPDATE candidates SET assigned_to=$1 WHERE id=$2", [agent, w.candidateId]);
+    const agentRes = await http("POST", url, tok(agent, "Agent"), {});
+    assert.ok([403, 404].includes(agentRes.status), `Agent without jobsearch:approve: ${agentRes.status}`);
+    await q("UPDATE candidates SET assigned_to=$1 WHERE id=$2", [w.managerId, w.candidateId]);
+    assert.equal((await http("POST", url, tok(w.managerId, "Manager"), { extra: 1 })).status, 400, "unknown fields refused");
+    assert.equal(await subStatus(w.sub.id), "sent", "nothing recorded by refused calls");
+    const ok = await http("POST", url, tok(w.managerId, "Manager"), {});
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.status, "confirmed_submitted");
+    const sub = (await q("SELECT * FROM js_submissions WHERE id=$1", [w.sub.id])).rows[0];
+    assert.equal(sub.status, "confirmed_submitted");
+    assert.equal(sub.evidence.confirmations.length, 1);
+    assert.equal(sub.evidence.confirmations[0].kind, "employer_acknowledgement");
+    assert.equal(sub.evidence.confirmations[0].actor, `staff:${w.managerId}`, "user actor, never the system grant");
+    assert.equal(sub.evidence.confirmations[0].detail.messageId, r.id);
+    assert.equal(await statusOf(w.appId), "confirmed_submitted");
+    assert.equal((await ackTasks(w.appId))[0].status, "resolved");
+    assert.equal((await q("SELECT count(*)::int n FROM js_audit_events WHERE action='message.ack_confirmed' AND application_id=$1", [w.appId])).rows[0].n, 1);
+    assert.equal((await q("SELECT count(*)::int n FROM audit_logs WHERE action='jobsearch.message.confirm_acknowledgement' AND record_id=$1", [String(r.id)])).rows[0].n, 1);
+  });
+});
+
+test("round 4 confirm endpoint: 404/409 unless the message is matched to THIS application and from the verified domain; the existing evidence route still works", async () => {
+  await withAutoAck(undefined, async () => {
+    const adminTok = tok(adminId, "Admin");
+    assert.equal((await http("POST", "/jobsearch/messages/999999/confirm-acknowledgement", adminTok, {})).status, 404);
+    const w = await world();
+    // unmatched (wrong domain) -> review queue -> 409
+    const evil = await inbox.ingest(reply(w, { from: "hr@evil-recruiter.example", text: "We have received your application.", authResults: "mx.vita.test; dkim=pass header.d=evil-recruiter.example" }));
+    assert.equal(evil.matched, false);
+    const r1 = await http("POST", `/jobsearch/messages/${evil.id}/confirm-acknowledgement`, adminTok, {});
+    assert.equal(r1.status, 409, JSON.stringify(r1.body));
+    // staff attach it to the application anyway: still not from the verified domain -> 409, nothing recorded
+    assert.equal((await http("POST", `/jobsearch/messages/${evil.id}/assign`, adminTok, { applicationId: w.appId })).status, 200);
+    const r2 = await http("POST", `/jobsearch/messages/${evil.id}/confirm-acknowledgement`, adminTok, {});
+    assert.equal(r2.status, 409, JSON.stringify(r2.body));
+    assert.equal(await subStatus(w.sub.id), "sent");
+    // an outbound draft is not an inbound message
+    const good = await inbox.ingest(reply(w, { text: "We have received your application.", authResults: authOk(w) }));
+    const draft = await draftService.createDraft({ messageId: good.id, actor: w.manager });
+    assert.equal((await http("POST", `/jobsearch/messages/${draft.id}/confirm-acknowledgement`, adminTok, {})).status, 409);
+    // existing route: a message of ANOTHER application -> 409; this application's matched message -> confirmed
+    const w2 = await world({ managerId: w.managerId });
+    const other = await inbox.ingest(reply(w2, { text: "We have received your application.", authResults: authOk(w2) }));
+    const mtok = tok(w.managerId, "Manager");
+    const bad = await http("POST", `/jobsearch/submissions/${w.sub.id}/evidence`, mtok, { kind: "employer_acknowledgement", detail: { messageId: other.id } });
+    assert.equal(bad.status, 409, JSON.stringify(bad.body));
+    const viaRoute = await http("POST", `/jobsearch/submissions/${w.sub.id}/evidence`, mtok, { kind: "employer_acknowledgement", detail: { messageId: good.id } });
+    assert.equal(viaRoute.status, 200, JSON.stringify(viaRoute.body));
+    assert.equal(await subStatus(w.sub.id), "confirmed_submitted");
+    assert.equal((await ackTasks(w.appId)).filter((t) => t.status === "open").length, 0, "the existing route also resolves the suggestion task");
+    assert.equal(await subStatus(w2.sub.id), "sent", "the other application is untouched");
+  });
 });
