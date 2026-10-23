@@ -196,8 +196,18 @@ async function setUserActive({ user, userId, active }) {
   const uid = typeof userId === "string" && /^\d+$/.test(userId) ? Number(userId) : userId;
   if (!Number.isSafeInteger(uid) || uid <= 0) throw new HttpError(404, "Not found");
   const out = await inTx(async (client) => {
-    const u = await client.query("SELECT id, is_active FROM users WHERE id = $1 FOR UPDATE", [uid]);
+    // Task 19: lock every active SuperAdmin row FIRST (fixed order, before the target row) so two concurrent
+    // suspensions cannot remove the last two SuperAdmins and cannot deadlock each other.
+    const supers = active ? null : await client.query("SELECT id FROM users WHERE role = 'SuperAdmin' AND is_active = true ORDER BY id FOR UPDATE");
+    const u = await client.query("SELECT id, is_active, role FROM users WHERE id = $1 FOR UPDATE", [uid]);
     if (u.rowCount === 0) throw new HttpError(404, "Not found");
+    if (!active) {
+      // Task 19: never lock the administration out of the system.
+      if (uid === user.id) throw new HttpError(409, "You cannot suspend your own account");
+      if (u.rows[0].role === "SuperAdmin" && u.rows[0].is_active && !supers.rows.some((r) => r.id !== uid)) {
+        throw new HttpError(409, "Cannot suspend the last active SuperAdmin");
+      }
+    }
     const changed = u.rows[0].is_active !== active;
     await client.query("UPDATE users SET is_active = $2, token_version = token_version + 1 WHERE id = $1", [uid, active]);
     let cancelled = 0;

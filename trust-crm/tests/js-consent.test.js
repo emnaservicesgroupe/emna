@@ -392,6 +392,31 @@ test("soft-deleted candidate is ineligible", async () => {
   });
 });
 
+test("Task 19 should-fix c: an admin cannot suspend their own account, nor the last active SuperAdmin (409, nothing changed)", async () => {
+  await withApp(async (t) => {
+    const adminId = jwt.decode(t.adminToken).id;
+    const self = await t.call("POST", `/jobsearch/admin/users/${adminId}/suspend`, { token: t.adminToken });
+    assert.equal(self.status, 409);
+    assert.match(self.body.error, /own account/);
+    const su1 = await t.mkUser("su1@test.invalid", "SuperAdmin");
+    const su1Token = jwt.sign({ id: su1, role: "SuperAdmin" }, process.env.JWT_SECRET, { expiresIn: "1h" });
+    assert.equal((await t.call("POST", `/jobsearch/admin/users/${su1}/suspend`, { token: su1Token })).status, 409, "SuperAdmin self-suspend");
+    const last = await t.call("POST", `/jobsearch/admin/users/${su1}/suspend`, { token: t.adminToken });
+    assert.equal(last.status, 409);
+    assert.match(last.body.error, /last active SuperAdmin/);
+    assert.equal((await t.pool.query("SELECT is_active, token_version FROM users WHERE id=$1", [su1])).rows[0].is_active, true);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_audit_events WHERE action='account.suspend'")).rows[0].n, 0);
+    // with a second active SuperAdmin, one of them may be suspended (by someone else)
+    const su2 = await t.mkUser("su2@test.invalid", "SuperAdmin");
+    assert.equal((await t.call("POST", `/jobsearch/admin/users/${su1}/suspend`, { token: t.adminToken })).status, 200);
+    assert.equal((await t.call("POST", `/jobsearch/admin/users/${su2}/suspend`, { token: t.adminToken })).status, 409, "su2 is now the last one");
+    // reinstating is never blocked; suspending another Admin still works
+    assert.equal((await t.call("POST", `/jobsearch/admin/users/${su1}/reinstate`, { token: t.adminToken })).status, 200);
+    const other = await t.mkUser("adm2@test.invalid", "Admin");
+    assert.equal((await t.call("POST", `/jobsearch/admin/users/${other}/suspend`, { token: t.adminToken })).status, 200);
+  });
+});
+
 test("admin suspend cancels work, revokes sessions, audits; reinstate resurrects nothing", async () => {
   await withApp(async (t) => {
     const c = await t.newCandidate(t.agentA);
