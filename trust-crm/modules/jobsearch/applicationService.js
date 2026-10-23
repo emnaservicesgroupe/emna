@@ -552,7 +552,8 @@ async function countRecentSends(c, candidateId, interval) {
 /**
  * Whether an application may be approved WITHOUT a human (autoApprove; scheduler in Task 12).
  * Deny by default. allowed only when ALL hold:
- *  - mode automatic, settings.admin_approved_by set, >=1 active admin-approved js_automation_rules row;
+ *  - mode automatic, settings.admin_approved_by set, >=1 active admin-approved js_automation_rules row
+ *    (rule.type absent or 'auto_submit'; typed rules such as 'ack_reply' never authorize submissions);
  *  - status ready_for_review, nothing blocked, stored package still valid, no sensitive document
  *    (never auto-shared), every package document version listed in settings.approved_doc_versions;
  *  - submit consent, not paused/suspended, mode not search_only; job open;
@@ -575,7 +576,7 @@ async function autoApproveEligibility(application, opts = {}) {
   if (!app) return { allowed: false, reasons: ["application_not_found"] };
   const cid = app.candidate_id;
   const settings = (await c.query("SELECT * FROM js_candidate_settings WHERE candidate_id = $1", [cid])).rows[0] || {};
-  const rules = (await c.query("SELECT rule FROM js_automation_rules WHERE candidate_id = $1 AND active = true AND approved_by IS NOT NULL AND approved_at IS NOT NULL", [cid])).rows.map((r) => r.rule || {});
+  const rules = (await c.query("SELECT rule FROM js_automation_rules WHERE candidate_id = $1 AND active = true AND approved_by IS NOT NULL AND approved_at IS NOT NULL AND COALESCE(rule->>'type', 'auto_submit') = 'auto_submit'", [cid])).rows.map((r) => r.rule || {});
   if (settings.mode !== "automatic") reasons.push("mode_not_automatic");
   if (!settings.admin_approved_by) reasons.push("automatic_mode_not_admin_approved");
   if (!rules.length) reasons.push("no_admin_approved_rule");

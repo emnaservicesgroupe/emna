@@ -14,11 +14,25 @@ function setupError() {
   return err;
 }
 
+// Inbound IMAP polling is not implemented in this build (no IMAP client dependency). 'connected'
+// would claim replies are being read, so the adapter stays requires_setup until it is; inbound mail
+// arrives through the signed webhook POST /jobsearch/inbound/mail instead.
+const POLLING_IMPLEMENTED = false;
+
 async function status() {
   const m = missing();
-  if (m.length) return { status: "requires_setup", detail: `Missing env: ${m.join(", ")}` };
+  if (m.length) return { status: "requires_setup", detail: `Missing env: ${m.join(", ")}`, outbound: "not_configured", inbound: "not_implemented" };
   const real = process.env.MAIL_REAL_SEND === "true";
-  return { status: "connected", detail: real ? "imap_smtp (real sending enabled)" : "imap_smtp configured; sending disabled until MAIL_REAL_SEND=true" };
+  const outbound = real ? "configured (real sending enabled)" : "configured; sending disabled until MAIL_REAL_SEND=true";
+  if (!POLLING_IMPLEMENTED) {
+    return {
+      status: "requires_setup",
+      detail: `inbound polling not implemented; configure webhook/IMAP client (POST /jobsearch/inbound/mail with INBOUND_MAIL_SECRET). SMTP ${outbound}`,
+      outbound: real ? "real_send" : "configured_send_disabled",
+      inbound: process.env.INBOUND_MAIL_SECRET ? "webhook" : "not_configured",
+    };
+  }
+  return { status: "connected", detail: `imap_smtp; SMTP ${outbound}` };
 }
 
 async function send({ to, subject, text, html, attachments, headers } = {}) {
@@ -48,4 +62,4 @@ async function poll() {
   throw err;
 }
 
-module.exports = { status, send, poll };
+module.exports = { status, send, poll, POLLING_IMPLEMENTED };

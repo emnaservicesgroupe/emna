@@ -114,7 +114,9 @@ test("imapSmtp refuses to send unless MAIL_REAL_SEND=true", async () => {
   });
   delete process.env.MAIL_REAL_SEND;
   try {
-    assert.equal((await imap.status()).status, "connected");
+    // Honest status (Task 13): inbound polling is not implemented, so a configured mailbox is not 'connected'.
+    assert.equal((await imap.status()).status, "requires_setup");
+    assert.match((await imap.status()).detail, /inbound polling not implemented/);
     const r = await imap.send({ to: "a@test.invalid", subject: "s", text: "t" });
     assert.equal(r.accepted, false);
   } finally {

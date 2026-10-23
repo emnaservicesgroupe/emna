@@ -16,6 +16,7 @@ const jobsearchMatchesRoutes = require("./routes/jobsearchMatches");
 const jobsearchApplicationsRoutes = require("./routes/jobsearchApplications");
 const jobsearchSubmissionsRoutes = require("./routes/jobsearchSubmissions");
 const jobsearchAdminRoutes = require("./routes/jobsearchAdmin");
+const jobsearchInboxRoutes = require("./routes/jobsearchInbox");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 
 const app = express();
@@ -24,6 +25,8 @@ app.use(cors());
 // /jobsearch parses its own JSON first so parser errors (which carry the raw body,
 // possibly an OTP) are answered without logging; the global parser then skips
 // already-parsed requests. Non-jobsearch routes are unaffected.
+// The inbound-mail webhook needs the RAW body (HMAC over the exact bytes) and its own size cap.
+app.use("/jobsearch/inbound/mail", express.raw({ type: () => true, limit: Number(process.env.INBOUND_MAIL_MAX_BYTES) > 0 ? Number(process.env.INBOUND_MAIL_MAX_BYTES) : "1mb" }), jobsearchBodyErrorHandler);
 app.use("/jobsearch", express.json({ limit: "10mb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
@@ -51,6 +54,7 @@ app.use("/jobsearch", jobsearchMatchesRoutes);
 app.use("/jobsearch", jobsearchApplicationsRoutes);
 app.use("/jobsearch", jobsearchSubmissionsRoutes);
 app.use("/jobsearch", jobsearchAdminRoutes);
+app.use("/jobsearch", jobsearchInboxRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);
