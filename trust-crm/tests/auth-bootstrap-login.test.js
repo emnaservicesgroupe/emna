@@ -6,6 +6,8 @@ const { createTestDb, loadApp } = require("./helpers/db");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "auth-bootstrap-login-test-secret";
+// one proxy hop trusted, so X-Forwarded-For can stand in for many client addresses (fix round 2 race tests)
+process.env.TRUST_PROXY = "1";
 
 const STRONG = "Orchard-Lantern-42";
 const auth = require("../routes/auth");
@@ -166,4 +168,78 @@ test("I5 limiter (pure): windows expire; success clears the e-mail failures; tot
   const r = cap.check("3.3.3.3", "u9");
   assert.equal(r.ok, false);
   assert.ok(r.retryAfter >= 1);
+});
+
+// ---------------------------------------------------------------- fix round 2: simultaneous requests
+
+const statuses = (rs) => rs.reduce((m, r) => ((m[r.status] = (m[r.status] || 0) + 1), m), {});
+
+test("I5 race: 20 SIMULTANEOUS wrong passwords for one e-mail -> at most 5 answer 400, the rest 429", async () => {
+  await withServer(async ({ http }) => {
+    assert.equal((await http("POST", "/auth/bootstrap-super-admin", BODY)).status, 201);
+    const rs = await Promise.all(Array.from({ length: 20 }, (_, i) => http("POST", "/auth/login", { email: "owner@test.invalid", password: `Wrong-${i}-password` })));
+    const c = statuses(rs);
+    assert.ok((c[400] || 0) <= 5, JSON.stringify(c));
+    assert.equal((c[400] || 0) + (c[429] || 0), 20, JSON.stringify(c));
+    assert.equal((await http("POST", "/auth/login", { email: "owner@test.invalid", password: STRONG })).status, 429, "locked even with the right password");
+  });
+});
+
+test("I5 race: simultaneous attempts from 20 different addresses still respect the per-e-mail limit; unknown e-mails behave the same", async () => {
+  await withServer(async ({ http }) => {
+    assert.equal((await http("POST", "/auth/bootstrap-super-admin", BODY)).status, 201);
+    for (const email of ["owner@test.invalid", "nobody-race@test.invalid"]) {
+      const rs = await Promise.all(Array.from({ length: 20 }, (_, i) => http("POST", "/auth/login", { email, password: `Wrong-${i}-password` }, { "x-forwarded-for": `198.51.100.${i + 1}` })));
+      const c = statuses(rs);
+      assert.ok((c[400] || 0) <= 5, `${email} ${JSON.stringify(c)}`);
+      assert.equal((c[429] || 0), 20 - (c[400] || 0), `${email} ${JSON.stringify(c)}`);
+    }
+  });
+});
+
+test("I5 race: a correct login after fewer than 5 failures works and clears the e-mail failures (and gives back its provisional IP failure)", async () => {
+  await withServer(async ({ http }) => {
+    assert.equal((await http("POST", "/auth/bootstrap-super-admin", BODY)).status, 201);
+    const ip = { "x-forwarded-for": "203.0.113.77" };
+    for (let i = 0; i < 4; i++) assert.equal((await http("POST", "/auth/login", { email: "owner@test.invalid", password: `Wrong-${i}-password` }, ip)).status, 400);
+    const ok = await http("POST", "/auth/login", { email: "owner@test.invalid", password: STRONG }, ip);
+    assert.equal(ok.status, 200);
+    for (let i = 0; i < 4; i++) assert.equal((await http("POST", "/auth/login", { email: "owner@test.invalid", password: `Again-${i}-password` }, ip)).status, 400, "the e-mail bucket was cleared");
+    // IP: 8 failures recorded; the successful attempt's provisional failure was removed -> 2 more failures allowed
+    assert.equal((await http("POST", "/auth/login", { email: "x1@test.invalid", password: "x" }, ip)).status, 400);
+    assert.equal((await http("POST", "/auth/login", { email: "x2@test.invalid", password: "x" }, ip)).status, 400);
+    assert.equal((await http("POST", "/auth/login", { email: "x3@test.invalid", password: "x" }, ip)).status, 429, "10 IP failures reached");
+  });
+});
+
+test("I5 limiter (pure): reserve() is synchronous and counts in-flight attempts; release(success) removes exactly its own provisional IP failure", () => {
+  const { createLoginLimiter } = auth._internal;
+  let now = 0;
+  const lim = createLoginLimiter({ now: () => now, windowMs: 1000, ipFailures: 3, emailFailures: 2, ipAttempts: 50 });
+  const a = lim.reserve("1.1.1.1", "a");
+  const b = lim.reserve("1.1.1.1", "a");
+  assert.equal(a.ok && b.ok, true);
+  assert.equal(lim.reserve("1.1.1.1", "a").ok, false, "two in flight already count as failures for 'a'");
+  lim.release(a, true);
+  assert.equal(lim.reserve("2.2.2.2", "a").ok, true, "success cleared the e-mail bucket");
+  // IP bucket: b (failure kept) + the 2.2.2.2 one is another IP -> 1.1.1.1 has 1 failure left after a's removal
+  const c = lim.reserve("1.1.1.1", "z");
+  const d = lim.reserve("1.1.1.1", "y");
+  assert.equal(c.ok && d.ok, true);
+  assert.equal(lim.reserve("1.1.1.1", "w").ok, false, "b + c + d = 3 IP failures");
+});
+
+test("I5 limiter (pure): eviction drops expired entries first, then per-IP attempt buckets, never a victim's e-mail lockout first", () => {
+  const { createLoginLimiter } = auth._internal;
+  let now = 0;
+  const lim = createLoginLimiter({ now: () => now, windowMs: 1000, ipFailures: 1000, emailFailures: 2, ipAttempts: 1000, maxKeys: 50 });
+  lim.release(lim.reserve("9.9.9.9", "victim@x"), false);
+  lim.release(lim.reserve("9.9.9.9", "victim@x"), false);
+  assert.equal(lim.reserve("8.8.8.8", "victim@x").ok, false, "victim locked");
+  // flood: many new addresses, each with its own attempt + failure buckets and a different e-mail
+  for (let i = 0; i < 500; i++) lim.release(lim.reserve(`10.0.${Math.floor(i / 250)}.${i % 250}`, `flood${i}@x`), false);
+  assert.ok(lim.size() <= 50 + 3, `size ${lim.size()}`);
+  assert.equal(lim.reserve("7.7.7.7", "victim@x").ok, false, "the victim's e-mail lockout survived the flood");
+  now = 1001;
+  assert.equal(lim.reserve("7.7.7.7", "victim@x").ok, true, "expired normally");
 });

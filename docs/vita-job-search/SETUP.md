@@ -254,10 +254,15 @@ The admin console is at `https://YOUR-HOST/vita/admin.html` and uses the same lo
 
 Sign-in protection (Task 20): an unknown e-mail, a wrong password and an inactive account all get the same
 `400 {"error":"Invalid email or password"}` (unknown e-mails also pay a bcrypt comparison, so timing does not
-reveal which accounts exist). After 5 failures for one e-mail, or 10 failures (or 100 attempts) from one IP
-address, within 15 minutes, `/auth/login` answers `429` with `Retry-After`, even for the right password.
-These counters are kept in memory per app process (reset on restart; not shared between processes - see
-CHECKLIST limitation 3); tune them with `LOGIN_EMAIL_FAILURES`, `LOGIN_IP_FAILURES`, `LOGIN_IP_ATTEMPTS`.
+reveal which accounts exist). Each attempt is reserved (counted as a failure for the e-mail and the IP) in
+the same synchronous step as the limit check, before the database lookup and the bcrypt comparison, so
+simultaneous requests cannot slip past the limit; a successful sign-in clears the e-mail's failures and gives
+back its own provisional IP failure. After 5 failures for one e-mail, or 10 failures (or 100 attempts) from
+one IP address, within 15 minutes, `/auth/login` answers `429` with `Retry-After`, even for the right password.
+When the table grows past 50 000 keys, expired entries go first, then per-IP buckets, then e-mails that are
+not locked; a locked e-mail is dropped only as a last resort. These counters are kept **in memory, per app
+process** (reset on restart; not shared between processes - see CHECKLIST limitation 3); tune them with
+`LOGIN_EMAIL_FAILURES`, `LOGIN_IP_FAILURES`, `LOGIN_IP_ATTEMPTS`.
 Behind a proxy they need `TRUST_PROXY` to see client addresses.
 
 Staff tokens carry a version claim (`tv`, from `users.token_version`): every request re-checks that the

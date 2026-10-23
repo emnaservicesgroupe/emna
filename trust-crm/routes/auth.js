@@ -106,7 +106,9 @@ const envInt = (name, dflt) => {
   return Number.isSafeInteger(n) && n > 0 ? n : dflt;
 };
 
-function createLoginLimiter({ now = () => Date.now(), windowMs = LOGIN_WINDOW_MS, ipFailures, emailFailures, ipAttempts } = {}) {
+function createLoginLimiter({ now = () => Date.now(), windowMs = LOGIN_WINDOW_MS, ipFailures, emailFailures, ipAttempts, maxKeys = 50000 } = {}) {
+  // buckets: key -> array of entry objects {t}. Keys: "ef:<email>" failures per e-mail, "if:<ip>" failures per
+  // IP, "ia:<ip>" attempts per IP. Entries are objects so that release() can remove exactly its own entry.
   const buckets = new Map();
   const limits = () => ({
     ipFailures: ipFailures || envInt("LOGIN_IP_FAILURES", 10),
@@ -115,26 +117,69 @@ function createLoginLimiter({ now = () => Date.now(), windowMs = LOGIN_WINDOW_MS
   });
   const recent = (key) => {
     const t = now();
-    const list = (buckets.get(key) || []).filter((ts) => t - ts < windowMs);
+    const list = (buckets.get(key) || []).filter((e) => t - e.t < windowMs);
     if (list.length) buckets.set(key, list);
     else buckets.delete(key);
     return list;
   };
-  const push = (key) => {
-    const list = recent(key);
-    list.push(now());
-    buckets.set(key, list);
-    if (buckets.size > 50000) for (const k of [...buckets.keys()].slice(0, 10000)) buckets.delete(k);
-  };
-  const retry = (list) => Math.max(1, Math.ceil((list[0] + windowMs - now()) / 1000));
-  return {
-    check(ip, email) {
-      const l = limits();
-      for (const [key, max] of [[`ef:${email}`, l.emailFailures], [`if:${ip}`, l.ipFailures], [`ia:${ip}`, l.ipAttempts]]) {
-        const list = recent(key);
-        if (list.length >= max) return { ok: false, retryAfter: retry(list) };
+  // Over the cap: drop expired entries everywhere first, then whole per-IP ATTEMPT buckets, then per-IP failure
+  // buckets, then e-mail buckets that are not locked yet, and LOCKED e-mail buckets only last - a flood from many
+  // addresses and e-mails cannot erase a victim's e-mail lockout counter.
+  const evict = () => {
+    if (buckets.size <= maxKeys) return;
+    for (const key of [...buckets.keys()]) recent(key);
+    const emailMax = limits().emailFailures;
+    const phases = [
+      (k) => k.startsWith("ia:"),
+      (k) => k.startsWith("if:"),
+      (k) => k.startsWith("ef:") && buckets.get(k).length < emailMax, // e-mails not locked yet
+      (k) => k.startsWith("ef:"), // locked e-mails only as the very last resort
+    ];
+    for (const match of phases) {
+      for (const key of [...buckets.keys()]) {
+        if (buckets.size <= maxKeys) return;
+        if (match(key)) buckets.delete(key);
       }
-      return { ok: true };
+    }
+  };
+  const push = (key) => {
+    const entry = { t: now() };
+    const list = recent(key);
+    list.push(entry);
+    buckets.set(key, list);
+    evict();
+    return entry;
+  };
+  const retry = (list) => Math.max(1, Math.ceil((list[0].t + windowMs - now()) / 1000));
+  const check = (ip, email) => {
+    const l = limits();
+    for (const [key, max] of [[`ef:${email}`, l.emailFailures], [`if:${ip}`, l.ipFailures], [`ia:${ip}`, l.ipAttempts]]) {
+      const list = recent(key);
+      if (list.length >= max) return { ok: false, retryAfter: retry(list) };
+    }
+    return { ok: true };
+  };
+  return {
+    check,
+    /**
+     * Synchronous check + reservation (no await in between): the attempt is counted as a failure for the e-mail
+     * and the IP IMMEDIATELY, so simultaneous requests cannot all pass the check before any is recorded.
+     * release(reservation, true) on success clears the e-mail failures and removes this attempt's own
+     * provisional IP failure; release(reservation, false) keeps them.
+     */
+    reserve(ip, email) {
+      const gate = check(ip, email);
+      if (!gate.ok) return gate;
+      push(`ia:${ip}`);
+      return { ok: true, ip, email, emailEntry: push(`ef:${email}`), ipEntry: push(`if:${ip}`) };
+    },
+    release(reservation, success) {
+      if (!reservation || !reservation.ok || !success) return;
+      buckets.delete(`ef:${reservation.email}`);
+      const key = `if:${reservation.ip}`;
+      const list = (buckets.get(key) || []).filter((e) => e !== reservation.ipEntry);
+      if (list.length) buckets.set(key, list);
+      else buckets.delete(key);
     },
     attempt(ip) {
       push(`ia:${ip}`);
@@ -146,6 +191,7 @@ function createLoginLimiter({ now = () => Date.now(), windowMs = LOGIN_WINDOW_MS
     success(_ip, email) {
       buckets.delete(`ef:${email}`);
     },
+    size: () => buckets.size,
     reset() {
       buckets.clear();
     },
@@ -169,20 +215,20 @@ router.post("/login", async (req, res) => {
 
     const normalized = String(email).trim().toLowerCase();
     const ip = String(req.ip || (req.socket && req.socket.remoteAddress) || "unknown");
-    const gate = loginLimiter.check(ip, normalized);
-    if (!gate.ok) {
-      res.set("Retry-After", String(gate.retryAfter));
+    // check + reserve in ONE synchronous step, before any await (simultaneous requests are counted)
+    const reservation = loginLimiter.reserve(ip, normalized);
+    if (!reservation.ok) {
+      res.set("Retry-After", String(reservation.retryAfter));
       return res.status(429).json({ error: "Too many sign-in attempts. Try again later." });
     }
-    loginLimiter.attempt(ip);
 
     const user = await userModel.findUserByEmail(normalized);
     const valid = user ? await bcrypt.compare(String(password), user.password) : (await dummyCompare(password), false);
     if (!user || !valid || !user.is_active) {
-      loginLimiter.failure(ip, normalized);
+      loginLimiter.release(reservation, false);
       return res.status(400).json({ error: LOGIN_FAILED });
     }
-    loginLimiter.success(ip, normalized);
+    loginLimiter.release(reservation, true);
 
     // `tv` (users.token_version) makes the session revocable: verifyToken re-checks is_active, token_version
     // and role on every request, and suspension bumps token_version. Tokens issued before this change carry

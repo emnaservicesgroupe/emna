@@ -171,9 +171,11 @@ This works **once**: as soon as any account exists it answers "Bootstrap is disa
 tried at the same moment, only one account would be created).
 
 Staff sign-in: a wrong password and an unknown e-mail get the same message ("Invalid email or password").
-After 5 wrong attempts for one e-mail (or 10 from one address) within 15 minutes, sign-in is blocked for
-the rest of those 15 minutes, even with the right password. Restarting the app (`docker compose restart
-app`) clears these counters.
+Every attempt is counted the moment it arrives (also when many arrive at once): after 5 failed attempts
+for one e-mail, or 10 from one address, within 15 minutes, sign-in is blocked ("Too many sign-in attempts")
+for the rest of that window, even with the right password. The counters live **in the app's memory**: they
+are per app process and are cleared when the app restarts (`docker compose restart app` also unlocks a
+locked account).
 
 ## 7. Open VITA and sign in
 
