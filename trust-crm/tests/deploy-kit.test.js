@@ -165,7 +165,7 @@ function checkConfig(cfg) {
   assert.ok(cfg.services.db.healthcheck && cfg.services.db.healthcheck.test);
 }
 
-test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000, security headers, HSTS without includeSubDomains, / -> /vita/", () => {
+test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no compression of /jobsearch/events), security headers, HSTS without includeSubDomains, / -> /vita/", () => {
   const raw = read(path.join(KIT, "Caddyfile"));
   const c = raw.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(/\s#.*$/gm, "");
   assert.match(c, /^\{\$SITE_ADDRESS\} \{/m);
@@ -174,6 +174,9 @@ test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000, security headers, HSTS
   assert.doesNotMatch(c, /includeSubDomains/i, "sslip.io names are shared - never includeSubDomains");
   for (const h of ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy", "-Server"]) assert.ok(c.includes(h), h);
   assert.match(c, /redir @root \/vita\/ 302/);
+  // live events (SSE): flushed immediately and never compressed (verified through Caddy in the Task 20 sandbox run)
+  assert.match(c, /reverse_proxy app:5000 \{\s*flush_interval -1\s*\}/);
+  assert.match(c, /@compress not path \/jobsearch\/events\s*\n\s*encode @compress zstd gzip/);
 });
 
 test(".env.production.example: every variable preflight needs; safe sandbox defaults; no secret values; template + generated secrets passes the preflight", () => {

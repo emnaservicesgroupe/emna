@@ -4,7 +4,9 @@
 #                                                                       docker compose up -d)
 # Ports 80 and 443 must be open to the internet for the certificate to be issued.
 {$SITE_ADDRESS} {
-	encode zstd gzip
+	# Compress everything except the live event stream (server-sent events must not be buffered).
+	@compress not path /jobsearch/events
+	encode @compress zstd gzip
 
 	header {
 		# HTTPS only for this exact host (no includeSubDomains: sslip.io names are shared by everyone)
@@ -22,5 +24,8 @@
 	@root path /
 	redir @root /vita/ 302
 
-	reverse_proxy app:5000
+	reverse_proxy app:5000 {
+		# flush immediately: needed for live events (GET /jobsearch/events)
+		flush_interval -1
+	}
 }
