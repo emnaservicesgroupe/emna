@@ -1,3 +1,4 @@
+const process = require("node:process");
 const jwt = require("jsonwebtoken");
 
 exports.verifyToken = (req, res, next) => {
@@ -12,7 +13,7 @@ exports.verifyToken = (req, res, next) => {
     const verified = jwt.verify(token, process.env.JWT_SECRET);
     req.user = verified;
     return next();
-  } catch (err) {
+  } catch {
     return res.status(400).json({ error: "Invalid token" });
   }
 };

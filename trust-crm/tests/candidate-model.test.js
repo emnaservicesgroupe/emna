@@ -23,6 +23,7 @@ test("updateCandidate merges missing fields with current row", async () => {
 
   let updateValues = null;
 
+  // deno-lint-ignore require-await -- mock must return a promise like the real db.query
   db.query = async (sql, values) => {
     if (sql.startsWith("SELECT * FROM candidates WHERE id=$1")) {
       return { rows: [current] };

@@ -1,3 +1,4 @@
+const process = require("node:process");
 require("dotenv").config();
 const app = require("./app");
 const { startAlertScheduler } = require("./jobs/alertScheduler");

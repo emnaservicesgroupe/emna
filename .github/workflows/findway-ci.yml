@@ -1,0 +1,33 @@
+name: findway-ci
+on:
+  push: { paths: ['findway/**', 'trust-crm/**', '.github/workflows/findway-ci.yml'] }
+  pull_request: { paths: ['findway/**', 'trust-crm/**', '.github/workflows/findway-ci.yml'] }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Install trust-crm (tests run its real code)
+        run: npm ci
+        working-directory: trust-crm
+      - name: trust-crm tests (Node test runner; they are CommonJS and cannot run under Deno)
+        run: npm test
+        working-directory: trust-crm
+      - name: Install FIND WAY
+        run: npm ci
+        working-directory: findway
+      - name: Test
+        run: npm test
+        working-directory: findway
+        env:
+          TEST_PG_ADMIN_URL: postgres://postgres@localhost:55432/postgres
+          PG_BIN: /usr/lib/postgresql/16/bin

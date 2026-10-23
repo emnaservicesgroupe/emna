@@ -1,0 +1,4 @@
+{
+  "lint": { "exclude": ["findway/", "**/node_modules/"] },
+  "test": { "exclude": ["findway/", "trust-crm/", "**/node_modules/"] }
+}
