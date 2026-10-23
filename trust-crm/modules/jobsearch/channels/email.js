@@ -12,7 +12,9 @@ const crypto = require("crypto");
 const storage = require("../storage");
 
 const MAX_REASON = 200;
-const DEFINITE_CODES = new Set(["REQUIRES_SETUP", "EENVELOPE", "INVALID_RECIPIENT"]);
+const STORAGE_KEY_RE = /^[0-9]+-[a-f0-9]{64}\.(pdf|docx|png|jpg)$/;
+// Nothing left our side / permanently rejected for this recipient or policy.
+const PERMANENT_SMTP = new Set([550, 551, 552, 553, 554]);
 const EXT_MIME = { pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", png: "image/png", jpg: "image/jpeg" };
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
@@ -53,7 +55,8 @@ async function loadAttachments(refs, ctx = {}) {
   for (const r of refs || []) {
     i += 1;
     const label = r.cvFileId ? `cv${r.cvFileId}` : `doc${r.documentId}`;
-    if (!r.storageKey || !r.sha256) {
+    const keyMatch = typeof r.storageKey === "string" ? STORAGE_KEY_RE.exec(r.storageKey) : null;
+    if (!keyMatch || !r.sha256) {
       problems.push(`attachment_unavailable:${label}`);
       continue;
     }
@@ -69,19 +72,32 @@ async function loadAttachments(refs, ctx = {}) {
       problems.push(`attachment_hash_mismatch:${label}`);
       continue;
     }
-    const ext = /\.([a-z]+)$/.exec(r.storageKey)[1];
+    const ext = keyMatch[1];
     const base = r.kind === "cv" ? `CV-${safeName(ctx.candidateName)}-v${Number(r.version) || 1}` : `${safeName(r.docType || "document")}-${i}`;
     attachments.push({ filename: `${base}.${ext}`, content: buf, contentType: EXT_MIME[ext] || "application/octet-stream", sha256: got, size: buf.length, ref: { cvFileId: r.cvFileId || null, documentId: r.documentId || null, version: r.version, sha256: r.sha256 } });
   }
   return { attachments, problems };
 }
 
+function smtpCode(err) {
+  const n = Number(err.responseCode);
+  if (Number.isInteger(n) && n >= 200 && n < 600) return n;
+  const m = /^\s*([2-5]\d\d)[\s-]/.exec(String(err.response || ""));
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 'config'  - our mail setup is wrong (EAUTH / 535 / REQUIRES_SETUP): nothing was sent -> failed + mail_config task
+ * 'refused' - permanent recipient/policy rejection (SMTP 550-554, EENVELOPE with a 55x, explicit definite flag) -> failed
+ * 'unknown' - timeouts, ECONNRESET, ETIMEDOUT, 4xx transient, anything else -> outcome_unknown (never retried)
+ */
 function classifyError(err) {
   if (!err) return "unknown";
-  if (err.definite === true || err.permanent === true || DEFINITE_CODES.has(err.code)) return "refused";
-  const status = Number(err.statusCode || err.status);
-  if (Number.isInteger(status) && status >= 400 && status < 500) return "refused";
-  return "unknown"; // timeouts, ECONNRESET, 5xx, anything we cannot prove was not delivered
+  const code = smtpCode(err);
+  if (err.code === "EAUTH" || code === 535 || err.code === "REQUIRES_SETUP") return "config";
+  if (err.definite === true || err.permanent === true) return "refused";
+  if (code !== null && PERMANENT_SMTP.has(code)) return "refused";
+  return "unknown";
 }
 
 /**
@@ -106,9 +122,10 @@ async function send(application, pkg, recipient, ctx = {}) {
       attachments: (pkg.attachments || []).map((a) => ({ filename: a.filename, content: a.content, contentType: a.contentType })),
     });
   } catch (err) {
-    const outcome = classifyError(err);
-    const reason = redact(`${(err && err.code) || "error"}: ${(err && err.message) || err}`);
-    return { accepted: false, outcome, providerMessageId: null, reason, evidence: { ...base, providerResponse: { error: reason, code: (err && err.code) || null } } };
+    const cls = classifyError(err);
+    const outcome = cls === "config" ? "refused" : cls;
+    const reason = redact(`${(err && err.code) || "error"}${err && smtpCode(err) ? ` ${smtpCode(err)}` : ""}: ${(err && err.message) || err}`);
+    return { accepted: false, outcome, configError: cls === "config", providerMessageId: null, reason, evidence: { ...base, providerResponse: { error: reason, code: (err && err.code) || null, smtpCode: (err && smtpCode(err)) || null } } };
   }
   if (!res || typeof res !== "object") {
     return { accepted: false, outcome: "unknown", providerMessageId: null, reason: "provider_returned_nothing", evidence: { ...base, providerResponse: null } };

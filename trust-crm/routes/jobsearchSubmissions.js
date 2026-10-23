@@ -1,7 +1,7 @@
 // Submissions (mounted at /jobsearch):
 //   POST /applications/:id/queue              human, jobsearch:approve + scope. 200 {queued:true,...}; 409 {error, code, handoff?} on guard refusal
 //   POST /applications/:id/manual-completion  {note, channel?, recipient?, fileRef?} jobsearch:approve + scope; needs_staff -> sent
-//   POST /submissions/:id/evidence            {kind, detail} jobsearch:approve + scope; the only path to confirmed_submitted
+//   POST /submissions/:id/evidence            {kind: manual_confirmation|employer_acknowledgement, detail} jobsearch:approve + scope; delivery_receipt -> 400 (system-only)
 //   GET  /submissions?applicationId=          scope; Candidate sees status + timestamps only
 //   POST /queue/run                           {kinds?, max?} jobsearch:admin; processes due submit/search items now (cap 50)
 const express = require("express");
@@ -36,6 +36,8 @@ router.post("/applications/:id/manual-completion", verifyToken, asyncHandler(asy
 
 router.post("/submissions/:id/evidence", verifyToken, asyncHandler(async (req, res) => {
   const b = body(req);
+  // delivery_receipt is system-only (provider DSN ingested by Task 13); a staff click proves nothing.
+  if (b.kind === "delivery_receipt") throw new HttpError(400, "use manual_confirmation or wait for the provider receipt");
   res.json(await submitter.recordEvidence({ submissionId: req.params.id, kind: b.kind, detail: b.detail, actor: req.user }));
 }));
 

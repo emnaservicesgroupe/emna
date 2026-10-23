@@ -42,13 +42,20 @@ const LOCK_CLASS = 0x4a53; // advisory-lock namespace ("JS") for submission ids
 const MAX_TEXT = 1000;
 
 // Guard code -> what happens to the application at send time.
-const CANCEL_CODES = new Set(["consent_missing", "consent_withdrawn", "candidate_paused", "module_paused", "source_paused", "user_suspended", "candidate_deleted"]);
+// Terminal: the candidate no longer allows (or can no longer have) sends.
+const CANCEL_CODES = new Set(["consent_missing", "consent_withdrawn", "user_suspended", "candidate_deleted"]);
+// Operational HOLDS (not terminal): the attempt is closed as 'failed' (reason held:<code>) and the
+// application goes back queued -> approved (system-only transition). When the pause is lifted, Task
+// 12's scheduler re-queues approved applications via queueSubmission (new attempt, new idempotency key).
+const HOLD_CODES = new Set(["candidate_paused", "module_paused", "source_paused"]);
 const DUP_CODES = new Set(["duplicate", "duplicate_submission"]);
 const HANDOFF_REASONS = new Set(guard.HANDOFF_REASONS);
 // Refusals at queue time that leave a note on the application timeline.
-const NOTE_CODES = new Set([...CANCEL_CODES, "job_closed", ...DUP_CODES]);
+const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES]);
 const EVIDENCE_KINDS = ["delivery_receipt", "employer_acknowledgement", "manual_confirmation"];
-const DELIVERED_ACTIONS = new Set(["delivered", "relayed", "expanded"]);
+const MIN_NOTE = 10;
+// Internal capability for system evidence (Task 13 receipt / reply ingestion). Never passed by routes.
+const EVIDENCE_GRANT = Symbol("jobsearch.systemEvidenceGrant");
 const STORAGE_KEY_RE = /^[0-9]+-[a-f0-9]{64}\.(pdf|docx|png|jpg)$/;
 
 // ---------------------------------------------------------------- helpers
@@ -217,7 +224,8 @@ async function queueSubmission(applicationId, actor, opts = {}) {
     const result = await guard.check(id, { client, recheck: opts.recheck, now: opts.now });
     if (!result.ok) {
       const detail = { code: result.code, detail: result.detail, handoff: result.handoff || null, notes: result.notes || [] };
-      if (NOTE_CODES.has(result.code) || result.handoff) await timeline(client, id, who, "queue_refused", detail);
+      // Timeline keeps neutral fields only; the guard's detail text (may name addresses) goes to the audit log.
+      if (NOTE_CODES.has(result.code) || result.handoff) await timeline(client, id, who, "queue_refused", { code: result.code, handoff: result.handoff || null });
       await audit(client, who, "submission.queue_refused", app.candidate_id, id, detail);
       return { queued: false, reason: result.code, detail: result.detail, ...(result.handoff ? { handoff: result.handoff } : {}), candidateId: app.candidate_id };
     }
@@ -225,7 +233,8 @@ async function queueSubmission(applicationId, actor, opts = {}) {
     for (const s of open) {
       if (s.evidence && s.evidence.phase === "sending") {
         const detail = { code: "duplicate_submission", detail: `Submission ${s.id} was interrupted while sending; its outcome is unknown`, handoff: "staff_review" };
-        await timeline(client, id, who, "queue_refused", detail);
+        await timeline(client, id, who, "queue_refused", { code: detail.code, handoff: detail.handoff });
+        await audit(client, who, "submission.queue_refused", app.candidate_id, id, detail);
         return { queued: false, reason: "duplicate_submission", detail: detail.detail, handoff: "staff_review", candidateId: app.candidate_id };
       }
       await client.query("UPDATE js_submissions SET status = 'failed', evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [s.id, JSON.stringify({ phase: "superseded", reason: "superseded_by_new_attempt" })]);
@@ -238,10 +247,13 @@ async function queueSubmission(applicationId, actor, opts = {}) {
       [id, attempt, `app:${id}:a${attempt}`, result.recipient]
     )).rows[0];
     for (const note of result.notes || []) await timeline(client, id, who, "guard_note", { note, submissionId: sub.id });
+    // Where the CV goes is recorded for staff in the audit log and on the submission row (not the
+    // candidate-visible timeline): the timeline only says how the recipient was chosen.
     const recipientInfo = { submissionId: sub.id, recipient: result.recipient, recipientSource: result.recipientSource, domainMatchesEmployer: result.domainMatchesEmployer, approval: result.approval };
-    await timeline(client, id, who, "recipient_resolved", recipientInfo);
+    await timeline(client, id, who, "recipient_resolved", { submissionId: sub.id, recipientSource: result.recipientSource || null });
+    await audit(client, who, "submission.recipient_resolved", app.candidate_id, id, recipientInfo);
     if (app.status !== "queued") {
-      await applicationService.transition(id, "queued", who, { client, reason: "queued_for_submission", detail: recipientInfo, expectFrom: ["approved"], ...(isUser(who) ? {} : { [SYSTEM_GRANT]: true }) });
+      await applicationService.transition(id, "queued", who, { client, reason: "queued_for_submission", detail: { submissionId: sub.id }, expectFrom: ["approved"], ...(isUser(who) ? {} : { [SYSTEM_GRANT]: true }) });
     }
     const item = await queue.enqueue({ kind: "submit", payload: { applicationId: id, candidateId: app.candidate_id, submissionId: sub.id }, idempotencyKey: `submit:${id}:${attempt}`, client });
     await audit(client, who, "submission.queued", app.candidate_id, id, { submissionId: sub.id, attempt, recipient: result.recipient, queueId: Number(item.id) });
@@ -259,32 +271,51 @@ async function openTask(client, app, cand, reason, detail) {
   return unsupported.createHandoffTask(client, { applicationId: app.id, reason, detail, assignedTo: responsibleOf(app, cand) });
 }
 
+/**
+ * Pause = operational hold: queued -> approved via the system-only transition (event 'held_paused',
+ * so the guard's approval lookup - latest status_changed -> approved - still finds the original
+ * approver). No task. If the transition is refused (e.g. consent lost too), the application is cancelled.
+ */
+async function holdForPause(client, app, cand, sub, code, reason, neutral) {
+  if (app.status !== "queued") return null;
+  try {
+    const row = await applicationService.transition(app.id, "approved", SYSTEM_ACTOR, { client, reason, event: "held_paused", detail: neutral, expectFrom: ["queued"], [SYSTEM_GRANT]: true });
+    app.status = row.status;
+    return row.status;
+  } catch (err) {
+    if (!(err instanceof HttpError)) throw err;
+    return moveIfAllowed(client, app, "cancelled", SYSTEM_ACTOR, { reason: `${reason};${String(err.message).slice(0, 100)}`, detail: neutral, event: "cancelled" });
+  }
+}
+
 /** Pre-send guard refused: mark the attempt failed, move the application, open a task where a human is needed. Never sends. */
 async function blockSubmission(client, { app, cand, sub }, g) {
   const code = g.code;
   const cancelledAlready = code === "application_not_sendable" && app.status === "cancelled";
-  const reason = cancelledAlready ? "cancelled" : `guard:${code}`;
+  const reason = cancelledAlready ? "cancelled" : HOLD_CODES.has(code) ? `held:${code}` : `guard:${code}`;
   await client.query("UPDATE js_submissions SET status = 'failed', evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [
     sub.id,
     JSON.stringify({ phase: "blocked", blockedAt: new Date().toISOString(), reason, guard: { code, detail: g.detail || null, handoff: g.handoff || null } }),
   ]);
   for (const note of g.notes || []) await timeline(client, app.id, SYSTEM_ACTOR, "guard_note", { note, submissionId: sub.id });
+  // Full detail (guard text may name addresses) -> audit only; the timeline gets neutral fields.
   const tdetail = { submissionId: sub.id, code, detail: g.detail || null, handoff: g.handoff || null };
+  const neutral = { submissionId: sub.id, code, handoff: g.handoff || null };
   let task = null;
   let moved = null;
-  if (CANCEL_CODES.has(code)) moved = await moveIfAllowed(client, app, "cancelled", SYSTEM_ACTOR, { reason, detail: tdetail, event: "cancelled" });
-  else if (code === "job_closed") moved = await moveIfAllowed(client, app, "closed", SYSTEM_ACTOR, { reason, detail: tdetail });
+  if (CANCEL_CODES.has(code)) moved = await moveIfAllowed(client, app, "cancelled", SYSTEM_ACTOR, { reason, detail: neutral, event: "cancelled" });
+  else if (HOLD_CODES.has(code)) moved = await holdForPause(client, app, cand, sub, code, reason, neutral);
+  else if (code === "job_closed") moved = await moveIfAllowed(client, app, "closed", SYSTEM_ACTOR, { reason, detail: neutral });
   else if (code === "application_not_sendable") moved = null; // already moved elsewhere (cancelled, re-preparation...)
-  else if (DUP_CODES.has(code)) task = await openTask(client, app, cand, "duplicate", `${code}: ${g.detail || ""}`);
   else {
-    const taskReason = HANDOFF_REASONS.has(g.handoff) ? g.handoff : "staff_review";
+    const taskReason = DUP_CODES.has(code) ? "duplicate_review" : HANDOFF_REASONS.has(g.handoff) ? g.handoff : "staff_review";
     task = await openTask(client, app, cand, taskReason, `${code}: ${g.detail || ""}`);
-    moved = await moveIfAllowed(client, app, "needs_staff", SYSTEM_ACTOR, { reason, detail: { ...tdetail, taskId: task.id } });
+    moved = await moveIfAllowed(client, app, "needs_staff", SYSTEM_ACTOR, { reason, detail: { ...neutral, taskId: task.id } });
   }
-  await timeline(client, app.id, SYSTEM_ACTOR, "submission_blocked", { ...tdetail, reason, taskId: task ? task.id : null, status: app.status });
+  await timeline(client, app.id, SYSTEM_ACTOR, "submission_blocked", { ...neutral, reason, status: app.status });
   await audit(client, SYSTEM_ACTOR, "submission.blocked", app.candidate_id, app.id, { ...tdetail, reason, moved, taskId: task ? task.id : null });
   await event(client, app.candidate_id, "submission.blocked", { applicationId: app.id, submissionId: sub.id, code });
-  return { status: "blocked", code, reason, applicationStatus: app.status, taskId: task ? task.id : null, submissionId: sub.id };
+  return { status: HOLD_CODES.has(code) && app.status === "approved" ? "held" : "blocked", code, reason, applicationStatus: app.status, taskId: task ? task.id : null, submissionId: sub.id };
 }
 
 /** Uncertain delivery: outcome_unknown + verify_delivery task + application needs_staff. Never retried. */
@@ -293,7 +324,7 @@ async function markUnknown(client, { app, cand, sub }, why, extra = {}) {
   await client.query("UPDATE js_submissions SET status = 'outcome_unknown', evidence = $2::jsonb WHERE id = $1", [sub.id, JSON.stringify(evidence)]);
   const task = await openTask(client, app, cand, "verify_delivery", `Submission ${sub.id}: ${why}. It may have been delivered; verify with the employer or the mail provider before any new attempt.`);
   const moved = await moveIfAllowed(client, app, "needs_staff", SYSTEM_ACTOR, { reason: `outcome_unknown:${why}`.slice(0, 200), detail: { submissionId: sub.id, taskId: task.id } });
-  await timeline(client, app.id, SYSTEM_ACTOR, "submission_outcome_unknown", { submissionId: sub.id, reason: why, taskId: task.id });
+  await timeline(client, app.id, SYSTEM_ACTOR, "submission_outcome_unknown", { submissionId: sub.id, reason: why });
   await audit(client, SYSTEM_ACTOR, "submission.outcome_unknown", app.candidate_id, app.id, { submissionId: sub.id, reason: why, moved, taskId: task.id });
   await event(client, app.candidate_id, "submission.outcome_unknown", { applicationId: app.id, submissionId: sub.id });
   return { status: "outcome_unknown", reason: why, submissionId: sub.id, taskId: task.id };
@@ -370,9 +401,31 @@ async function prepareSend(client, job, applicationId, submissionId, deps) {
   };
   await client.query("UPDATE js_submissions SET evidence = $2::jsonb, recipient = $3, channel = 'email' WHERE id = $1", [sub.id, JSON.stringify(intent), g.recipient]);
   for (const note of g.notes || []) await timeline(client, app.id, SYSTEM_ACTOR, "guard_note", { note, submissionId: sub.id });
-  await timeline(client, app.id, SYSTEM_ACTOR, "submission_sending", { submissionId: sub.id, recipient: g.recipient, docs, messageId });
+  await timeline(client, app.id, SYSTEM_ACTOR, "submission_sending", { submissionId: sub.id });
   await audit(client, SYSTEM_ACTOR, "submission.sending", app.candidate_id, app.id, { submissionId: sub.id, recipient: g.recipient, docs });
   return { send: { app, sub, mail, recipient: g.recipient, intent } };
+}
+
+// SQLSTATE classes worth a retry: connection (08), rollback/serialization/deadlock (40), resources (53), operator (57).
+const RETRYABLE_SQLSTATE = /^(08|40|53|57)/;
+const RETRYABLE_NET = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "EAI_AGAIN"]);
+function isRetryable(err) {
+  const code = err && typeof err.code === "string" ? err.code : "";
+  return (/^[0-9A-Z]{5}$/.test(code) && RETRYABLE_SQLSTATE.test(code)) || RETRYABLE_NET.has(code) || /Connection terminated|timeout exceeded when trying to connect/i.test(String(err && err.message));
+}
+
+/** Unexpected error before any intent: attempt 'failed' (internal_error), application needs_staff + task. Never sends. */
+async function failInternal(client, applicationId, submissionId, err) {
+  const st = await lockSubmission(client, applicationId, submissionId);
+  if (!st || st.sub.status !== "queued" || (st.sub.evidence && st.sub.evidence.phase === "sending")) return null;
+  const { app, cand, sub } = st;
+  const msg = emailChannel.redact(`${(err && err.name) || "Error"}: ${(err && err.message) || err}`);
+  await client.query("UPDATE js_submissions SET status = 'failed', evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [sub.id, JSON.stringify({ phase: "blocked", reason: "internal_error", error: msg, blockedAt: new Date().toISOString() })]);
+  const task = await openTask(client, app, cand, "internal_error", `Submission ${sub.id} could not be prepared: ${msg}`);
+  await moveIfAllowed(client, app, "needs_staff", SYSTEM_ACTOR, { reason: "internal_error", detail: { submissionId: sub.id, taskId: task.id } });
+  await timeline(client, app.id, SYSTEM_ACTOR, "submission_blocked", { submissionId: sub.id, code: "internal_error", reason: "internal_error", status: app.status });
+  await audit(client, SYSTEM_ACTOR, "submission.internal_error", app.candidate_id, app.id, { submissionId: sub.id, error: msg, taskId: task.id });
+  return { status: "blocked", code: "internal_error", reason: "internal_error", applicationStatus: app.status, taskId: task.id, submissionId: sub.id };
 }
 
 /** Phase 2 (one transaction): record what the provider said. */
@@ -391,14 +444,14 @@ async function recordResult(client, applicationId, submissionId, plan, res) {
   if (res.accepted) {
     const evidence = { ...base, phase: "sent", providerMessageId: res.providerMessageId };
     await client.query("UPDATE js_submissions SET status = 'sent', sent_at = now(), provider_message_id = $2, evidence = $3::jsonb WHERE id = $1", [sub.id, res.providerMessageId, JSON.stringify(evidence)]);
-    let moved = await moveIfAllowed(client, app, "sent", SYSTEM_ACTOR, { reason: "provider_accepted", detail: { submissionId: sub.id, recipient: plan.recipient } });
+    let moved = await moveIfAllowed(client, app, "sent", SYSTEM_ACTOR, { reason: "provider_accepted", detail: { submissionId: sub.id } });
     let taskId = null;
     if (!moved && app.status !== "sent") {
       // e.g. consent withdrawn while the provider call was in flight: the mail went; say so honestly.
       taskId = (await openTask(client, app, cand, "review", `Submission ${sub.id} was accepted by the provider after the application became ${app.status}`)).id;
     }
-    await timeline(client, app.id, SYSTEM_ACTOR, "submission_sent", { submissionId: sub.id, recipient: plan.recipient, providerMessageId: res.providerMessageId, docs: intent.docs, awaiting: "confirmation evidence", taskId });
-    await audit(client, SYSTEM_ACTOR, "submission.sent", app.candidate_id, app.id, { submissionId: sub.id, recipient: plan.recipient, docs: intent.docs });
+    await timeline(client, app.id, SYSTEM_ACTOR, "submission_sent", { submissionId: sub.id, awaiting: "confirmation evidence" });
+    await audit(client, SYSTEM_ACTOR, "submission.sent", app.candidate_id, app.id, { submissionId: sub.id, recipient: plan.recipient, providerMessageId: res.providerMessageId, docs: intent.docs, taskId });
     await event(client, app.candidate_id, "submission.sent", { applicationId: app.id, submissionId: sub.id });
     moved = moved || app.status;
     return { status: "sent", submissionId: sub.id, providerMessageId: res.providerMessageId, applicationStatus: moved };
@@ -406,10 +459,11 @@ async function recordResult(client, applicationId, submissionId, plan, res) {
   if (res.outcome === "refused") {
     const evidence = { ...base, phase: "failed", reason: res.reason };
     await client.query("UPDATE js_submissions SET status = 'failed', evidence = $2::jsonb WHERE id = $1", [sub.id, JSON.stringify(evidence)]);
-    const task = await openTask(client, app, cand, "delivery_failed", `Submission ${sub.id} was refused by the provider: ${res.reason}`);
-    await moveIfAllowed(client, app, "failed", SYSTEM_ACTOR, { reason: `provider_refused`, detail: { submissionId: sub.id, reason: res.reason, taskId: task.id } });
-    await timeline(client, app.id, SYSTEM_ACTOR, "submission_failed", { submissionId: sub.id, reason: res.reason, taskId: task.id });
-    await audit(client, SYSTEM_ACTOR, "submission.failed", app.candidate_id, app.id, { submissionId: sub.id, reason: res.reason });
+    const taskReason = res.configError ? "mail_config" : "delivery_failed";
+    const task = await openTask(client, app, cand, taskReason, `Submission ${sub.id} was refused by the provider: ${res.reason}`);
+    await moveIfAllowed(client, app, "failed", SYSTEM_ACTOR, { reason: res.configError ? "mail_configuration_error" : "provider_refused", detail: { submissionId: sub.id, taskId: task.id } });
+    await timeline(client, app.id, SYSTEM_ACTOR, "submission_failed", { submissionId: sub.id, reason: res.configError ? "mail_configuration_error" : "provider_refused" });
+    await audit(client, SYSTEM_ACTOR, "submission.failed", app.candidate_id, app.id, { submissionId: sub.id, reason: res.reason, taskId: task.id, taskReason });
     await event(client, app.candidate_id, "submission.failed", { applicationId: app.id, submissionId: sub.id });
     return { status: "failed", submissionId: sub.id, reason: res.reason, taskId: task.id };
   }
@@ -442,7 +496,19 @@ async function handleSubmit(job, deps = {}) {
   try {
     locked = (await conn.query("SELECT pg_try_advisory_lock($1, $2) AS ok", [LOCK_CLASS, submissionId])).rows[0].ok === true;
     if (!locked) return { status: "in_progress", submissionId };
-    const plan = await inTx((c) => prepareSend(c, job, applicationId, submissionId, deps), conn);
+    let plan;
+    try {
+      plan = await inTx((c) => prepareSend(c, job, applicationId, submissionId, deps), conn);
+    } catch (err) {
+      // tx1 rolled back: no intent was recorded, nothing was sent. Transient DB errors are retried by
+      // the queue; anything else (or the last attempt) closes the attempt so it is not 'queued' forever.
+      const lastAttempt = job && Number(job.attempts) >= Number(job.max_attempts || 5);
+      if (isRetryable(err) && !lastAttempt) throw err;
+      const done = await inTx((c) => failInternal(c, applicationId, submissionId, err), conn).catch(() => null);
+      if (!done) throw err;
+      await auditLog(SYSTEM_ACTOR, "jobsearch.submission.internal_error", submissionId, { applicationId });
+      return done;
+    }
     if (plan.done) {
       await auditLog(SYSTEM_ACTOR, `jobsearch.submission.${plan.done.status}`, submissionId, { applicationId, ...plan.done });
       return plan.done;
@@ -511,13 +577,17 @@ function validFileRef(ref) {
 
 async function checkEvidence(client, { app, sub }, kind, detail, actor) {
   if (kind === "delivery_receipt") {
-    const mid = cleanText(detail.providerMessageId || detail.messageId, 300);
+    // SYSTEM-ONLY (checked by recordEvidence): a provider DSN/receipt ingested by Task 13.
+    const mid = cleanText(detail.providerMessageId, 300);
     if (!mid) throw new HttpError(400, "delivery_receipt needs providerMessageId");
-    const known = [sub.provider_message_id, sub.evidence && sub.evidence.messageIdPlanned, sub.evidence && sub.evidence.providerMessageId].filter(Boolean);
-    if (!known.includes(mid)) throw new HttpError(409, "The receipt does not match this submission's message id");
-    const action = detail.action === undefined ? null : cleanText(String(detail.action), 40).toLowerCase();
-    if (action && !DELIVERED_ACTIONS.has(action)) throw new HttpError(409, `A '${action}' receipt is not delivery evidence`);
-    return { providerMessageId: mid, action, receivedAt: cleanText(detail.receivedAt, 40) || null, reportRef: cleanText(detail.reportRef, 200) || null };
+    const action = detail.action === undefined || detail.action === null ? "" : cleanText(String(detail.action), 40).toLowerCase();
+    if (!action) throw new HttpError(400, "delivery_receipt needs action");
+    const reportRef = cleanText(detail.reportRef, 200);
+    if (!reportRef) throw new HttpError(400, "delivery_receipt needs reportRef");
+    // Only the id the PROVIDER returned counts (never our planned Message-ID header).
+    if (!sub.provider_message_id || mid !== sub.provider_message_id) throw new HttpError(409, "The receipt does not match this submission's provider message id");
+    if (action !== "delivered") throw new HttpError(409, `A '${action}' receipt is not delivery evidence`);
+    return { providerMessageId: mid, action, receivedAt: cleanText(detail.receivedAt, 40) || null, reportRef };
   }
   if (kind === "employer_acknowledgement") {
     const msgId = posInt(detail.messageId);
@@ -533,7 +603,7 @@ async function checkEvidence(client, { app, sub }, kind, detail, actor) {
   // manual_confirmation
   if (!isUser(actor) || actor.role === "Candidate" || !hasPerm(actor, "jobsearch:approve")) throw new HttpError(403, "Manual confirmation requires a manager or administrator");
   const note = cleanText(detail.note);
-  if (!note) throw new HttpError(400, "manual_confirmation needs a note describing the evidence");
+  if (note.length < MIN_NOTE) throw new HttpError(400, `manual_confirmation needs a note (at least ${MIN_NOTE} characters) describing the evidence`);
   const fileRef = validFileRef(detail.fileRef);
   if (fileRef && fileRef.documentId) {
     const d = await client.query("SELECT 1 FROM documents WHERE id = $1 AND candidate_id = $2 AND is_deleted = false", [fileRef.documentId, app.candidate_id]);
@@ -543,16 +613,22 @@ async function checkEvidence(client, { app, sub }, kind, detail, actor) {
 }
 
 /**
- * The ONLY path to confirmed_submitted. Appends a confirmation to js_submissions.evidence.confirmations[]
+ * The ONLY path to confirmed_submitted. Kinds:
+ *  - delivery_receipt: SYSTEM-ONLY (string actor + _internal.EVIDENCE_GRANT); providerMessageId must
+ *    equal js_submissions.provider_message_id, action 'delivered', reportRef non-empty.
+ *  - employer_acknowledgement: inbound js_messages row of THIS application from the employer's
+ *    verified domain/contact (staff or system).
+ *  - manual_confirmation: staff with jobsearch:approve + scope; note >= 10 chars, optional fileRef. Appends a confirmation to js_submissions.evidence.confirmations[]
  * and moves the application sent|outcome_unknown|needs_staff -> confirmed_submitted.
  * @param {{submissionId, kind: 'delivery_receipt'|'employer_acknowledgement'|'manual_confirmation', detail: object, actor: object|string}} args
  *   actor: a user (route: jobsearch:approve + scope) or a system label (Task 13 ingestion; not for manual_confirmation)
  */
-async function recordEvidence({ submissionId, kind, detail, actor }) {
+async function recordEvidence({ submissionId, kind, detail, actor, [EVIDENCE_GRANT]: grant }) {
   if (isUser(actor)) {
     await scopedSubmission(actor, submissionId); // 404 outside scope
     if (actor.role === "Candidate" || !hasPerm(actor, "jobsearch:approve")) throw new HttpError(403, "Recording submission evidence requires a manager or administrator");
-  } else if (!actor || typeof actor !== "string") throw new HttpError(403, "An actor is required");
+    if (kind === "delivery_receipt") throw new HttpError(400, "Staff cannot record a delivery receipt: use manual_confirmation or wait for the provider receipt");
+  } else if (!actor || typeof actor !== "string" || grant !== true) throw new HttpError(403, "Only the internal ingestion path (with the system grant) may record evidence without a user");
   const id = posInt(submissionId);
   if (!id) throw new HttpError(404, "Not found");
   if (!EVIDENCE_KINDS.includes(kind)) throw new HttpError(400, `kind must be one of ${EVIDENCE_KINDS.join(", ")}`);
@@ -690,4 +766,5 @@ module.exports = {
   EVIDENCE_KINDS,
   CANDIDATE_WORDING,
   SYSTEM_ACTOR,
+  _internal: { EVIDENCE_GRANT },
 };

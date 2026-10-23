@@ -26,7 +26,8 @@ const TRANSITIONS = Object.freeze({
   preparing: ["ready_for_review", "needs_staff", "failed", "cancelled", "closed"],
   ready_for_review: ["approved", "preparing", "needs_staff", "cancelled", "closed"],
   approved: ["queued", "preparing", "needs_staff", "cancelled", "closed"],
-  queued: ["sent", "failed", "outcome_unknown", "needs_staff", "preparing", "cancelled", "closed"],
+  // queued -> approved: SYSTEM-only operational hold (pause found at send time; submitter, Task 11).
+  queued: ["sent", "failed", "outcome_unknown", "needs_staff", "preparing", "approved", "cancelled", "closed"],
   sent: ["confirmed_submitted", "outcome_unknown", "failed", "interview", "offer", "rejected", "closed"],
   outcome_unknown: ["sent", "confirmed_submitted", "failed", "needs_staff", "interview", "offer", "rejected", "cancelled", "closed"],
   confirmed_submitted: ["interview", "offer", "rejected", "closed"],
@@ -180,6 +181,8 @@ async function transition(applicationId, to, actor, opts = {}) {
     const from = app.status;
     if (opts.expectFrom && !opts.expectFrom.includes(from)) throw new HttpError(409, `Application is ${from}`);
     if (!(TRANSITIONS[from] || []).includes(to)) throw new HttpError(409, `Illegal transition ${from} -> ${to}`);
+    const hold = from === "queued" && to === "approved";
+    if (hold && (actor && typeof actor === "object")) throw new HttpError(403, "queued -> approved is a system-only hold");
     if (to === "approved" || to === "queued") {
       // A non-human actor may only approve/queue through autoApprove (or the submitter) holding the
       // internal grant; a human needs jobsearch:approve. Never reachable from a route with 'system'.
@@ -188,7 +191,9 @@ async function transition(applicationId, to, actor, opts = {}) {
       } else if (!hasPerm(actor, "jobsearch:approve")) {
         throw new HttpError(403, `Moving an application to ${to} requires a manager or administrator`);
       }
-      const blockers = await sendBlockers(client, app.candidate_id, "submit");
+      let blockers = await sendBlockers(client, app.candidate_id, "submit");
+      // A pause hold returns the item to 'approved' BECAUSE of the pause; consent/suspension still block.
+      if (hold) blockers = blockers.filter((b) => b !== "candidate_paused" && b !== "module_paused");
       if (blockers.length) throw new HttpError(409, `Cannot move to ${to}: ${blockers.join(", ")}`);
     }
     if (to === "ready_for_review" || (to === "preparing" && ["matched", "failed", "needs_staff"].includes(from))) {
@@ -747,6 +752,20 @@ async function listApplications({ user, query = {} }) {
   };
 }
 
+// Candidates see only neutral timeline fields: never recipients, message ids, provider text, hashes or document lists.
+const CANDIDATE_TIMELINE_KEYS = ["from", "to", "status", "reason", "code", "handoff", "kind", "note", "awaiting"];
+const SAFE_VALUE = /^[\p{L}\p{N} _.,:;'()-]{0,200}$/u;
+function candidateTimelineDetail(detail) {
+  if (!detail || typeof detail !== "object") return {};
+  const out = {};
+  for (const k of CANDIDATE_TIMELINE_KEYS) {
+    const v = detail[k];
+    if (v === null || v === undefined) continue;
+    if (typeof v === "string" && SAFE_VALUE.test(v) && !/@|<|[a-f0-9]{32,}/i.test(v)) out[k] = v;
+  }
+  return out;
+}
+
 async function getApplication({ user, id }) {
   const app = await loadScoped(user, id);
   const c = db();
@@ -776,7 +795,7 @@ async function getApplication({ user, id }) {
         }
       : null,
     notice: NOTICE,
-    timeline: tl.map((e) => ({ id: e.id, actor: e.actor, event: e.event, detail: e.detail, at: e.created_at })),
+    timeline: tl.map((e) => ({ id: e.id, actor: e.actor, event: e.event, detail: user.role === "Candidate" ? candidateTimelineDetail(e.detail) : e.detail, at: e.created_at })),
     documents: docs.map((d) => ({
       id: d.id,
       kind: d.cv_file_id ? "cv" : "document",

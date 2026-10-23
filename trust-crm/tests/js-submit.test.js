@@ -172,8 +172,10 @@ test("happy path: exactly one mail, submission 'sent' with provider id + exact d
   assert.deepEqual(r.job.payload, { applicationId: w.appId, candidateId: w.candidateId, submissionId: r.submissionId });
   const tl = await timelineOf(w.appId);
   const resolved = tl.find((e) => e.event === "recipient_resolved");
-  assert.equal(resolved.detail.recipient, w.recipient, "the recipient is on the approval history");
   assert.equal(resolved.detail.recipientSource, "verified_contact");
+  assert.equal(resolved.detail.recipient, undefined, "addresses stay out of the timeline");
+  const resolvedAudit = (await q("SELECT detail FROM js_audit_events WHERE application_id=$1 AND action='submission.recipient_resolved'", [w.appId])).rows[0];
+  assert.equal(resolvedAudit.detail.recipient, w.recipient, "staff history (audit) shows where the CV goes");
   let [sub] = await subsOf(w.appId);
   assert.equal(sub.status, "queued");
   assert.equal(sub.idempotency_key, `app:${w.appId}:a1`);
@@ -392,18 +394,72 @@ test("consent withdrawn in flight (consent row only): guard consent_withdrawn ->
   assert.equal((await outbound(w.recipient)).length, 0);
 });
 
-test("candidate paused / account suspended after queueing -> cancelled, zero mails", async () => {
-  const w = await world();
-  const r = await queued(w);
-  await q("UPDATE js_candidate_settings SET paused=true WHERE candidate_id=$1", [w.candidateId]);
-  assert.equal((await submitter.handleSubmit(r.job, DEPS)).code, "candidate_paused");
-  assert.equal(await status(w.appId), "cancelled");
+test("account suspended after queueing -> cancelled (terminal), zero mails", async () => {
+  const w = { recipient: "none@nowhere.example" };
   const w2 = await world();
   const r2 = await queued(w2);
   await q("UPDATE users SET is_active=false WHERE id=$1", [w2.userId]);
   assert.equal((await submitter.handleSubmit(r2.job, DEPS)).code, "user_suspended");
   assert.equal(await status(w2.appId), "cancelled");
   assert.equal((await outbound(w.recipient)).length + (await outbound(w2.recipient)).length, 0);
+});
+
+for (const [label, pause, unpause] of [
+  ["candidate", (w) => q("UPDATE js_candidate_settings SET paused=true WHERE candidate_id=$1", [w.candidateId]), (w) => q("UPDATE js_candidate_settings SET paused=false WHERE candidate_id=$1", [w.candidateId])],
+  ["module", () => q(`INSERT INTO js_module_state (key, value) VALUES ('module_paused','{"paused":true}'::jsonb) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`), () => q(`UPDATE js_module_state SET value='{"paused":false}'::jsonb WHERE key='module_paused'`)],
+  ["source", (w) => q("UPDATE js_sources SET paused=true WHERE id=$1", [w.sourceId]), (w) => q("UPDATE js_sources SET paused=false WHERE id=$1", [w.sourceId])],
+]) {
+  test(`${label} pause after queueing is a HOLD: application back to approved, attempt failed held:*, no task, zero mails; resume + queueSubmission -> one mail, attempt 2`, async () => {
+    const w = await world();
+    const r = await queued(w);
+    await pause(w);
+    let out;
+    try {
+      out = await submitter.handleSubmit(r.job, DEPS);
+    } finally {
+      await unpause(w);
+    }
+    assert.equal(out.status, "held", JSON.stringify(out));
+    assert.equal(out.code, `${label}_paused`);
+    assert.equal(await status(w.appId), "approved");
+    const [s1] = await subsOf(w.appId);
+    assert.equal(s1.status, "failed");
+    assert.equal(s1.evidence.reason, `held:${label}_paused`);
+    assert.deepEqual(await tasksOf(w.appId), []);
+    const tl = await timelineOf(w.appId);
+    assert.ok(tl.some((e) => e.event === "held_paused" && e.detail.to === "approved" && e.actor === "system:submitter"));
+    assert.equal((await outbound(w.recipient)).length, 0);
+    // pause lifted: the scheduler (Task 12) re-queues approved applications via queueSubmission
+    const again = await submitter.queueSubmission(w.appId, undefined, DEPS);
+    assert.equal(again.queued, true, JSON.stringify(again));
+    assert.equal(again.attempt, 2);
+    const subs = await subsOf(w.appId);
+    assert.equal(subs[1].idempotency_key, `app:${w.appId}:a2`);
+    const job2 = await queueItem(again.submissionId);
+    assert.equal(job2.idempotency_key, `submit:${w.appId}:2`);
+    assert.equal((await submitter.handleSubmit(job2, DEPS)).status, "sent");
+    assert.equal((await outbound(w.recipient)).length, 1);
+    assert.equal(await status(w.appId), "sent");
+  });
+}
+
+test("queued -> approved is a system-only transition (users 403, no grant 403)", async () => {
+  const w = await world();
+  await queued(w);
+  await assert.rejects(applicationService.transition(w.appId, "approved", w.manager), (e) => e.status === 403);
+  await assert.rejects(applicationService.transition(w.appId, "approved", "system:x"), (e) => e.status === 403);
+  assert.equal(await status(w.appId), "queued");
+});
+
+test("pause AND consent withdrawn at send time -> still cancelled (consent wins over the hold)", async () => {
+  const w = await world();
+  const r = await queued(w);
+  await q("UPDATE js_candidate_settings SET paused=true WHERE candidate_id=$1", [w.candidateId]);
+  await q(`UPDATE js_consents SET scope = scope || '{"submit": false, "withdrawn": {"submit": "2026-10-23T00:00:00Z"}}'::jsonb WHERE candidate_id=$1`, [w.candidateId]);
+  const out = await submitter.handleSubmit(r.job, DEPS);
+  assert.equal(out.code, "consent_withdrawn");
+  assert.equal(await status(w.appId), "cancelled");
+  assert.equal((await outbound(w.recipient)).length, 0);
 });
 
 test("job closed meanwhile -> application closed, submission failed, zero mails", async () => {
@@ -436,6 +492,27 @@ test("same vacancy via two sightings/rows -> one submission; the second is refus
   const second = await submitter.queueSubmission(app2, w.manager, DEPS);
   assert.equal(second.queued, false);
   assert.equal(second.reason, "duplicate");
+  // the duplicate appears only at send time (queued before the twin was): needs_staff + duplicate_review
+  const w3 = await world();
+  const url3 = (await q("SELECT url FROM js_jobs WHERE id=$1", [w3.jobId])).rows[0].url;
+  const dup3 = await addJob(w3, { url: url3, domain: w3.domain, employer: `${w3.employerName} C` });
+  const app3 = (await applicationService.createFromMatch({ matchId: dup3.matchId, actor: w3.manager })).id;
+  await applicationService.prepareApplication({ id: app3, actor: w3.manager });
+  await applicationService.approveApplication({ id: app3, actor: w3.manager, reason: "ok" });
+  const ra = await submitter.queueSubmission(w3.appId, w3.manager, DEPS);
+  const jobA = await queueItem(ra.submissionId);
+  assert.equal((await submitter.handleSubmit(jobA, DEPS)).status, "sent");
+  // app3 got queued earlier through a path that skipped the duplicate (simulated: direct rows)
+  await applicationService.transition(app3, "queued", w3.manager);
+  const sub3 = (await q("INSERT INTO js_submissions (application_id, attempt_no, idempotency_key, channel, recipient, status) VALUES ($1,1,$2,'email',$3,'queued') RETURNING id", [app3, `app:${app3}:a1`, w3.recipient])).rows[0].id;
+  const out3 = await submitter.handleSubmit({ id: null, payload: { applicationId: app3, submissionId: sub3 } }, DEPS);
+  assert.equal(out3.code, "duplicate");
+  assert.equal(await status(app3), "needs_staff");
+  assert.equal((await tasksOf(app3))[0].reason, "duplicate_review");
+  const s3 = (await subsOf(app3))[0];
+  assert.equal(s3.status, "failed");
+  assert.equal(s3.evidence.reason, "guard:duplicate");
+  assert.equal((await outbound(w3.recipient)).length, 1);
   assert.equal((await submitter.handleSubmit(r.job, DEPS)).status, "sent");
   assert.equal((await q("SELECT count(*)::int AS n FROM js_submissions s JOIN js_applications a ON a.id=s.application_id WHERE a.candidate_id=$1", [w.candidateId])).rows[0].n, 1);
   assert.equal((await outbound(w.recipient)).length, 1);
@@ -593,10 +670,18 @@ test("channels/email.loadAttachments: bytes from storage by key, hash-verified, 
   const bad = await emailChannel.loadAttachments([{ kind: "cv", cvFileId: 1, version: 1, sha256: "0".repeat(64), storageKey: w.cvKey }, { kind: "document", documentId: 2, sha256: "x", storageKey: "../etc/passwd" }]);
   assert.deepEqual(bad.problems, ["attachment_hash_mismatch:cv1", "attachment_unavailable:doc2"]);
   // error classification: definite vs unknown
-  assert.equal(emailChannel.classifyError(Object.assign(new Error("x"), { code: "REQUIRES_SETUP" })), "refused");
-  assert.equal(emailChannel.classifyError(Object.assign(new Error("x"), { statusCode: 422 })), "refused");
-  assert.equal(emailChannel.classifyError(Object.assign(new Error("x"), { statusCode: 503 })), "unknown");
-  assert.equal(emailChannel.classifyError(Object.assign(new Error("x"), { code: "ECONNRESET" })), "unknown");
+  const E = (props) => Object.assign(new Error("x"), props);
+  for (const c of [550, 551, 552, 553, 554]) assert.equal(emailChannel.classifyError(E({ code: "EENVELOPE", responseCode: c })), "refused", String(c));
+  assert.equal(emailChannel.classifyError(E({ response: "550 5.1.1 User unknown" })), "refused");
+  assert.equal(emailChannel.classifyError(E({ code: "EAUTH", responseCode: 535 })), "config");
+  assert.equal(emailChannel.classifyError(E({ response: "535 Authentication failed" })), "config");
+  assert.equal(emailChannel.classifyError(E({ code: "REQUIRES_SETUP" })), "config");
+  for (const props of [{ code: "ETIMEDOUT" }, { code: "ECONNRESET" }, { responseCode: 421 }, { responseCode: 451 }, { statusCode: 422 }, { statusCode: 503 }, {}]) {
+    assert.equal(emailChannel.classifyError(E(props)), "unknown", JSON.stringify(props));
+  }
+  // unexpected storage keys never throw
+  const odd = await emailChannel.loadAttachments([{ kind: "cv", cvFileId: 9, sha256: "a", storageKey: "1-abc.exe" }, { kind: "cv", cvFileId: 8, sha256: "a", storageKey: 42 }]);
+  assert.deepEqual(odd.problems, ["attachment_unavailable:cv9", "attachment_unavailable:cv8"]);
   assert.equal(emailChannel.redact("auth failed password=hunter2 token: abc"), "auth failed password=[redacted] token=[redacted]");
 });
 
@@ -610,16 +695,26 @@ async function sentWorld() {
   return w;
 }
 
-test("recordEvidence: empty -> 400; wrong message id -> 409; failed DSN -> 409; valid receipt -> confirmed_submitted + timeline; tasks resolved", async () => {
+const GRANT = submitter._internal.EVIDENCE_GRANT;
+
+test("recordEvidence: staff delivery_receipt -> 400; system receipt needs the grant, exact provider id (not our planned id), action 'delivered', reportRef", async () => {
   const w = await sentWorld();
-  const call = (kind, detail, actor = w.manager) => submitter.recordEvidence({ submissionId: w.sub.id, kind, detail, actor });
-  await assert.rejects(call("delivery_receipt", {}), (e) => e.status === 400);
-  await assert.rejects(call("delivery_receipt", undefined), (e) => e.status === 400);
-  await assert.rejects(call("bogus", { a: 1 }), (e) => e.status === 400);
-  await assert.rejects(call("delivery_receipt", { providerMessageId: "<other@x>" }), (e) => e.status === 409);
-  await assert.rejects(call("delivery_receipt", { providerMessageId: w.sub.provider_message_id, action: "failed" }), (e) => e.status === 409);
+  const staff = (kind, detail) => submitter.recordEvidence({ submissionId: w.sub.id, kind, detail, actor: w.manager });
+  const sys = (detail, grant = true) => submitter.recordEvidence({ submissionId: w.sub.id, kind: "delivery_receipt", detail, actor: "system:dsn", [GRANT]: grant });
+  await assert.rejects(staff("delivery_receipt", { providerMessageId: w.sub.provider_message_id, action: "delivered", reportRef: "r" }), (e) => e.status === 400);
+  await assert.rejects(staff("manual_confirmation", {}), (e) => e.status === 400);
+  await assert.rejects(staff("manual_confirmation", undefined), (e) => e.status === 400);
+  await assert.rejects(staff("bogus", { a: 1 }), (e) => e.status === 400);
+  const ok = { providerMessageId: w.sub.provider_message_id, action: "delivered", reportRef: "dsn-1" };
+  await assert.rejects(sys(ok, false), (e) => e.status === 403, "no grant -> 403");
+  await assert.rejects(sys({ ...ok, providerMessageId: "<other@x>" }), (e) => e.status === 409);
+  await assert.rejects(sys({ ...ok, providerMessageId: w.sub.evidence.messageIdPlanned }), (e) => e.status === 409, "our planned Message-ID is not provider evidence");
+  await assert.rejects(sys({ providerMessageId: ok.providerMessageId, reportRef: "x" }), (e) => e.status === 400, "action missing");
+  await assert.rejects(sys({ providerMessageId: ok.providerMessageId, action: "delivered" }), (e) => e.status === 400, "reportRef missing");
+  await assert.rejects(sys({ ...ok, action: "failed" }), (e) => e.status === 409);
+  await assert.rejects(sys({ ...ok, action: "relayed" }), (e) => e.status === 409);
   assert.equal(await status(w.appId), "sent", "still sent without evidence");
-  const out = await call("delivery_receipt", { providerMessageId: w.sub.provider_message_id, action: "delivered", reportRef: "dsn-1" });
+  const out = await sys(ok);
   assert.equal(out.status, "confirmed_submitted");
   assert.equal(await status(w.appId), "confirmed_submitted");
   const sub = (await subsOf(w.appId))[0];
@@ -627,7 +722,7 @@ test("recordEvidence: empty -> 400; wrong message id -> 409; failed DSN -> 409; 
   assert.ok(sub.confirmed_at);
   assert.equal(sub.evidence.confirmations.length, 1);
   assert.equal(sub.evidence.confirmations[0].kind, "delivery_receipt");
-  assert.equal(sub.evidence.confirmations[0].actor, `staff:${w.managerId}`);
+  assert.equal(sub.evidence.confirmations[0].actor, "system:dsn");
   assert.equal(sub.evidence.phase, "sent", "the send record is kept");
   assert.ok((await timelineOf(w.appId)).some((e) => e.event === "submission_confirmed" && e.detail.to === "confirmed_submitted"));
 });
@@ -637,13 +732,18 @@ test("recordEvidence employer_acknowledgement: message from another domain -> 40
   const other = (await q("INSERT INTO js_messages (direction, application_id, from_addr, subject) VALUES ('in',$1,'hr@evil-northwind.example','Re: app') RETURNING id", [w.appId])).rows[0].id;
   const unlinked = (await q("INSERT INTO js_messages (direction, from_addr, subject) VALUES ('in',$1,'Re: app') RETURNING id", [`hr@${w.domain}`])).rows[0].id;
   const good = (await q("INSERT INTO js_messages (direction, application_id, from_addr, subject) VALUES ('in',$1,$2,'Re: app') RETURNING id", [w.appId, `"HR Team" <HR@${w.domain}>`])).rows[0].id;
-  const call = (messageId) => submitter.recordEvidence({ submissionId: w.sub.id, kind: "employer_acknowledgement", detail: { messageId }, actor: "system:inbound" });
+  const call = (messageId) => submitter.recordEvidence({ submissionId: w.sub.id, kind: "employer_acknowledgement", detail: { messageId }, actor: w.manager });
   await assert.rejects(call(other), (e) => e.status === 409);
   await assert.rejects(call(unlinked), (e) => e.status === 409);
+  // a message of ANOTHER application from the right domain is refused too
+  const w2 = await sentWorld();
+  const foreign = (await q("INSERT INTO js_messages (direction, application_id, from_addr, subject) VALUES ('in',$1,$2,'Re') RETURNING id", [w2.appId, `hr@${w.domain}`])).rows[0].id;
+  await assert.rejects(call(foreign), (e) => e.status === 409);
   const out = await call(good);
   assert.equal(out.applicationStatus, "confirmed_submitted");
-  // a system actor can never use manual_confirmation
-  await assert.rejects(submitter.recordEvidence({ submissionId: w.sub.id, kind: "manual_confirmation", detail: { note: "x" }, actor: "system:inbound" }), (e) => e.status === 403);
+  // a system actor (even with the grant) can never use manual_confirmation; without the grant nothing
+  await assert.rejects(submitter.recordEvidence({ submissionId: w.sub.id, kind: "manual_confirmation", detail: { note: "long enough note" }, actor: "system:inbound", [GRANT]: true }), (e) => e.status === 403);
+  await assert.rejects(submitter.recordEvidence({ submissionId: w.sub.id, kind: "employer_acknowledgement", detail: { messageId: good }, actor: "system:inbound" }), (e) => e.status === 403);
 });
 
 test("recordEvidence on an outcome_unknown submission (needs_staff) with manual confirmation -> confirmed; queued/failed submissions cannot be confirmed", async () => {
@@ -653,7 +753,8 @@ test("recordEvidence on an outcome_unknown submission (needs_staff) with manual 
   await submitter.handleSubmit(r.job, { ...DEPS, mailSend: async () => { throw new Error("timeout"); } });
   assert.equal(await status(w.appId), "needs_staff");
   await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "  " }, actor: w.manager }), (e) => e.status === 400);
-  await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "ok", fileRef: { storageKey: "../../x" } }, actor: w.manager }), (e) => e.status === 400);
+  await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "called hr" }, actor: w.manager }), (e) => e.status === 400, "< 10 chars");
+  await assert.rejects(submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "long enough note", fileRef: { storageKey: "../../x" } }, actor: w.manager }), (e) => e.status === 400);
   const out = await submitter.recordEvidence({ submissionId: r.submissionId, kind: "manual_confirmation", detail: { note: "Employer HR confirmed by phone they received the CV", fileRef: { storageKey: w.cvKey } }, actor: w.manager });
   assert.equal(out.applicationStatus, "confirmed_submitted");
   assert.equal((await tasksOf(w.appId)).find((t) => t.reason === "verify_delivery").status, "resolved");
@@ -739,11 +840,14 @@ test("HTTP: queue (Manager 200 / Agent 403 / other staff 404 / refusal 409), evi
   assert.equal((await http("GET", "/jobsearch/submissions", mgrTok)).status, 400);
 
   // evidence over HTTP
-  const ev = { kind: "delivery_receipt", detail: { providerMessageId: sub.provider_message_id } };
+  const ev = { kind: "manual_confirmation", detail: { note: "Employer HR confirmed receipt by phone on 23 Oct" } };
+  const receipt = await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, { kind: "delivery_receipt", detail: { providerMessageId: sub.provider_message_id, action: "delivered", reportRef: "x" } });
+  assert.equal(receipt.status, 400);
+  assert.match(receipt.body.error, /manual_confirmation or wait for the provider receipt/);
   assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, candTok, ev)).status, 403);
   assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, token(otherMgr, "Manager"), ev)).status, 404);
-  assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, { kind: "delivery_receipt" })).status, 400);
-  assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, { kind: "delivery_receipt", detail: { providerMessageId: "<nope@x>" } })).status, 409);
+  assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, { kind: "manual_confirmation" })).status, 400);
+  assert.equal((await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, { kind: "manual_confirmation", detail: { note: "short" } })).status, 400);
   const good = await http("POST", `/jobsearch/submissions/${sub.id}/evidence`, mgrTok, ev);
   assert.equal(good.status, 200, JSON.stringify(good.body));
   assert.equal(good.body.applicationStatus, "confirmed_submitted");
@@ -751,6 +855,128 @@ test("HTTP: queue (Manager 200 / Agent 403 / other staff 404 / refusal 409), evi
   assert.equal(after.body.submissions[0].message, "Submission confirmed");
   assert.ok((await q("SELECT 1 FROM audit_logs WHERE action='jobsearch.submission.evidence' AND user_id=$1", [w.managerId])).rowCount);
 });
+
+// ---------------------------------------------------------------- fix round 1
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+test("candidate GET /jobsearch/applications/:id after sent / failed / outcome_unknown shows no recipient, message ids, provider text or sha256s", async () => {
+  const leaks = [];
+  // sent
+  const a = await sentWorld();
+  leaks.push([a, [a.sub.provider_message_id, a.sub.evidence.messageIdPlanned, a.sub.evidence.replyToken, a.recipient, a.domain, a.cvSha]]);
+  // failed (sandbox refusal text)
+  const b = await world({ domain: "acme-real.org" });
+  const rb = await queued(b);
+  await submitter.handleSubmit(rb.job, DEPS);
+  const sb = (await subsOf(b.appId))[0];
+  leaks.push([b, [b.recipient, "acme-real.org", "ALLOWLIST", sb.evidence.messageIdPlanned, b.cvSha]]);
+  // outcome_unknown (provider error text)
+  const c = await world();
+  const rc = await queued(c);
+  await submitter.handleSubmit(rc.job, { ...DEPS, mailSend: async () => { throw Object.assign(new Error("Greeting never received from smtp.internal.example"), { code: "ETIMEDOUT" }); } });
+  const sc = (await subsOf(c.appId))[0];
+  leaks.push([c, [c.recipient, "smtp.internal.example", "ETIMEDOUT", sc.evidence.messageIdPlanned, c.cvSha]]);
+  for (const [w, secrets] of leaks) {
+    const res = await http("GET", `/jobsearch/applications/${w.appId}`, await candidateToken(w.userId));
+    assert.equal(res.status, 200);
+    const tl = JSON.stringify(res.body.timeline);
+    for (const x of secrets) assert.equal(tl.includes(x), false, `${x} leaked in ${tl}`);
+    assert.ok(res.body.timeline.some((e) => e.detail.to), "status changes remain visible");
+    // staff still see full timeline details (unchanged)
+    const staff = await http("GET", `/jobsearch/applications/${w.appId}`, token(w.managerId, "Manager"));
+    assert.ok(staff.body.timeline.some((e) => e.detail.submissionId));
+  }
+});
+
+test("consent withdrawn WHILE the provider call runs -> the mail went: submission 'sent' + review task, application stays 'cancelled'", async () => {
+  const w = await world();
+  const r = await queued(w);
+  const gate = deferred();
+  const entered = deferred();
+  const mailSend = async (m) => {
+    entered.resolve();
+    await gate.promise;
+    return mail.send(m);
+  };
+  const run = submitter.handleSubmit(r.job, { ...DEPS, mailSend });
+  await entered.promise;
+  await consentService.withdrawConsent({ user: { id: w.userId, role: "Candidate" }, candidateId: w.candidateId, scopeKey: "submit" });
+  assert.equal(await status(w.appId), "cancelled");
+  gate.resolve();
+  const out = await run;
+  assert.equal(out.status, "sent");
+  assert.equal((await subsOf(w.appId))[0].status, "sent");
+  assert.equal(await status(w.appId), "cancelled");
+  assert.equal((await tasksOf(w.appId)).find((t) => t.reason === "review").status, "open");
+  assert.equal((await outbound(w.recipient)).length, 1);
+});
+
+test("slow provider + a second concurrent handleSubmit -> second returns in_progress; final state 'sent' (not outcome_unknown)", async () => {
+  const w = await world();
+  const r = await queued(w);
+  const gate = deferred();
+  const entered = deferred();
+  const run = submitter.handleSubmit(r.job, { ...DEPS, mailSend: async (m) => { entered.resolve(); await gate.promise; return mail.send(m); } });
+  await entered.promise;
+  const second = await submitter.handleSubmit(r.job, DEPS);
+  assert.equal(second.status, "in_progress");
+  assert.equal((await workers.tick({ kinds: ["submit"] })).interrupted, 0, "the sweep leaves a live send alone");
+  gate.resolve();
+  assert.equal((await run).status, "sent");
+  assert.equal((await subsOf(w.appId))[0].status, "sent");
+  assert.equal((await outbound(w.recipient)).length, 1);
+});
+
+test("unexpected error in the first transaction: non-retryable -> attempt failed internal_error, needs_staff + task; retryable is rethrown until the last attempt", async () => {
+  const orig = emailChannel.loadAttachments;
+  try {
+    const w = await world();
+    const r = await queued(w);
+    emailChannel.loadAttachments = async () => { throw new TypeError("Cannot read properties of undefined"); };
+    const out = await submitter.handleSubmit(r.job, DEPS);
+    assert.equal(out.code, "internal_error");
+    const [s1] = await subsOf(w.appId);
+    assert.equal(s1.status, "failed");
+    assert.equal(s1.evidence.reason, "internal_error");
+    assert.equal(await status(w.appId), "needs_staff");
+    assert.equal((await tasksOf(w.appId))[0].reason, "internal_error");
+
+    const w2 = await world();
+    const r2 = await queued(w2);
+    emailChannel.loadAttachments = async () => { throw Object.assign(new Error("could not serialize access"), { code: "40001" }); };
+    await assert.rejects(submitter.handleSubmit({ ...r2.job, attempts: 1, max_attempts: 5 }, DEPS), /serialize/);
+    assert.equal((await subsOf(w2.appId))[0].status, "queued");
+    assert.equal(await status(w2.appId), "queued");
+    const last = await submitter.handleSubmit({ ...r2.job, attempts: 5, max_attempts: 5 }, DEPS);
+    assert.equal(last.code, "internal_error");
+    assert.equal(await status(w2.appId), "needs_staff");
+    assert.equal((await outbound(w.recipient)).length + (await outbound(w2.recipient)).length, 0);
+  } finally {
+    emailChannel.loadAttachments = orig;
+  }
+});
+
+for (const [label, err, subStatus, taskReason, appStatus] of [
+  ["SMTP 550 user unknown", { code: "EENVELOPE", responseCode: 550, response: "550 5.1.1 User unknown" }, "failed", "delivery_failed", "failed"],
+  ["SMTP 554 policy", { response: "554 5.7.1 Rejected by policy" }, "failed", "delivery_failed", "failed"],
+  ["EAUTH 535", { code: "EAUTH", responseCode: 535, response: "535 Authentication failed" }, "failed", "mail_config", "failed"],
+  ["SMTP 421 transient", { responseCode: 421, response: "421 Try again later" }, "outcome_unknown", "verify_delivery", "needs_staff"],
+  ["ECONNRESET", { code: "ECONNRESET" }, "outcome_unknown", "verify_delivery", "needs_staff"],
+]) {
+  test(`provider error ${label} -> submission ${subStatus}, task ${taskReason}`, async () => {
+    const w = await world();
+    const r = await queued(w);
+    await submitter.handleSubmit(r.job, { ...DEPS, mailSend: async () => { throw Object.assign(new Error(label), err); } });
+    assert.equal((await subsOf(w.appId))[0].status, subStatus);
+    assert.equal((await tasksOf(w.appId))[0].reason, taskReason);
+    assert.equal(await status(w.appId), appStatus);
+  });
+}
 
 test("workers: handlers map submit/search; startWorkers is disabled under NODE_ENV=test", () => {
   assert.equal(typeof workers.handlers.submit, "function");
