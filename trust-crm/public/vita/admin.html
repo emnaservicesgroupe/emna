@@ -11,6 +11,10 @@
   <script src="i18n.js" defer></script>
   <script src="vita.js" defer></script>
   <script src="admin.js" defer></script>
+  <script src="crm-util.js" defer></script>
+  <script src="crm-candidate.js" defer></script>
+  <script src="crm-leads.js" defer></script>
+  <script src="crm-sitejobs.js" defer></script>
 </head>
 <body data-page="admin" data-title-key="admin.title">
   <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
@@ -60,6 +64,8 @@
     <div id="app-view" hidden>
       <div class="tabs" role="tablist" id="tabs" data-i18n-aria-label="admin.sections">
         <button type="button" role="tab" id="tab-dashboard" aria-controls="panel-dashboard" data-tab="dashboard" data-i18n="tab.dashboard">Dashboard</button>
+        <button type="button" role="tab" id="tab-leads" aria-controls="panel-leads" data-tab="leads" data-i18n="tab.leads">Leads</button>
+        <button type="button" role="tab" id="tab-sitejobs" aria-controls="panel-sitejobs" data-tab="sitejobs" data-i18n="tab.siteJobs">Site jobs</button>
         <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
         <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
         <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
@@ -92,6 +98,7 @@
           </div>
           <p class="small muted" id="dash-search-status" aria-live="polite"></p>
           <div id="dash-lanes" class="lanes"></div>
+          <div id="dash-crm-candidate"></div>
         </div>
         <div class="card">
           <h2 data-i18n="dash.candidates">Candidates</h2>
@@ -100,6 +107,60 @@
         <div class="card">
           <h2 data-i18n="dash.attention">Needs staff attention</h2>
           <div id="dash-attention"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- CRM leads -->
+      <section id="panel-leads" role="tabpanel" aria-labelledby="tab-leads" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="crm.leads.title">Leads</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="leads-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <p class="small muted" data-i18n="crm.leads.hint">Requests sent through the public website. Spam is hidden unless you filter for it.</p>
+          <form id="leads-filters" class="filters" novalidate>
+            <div class="field"><label for="leads-f-status" data-i18n="crm.leads.filterStatus">Status</label><select id="leads-f-status" name="status"></select></div>
+            <div class="field"><label for="leads-f-kind" data-i18n="crm.leads.filterKind">Type</label><select id="leads-f-kind" name="kind"></select></div>
+            <div class="field"><label for="leads-f-q" data-i18n="crm.leads.search">Search by name, e-mail, phone or company</label><input id="leads-f-q" name="q" type="search" maxlength="100" autocomplete="off"></div>
+            <div class="field btn-row">
+              <button type="submit" class="btn" data-i18n="filter.apply">Apply filters</button>
+              <button type="reset" class="btn secondary" data-i18n="filter.reset">Reset</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <p class="small muted" id="leads-summary" aria-live="polite"></p>
+          <div id="leads-table"></div>
+          <div class="pager" id="leads-pager"></div>
+        </div>
+        <div class="card" id="lead-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="lead-title" tabindex="-1" data-i18n="crm.detail.title">Lead</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="lead-close" data-i18n="common.close">Close</button></div>
+          <div id="lead-body"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- site jobs -->
+      <section id="panel-sitejobs" role="tabpanel" aria-labelledby="tab-sitejobs" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2 data-i18n="crm.sj.title">Site job offers</h2><span class="spacer"></span>
+            <button type="button" class="btn small" id="sj-new" data-i18n="crm.sj.new">New offer</button>
+            <button type="button" class="btn secondary small" id="sj-refresh" data-i18n="common.refresh">Refresh</button>
+          </div>
+          <p class="notice info small" data-i18n="crm.sj.hint">Only published offers appear on the public website. Every offer needs a note saying where it came from. VITA does not guarantee employment or visas.</p>
+          <form id="sj-filters" class="filters" novalidate>
+            <div class="field"><label for="sj-f-status" data-i18n="crm.sj.filterStatus">Status</label><select id="sj-f-status" name="status"></select></div>
+            <div class="field btn-row">
+              <button type="submit" class="btn" data-i18n="filter.apply">Apply filters</button>
+              <button type="reset" class="btn secondary" data-i18n="filter.reset">Reset</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <p class="small muted" id="sj-summary" aria-live="polite"></p>
+          <div id="sj-table"></div>
+          <div class="pager" id="sj-pager"></div>
+        </div>
+        <div class="card" id="sj-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="sj-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="sj-close" data-i18n="common.close">Close</button></div>
+          <div id="sj-body"></div>
         </div>
       </section>
 

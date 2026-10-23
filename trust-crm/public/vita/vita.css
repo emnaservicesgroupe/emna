@@ -281,3 +281,7 @@ footer.site-footer { max-inline-size: 1280px; margin: 0 auto; padding: 1rem; col
 /* Untrusted/data text (job titles, employers, e-mail bodies) takes its direction from its own
    content, so Latin data reads correctly inside the Arabic (RTL) UI and vice versa. */
 td, .linklike, .lane li, blockquote.evidence, .untrusted, .kv dd, article h3, .table-wrap th[scope="row"] { unicode-bidi: plaintext; }
+
+/* CRM console: note/timeline text keeps line breaks and its own direction; selected table row */
+.note-text { white-space: pre-wrap; margin: 0.15rem 0 0; unicode-bidi: plaintext; }
+tbody tr.selected { background: var(--blue-50); }

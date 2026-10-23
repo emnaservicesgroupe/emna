@@ -103,6 +103,14 @@ async function loadScoped(client, user, id, { lock = false } = {}) {
   return r.rows[0];
 }
 
+/** Active staff who can work leads, for the assign-to select (id, name, role only; users:write at the route). */
+async function listStaff() {
+  const r = await db().query(
+    "SELECT id, full_name, role FROM users WHERE is_active = true AND role IN ('SuperAdmin','Admin','Manager','Receptionist','Agent') ORDER BY full_name, id LIMIT 500"
+  );
+  return { rows: r.rows };
+}
+
 async function getLead(user, rawId) {
   const id = parseId(rawId);
   const lead = await loadScoped(db(), user, id);
@@ -216,4 +224,4 @@ async function addNote(user, rawId, text) {
   });
 }
 
-module.exports = { listLeads, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX, parseId, loadScoped, inTransaction, hasPerm };
+module.exports = { listLeads, listStaff, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX, parseId, loadScoped, inTransaction, hasPerm };

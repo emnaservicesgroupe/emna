@@ -314,7 +314,7 @@
   }
 
   function assertPath(path) {
-    if (typeof path !== "string" || !/^\/(jobsearch|auth)\//.test(path)) throw new Error("API path not allowed");
+    if (typeof path !== "string" || !/^\/(jobsearch|auth|crm)\//.test(path)) throw new Error("API path not allowed");
   }
 
   /** JSON API call. opts: body, noAuth, raw (return Response), headers. */

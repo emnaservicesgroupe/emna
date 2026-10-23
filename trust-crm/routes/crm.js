@@ -11,6 +11,7 @@
 //   PATCH /site-jobs/:id  {fields}                                 sitejobs:write (409 when closed)
 //   POST  /site-jobs/:id/publish                                   sitejobs:write (draft only; needs evidence_note, title, country, description, future closes_at)
 //   POST  /site-jobs/:id/close                                     sitejobs:write (published only; final)
+//   GET   /staff                                                   users:write  -> {rows:[{id,full_name,role}]} (assign-to select)
 //   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
@@ -34,6 +35,8 @@ router.use((req, res, next) => {
 });
 
 router.get("/leads", checkPermission("leads:read"), asyncHandler(async (req, res) => res.json(await leads.listLeads(req.user, req.query))));
+
+router.get("/staff", checkPermission("users:write"), asyncHandler(async (_req, res) => res.json(await leads.listStaff())));
 
 router.get("/leads/:id", checkPermission("leads:read"), asyncHandler(async (req, res) => res.json(await leads.getLead(req.user, req.params.id))));
 

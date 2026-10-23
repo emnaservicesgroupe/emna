@@ -86,6 +86,20 @@
     items.forEach(function (it) { sel.appendChild(option(it[0], it[1], String(it[0]) === String(current === undefined || current === null ? "" : current))); });
   }
 
+  // ================================================================ extension API (crm-*.js)
+  // Extra tabs/panels live in their own scripts (crm-leads.js, crm-sitejobs.js, crm-candidate.js), loaded after this file.
+  // registerTab(name, {init, load, visible}) wires #tab-<name>/#panel-<name>; onCandidate(fn) runs when the dashboard
+  // opens a candidate card, so CRM code can add its section without this file knowing about it.
+  var EXT = {};
+  var candidateListeners = [];
+  window.VITA_ADMIN = {
+    role: role,
+    registerTab: function (name, def) { EXT[name] = def; },
+    onCandidate: function (fn) { candidateListeners.push(fn); },
+    selectTab: function (name, focusPanel) { selectTab(name, focusPanel); },
+    errorBox: errorBox, kv: kv, table: table, fillSelect: fillSelect, option: option,
+  };
+
   // ================================================================ login / session
   function showLogin() {
     if (S.events) { S.events.stop(); S.events = null; }
@@ -188,6 +202,11 @@
     // role-dependent tabs
     $("#tab-health").hidden = !canSeeHealth();
     $("#tab-scheduler").hidden = !isAdmin();
+    Object.keys(EXT).forEach(function (name) {
+      var tab = $("#tab-" + name);
+      if (tab && EXT[name].visible) tab.hidden = !EXT[name].visible();
+      if (EXT[name].init) EXT[name].init();
+    });
     initDashboard();
     initApplications();
     initReview();
@@ -240,6 +259,7 @@
   function refreshCurrent() {
     if (!S.session) return;
     var loaders = { dashboard: loadDashboard, applications: loadApplications, review: loadReview, interviews: loadInterviews, sources: loadSources, settings: loadSettings, reports: function () {}, health: loadHealth, scheduler: loadScheduler, directory: loadDirectory };
+    Object.keys(EXT).forEach(function (name) { if (EXT[name].load) loaders[name] = EXT[name].load; });
     (loaders[S.tab] || function () {})();
     if (S.drawerAppId) renderDrawer(S.drawerAppId, true);
   }
@@ -413,6 +433,7 @@
     var gen = (S.cardGen = (S.cardGen || 0) + 1);
     var stale = function () { return gen !== S.cardGen; };
     V.setContent($("#dash-candidate-name"), candidateName(id));
+    candidateListeners.forEach(function (fn) { try { fn(id); } catch (e) { /* an extension failure must not break the dashboard */ } });
     $("#dash-candidate-name").setAttribute("tabindex", "-1");
     V.setContent($("#dash-lanes"), V.loading());
     var actions = $("#dash-candidate-actions");
