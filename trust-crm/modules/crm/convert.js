@@ -197,4 +197,4 @@ async function getCandidateTimeline(user, rawId) {
   return timeline.list("candidate", Number(rawId), db());
 }
 
-module.exports = { convertLead, setStage, getCandidateTimeline, STAGES };
+module.exports = { convertLead, setStage, getCandidateTimeline, sendInvite, STAGES };

@@ -11,6 +11,9 @@
 //   PATCH /site-jobs/:id  {fields}                                 sitejobs:write (409 when closed)
 //   POST  /site-jobs/:id/publish                                   sitejobs:write (draft only; needs evidence_note, title, country, description, future closes_at)
 //   POST  /site-jobs/:id/close                                     sitejobs:write (published only; final)
+//   GET|POST /employers, /agencies  ?q&status&limit&offset; GET|PATCH /:id    orgs:read (GET) / orgs:write (POST, PATCH)
+//   POST  /employers|agencies/:id/invite {email, full_name}        orgs:write (201; inviteSent reports the OTP mail)
+//   POST  /employers|agencies/:id/suspend|reactivate               orgs:write (revokes portal sessions)
 //   GET   /staff                                                   users:write  -> {rows:[{id,full_name,role}]} (assign-to select)
 //   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
 const express = require("express");
@@ -20,6 +23,7 @@ const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/er
 const leads = require("../modules/crm/leadsAdmin");
 const convert = require("../modules/crm/convert");
 const siteJobs = require("../modules/crm/siteJobsAdmin");
+const orgs = require("../modules/orgs/orgsAdmin");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -81,6 +85,19 @@ router.post("/site-jobs", SJ, asyncHandler(async (req, res) => res.status(201).j
 router.patch("/site-jobs/:id", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.updateSiteJob(req.user, req.params.id, body(req)))));
 router.post("/site-jobs/:id/publish", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.publishSiteJob(req.user, req.params.id))));
 router.post("/site-jobs/:id/close", SJ, asyncHandler(async (req, res) => res.json(await siteJobs.closeSiteJob(req.user, req.params.id))));
+
+for (const type of ["employer", "agency"]) {
+  const base = `/${type === "employer" ? "employers" : "agencies"}`;
+  const R = checkPermission("orgs:read");
+  const W = checkPermission("orgs:write");
+  router.get(base, R, asyncHandler(async (req, res) => res.json(await orgs.list(type, req.query))));
+  router.get(`${base}/:id`, R, asyncHandler(async (req, res) => res.json(await orgs.get(type, req.params.id))));
+  router.post(base, W, asyncHandler(async (req, res) => res.status(201).json(await orgs.create(req.user, type, body(req)))));
+  router.patch(`${base}/:id`, W, asyncHandler(async (req, res) => res.json(await orgs.update(req.user, type, req.params.id, body(req)))));
+  router.post(`${base}/:id/invite`, W, asyncHandler(async (req, res) => res.status(201).json(await orgs.invite(req.user, type, req.params.id, body(req)))));
+  router.post(`${base}/:id/suspend`, W, asyncHandler(async (req, res) => res.json(await orgs.suspend(req.user, type, req.params.id))));
+  router.post(`${base}/:id/reactivate`, W, asyncHandler(async (req, res) => res.json(await orgs.reactivate(req.user, type, req.params.id))));
+}
 
 router.use(jobsearchErrorHandler);
 
