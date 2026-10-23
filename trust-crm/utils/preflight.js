@@ -11,6 +11,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { trustProxySetting } = require("./trustProxy");
+const { realSendEnabled, nearTrue } = require("./flags");
 
 const MIN_SECRET = 32;
 const MIN_WEBHOOK_SECRET = 16;
@@ -31,6 +32,21 @@ function plainAddress(raw) {
   return require("../modules/jobsearch/mail/address").plainAddress(raw);
 }
 
+/**
+ * True for values a generator would never produce: fewer than 8 distinct characters (incl. one repeated
+ * character), a short unit repeated, or mostly consecutive characters (abcdef..., 0123..., zyx...).
+ */
+function lowEntropy(v) {
+  if (new Set(v).size < 8) return true;
+  for (let u = 1; u <= 8 && u < v.length; u++) {
+    const unit = v.slice(0, u);
+    if (unit.repeat(Math.ceil(v.length / u)).slice(0, v.length) === v) return true;
+  }
+  let steps = 0;
+  for (let i = 1; i < v.length; i++) if (Math.abs(v.charCodeAt(i) - v.charCodeAt(i - 1)) === 1) steps++;
+  return steps / (v.length - 1) >= 0.6;
+}
+
 /** Problems with one secret, as messages naming the variable (never the value). */
 function secretProblems(name, value, { min = MIN_SECRET, required = true } = {}) {
   if (!isSet(value)) return required ? [`${name} is not set (generate one: openssl rand -hex 32)`] : [];
@@ -38,6 +54,7 @@ function secretProblems(name, value, { min = MIN_SECRET, required = true } = {})
   const out = [];
   if (v.length < min) out.push(`${name} is too short (at least ${min} characters; generate one: openssl rand -hex 32)`);
   if (PLACEHOLDER_RE.test(v)) out.push(`${name} still holds a placeholder value from an example file (generate a new one: openssl rand -hex 32)`);
+  else if (lowEntropy(v)) out.push(`${name} looks too predictable (repeated or sequential characters; generate one: openssl rand -hex 32)`);
   return out;
 }
 
@@ -91,6 +108,7 @@ function checkEnv(env, deps = {}) {
   if (lower(env.DB_PASSWORD) === "postgres" || (isSet(env.DB_PASSWORD) && PLACEHOLDER_RE.test(String(env.DB_PASSWORD)))) {
     warnings.push("DB_PASSWORD is a default/placeholder value - use a generated password (setup.sh does this)");
   }
+  if (lower(env.DB_USER) === "postgres") warnings.push('DB_USER is "postgres" (a superuser): connect the app with an unprivileged role that owns the database (the Docker kit creates vita_app)');
 
   if (isSet(env.PORT) && !(/^\d{1,5}$/.test(String(env.PORT).trim()) && Number(env.PORT) >= 1 && Number(env.PORT) <= 65535)) problems.push("PORT must be a port number (1-65535)");
 
@@ -101,7 +119,9 @@ function checkEnv(env, deps = {}) {
   if (lower(env.INBOUND_AUTO_ACK_EVIDENCE) === "true") warnings.push("INBOUND_AUTO_ACK_EVIDENCE=true is risk-accepting: acknowledgement evidence is recorded without staff confirmation");
 
   // Mail
-  const realSend = lower(env.MAIL_REAL_SEND) === "true";
+  // same rule as the app (utils/flags.js): only the exact string "true" enables real sending
+  const realSend = realSendEnabled(env);
+  if (nearTrue(env.MAIL_REAL_SEND)) warnings.push('MAIL_REAL_SEND is set but not exactly "true": real sending stays OFF (write true in lower case to enable it)');
   const clamav = isSet(env.CLAMAV_HOST);
   const unscannedAllowed = String(env.ALLOW_UNSCANNED_ATTACHMENTS || "").trim() === "true";
   if (realSend) {
@@ -167,10 +187,10 @@ function format({ problems, warnings }) {
  * Runs the check when env.NODE_ENV === "production". Exits 1 (after printing every problem) when there is one.
  * @returns {{problems: string[], warnings: string[]}|null} null when not in production
  */
-function runPreflight({ env = process.env, exit = (code) => process.exit(code), log = console, writable = storageWritable } = {}) {
+function runPreflight({ env = process.env, exit = (code) => process.exit(code), log = console, writable = storageWritable, printWarnings = true } = {}) {
   if (env.NODE_ENV !== "production") return null;
   const result = checkEnv(env, { storageWritable: writable });
-  const text = format(result);
+  const text = format(printWarnings ? result : { problems: result.problems, warnings: [] });
   if (result.problems.length) {
     log.error(text);
     exit(1);
@@ -180,4 +200,4 @@ function runPreflight({ env = process.env, exit = (code) => process.exit(code), 
   return result;
 }
 
-module.exports = { checkEnv, runPreflight, storageWritable, format, PLACEHOLDER_RE, MIN_SECRET };
+module.exports = { checkEnv, runPreflight, storageWritable, format, lowEntropy, PLACEHOLDER_RE, MIN_SECRET };

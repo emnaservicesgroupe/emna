@@ -119,6 +119,8 @@ test("server.js wires graceful shutdown on SIGTERM and SIGINT with the scheduler
 const { spawn } = require("child_process");
 const os = require("os");
 
+const SECRET_A = require("crypto").randomBytes(32).toString("hex");
+
 function runServer(env, { untilLog, signalAfterLog } = {}) {
   // cwd = an empty temp dir: dotenv finds no .env, so only `env` applies
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "vita-server-"));
@@ -163,8 +165,8 @@ test("server.js (child process): a clean production config starts, then SIGTERM 
       {
         NODE_ENV: "production",
         PORT: port,
-        JWT_SECRET: "a".repeat(64),
-        STORAGE_URL_SECRET: "b".repeat(64),
+        JWT_SECRET: SECRET_A,
+        STORAGE_URL_SECRET: require("crypto").randomBytes(32).toString("hex"),
         DB_HOST: u.hostname,
         DB_PORT: u.port || "5432",
         DB_USER: decodeURIComponent(u.username),
@@ -181,7 +183,7 @@ test("server.js (child process): a clean production config starts, then SIGTERM 
     assert.match(r.out, /SANDBOX MODE/);
     assert.match(r.out, /SIGTERM received: shutting down gracefully/);
     assert.match(r.out, /shutdown complete/);
-    assert.ok(!r.out.includes("a".repeat(64)));
+    assert.ok(!r.out.includes(SECRET_A));
   } finally {
     fs.rmSync(storage, { recursive: true, force: true });
   }

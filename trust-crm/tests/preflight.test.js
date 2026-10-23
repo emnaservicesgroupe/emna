@@ -7,7 +7,10 @@ const os = require("os");
 const path = require("path");
 const { checkEnv, runPreflight, storageWritable } = require("../utils/preflight");
 
-const HEX = (c) => c.repeat(64);
+const crypto = require("crypto");
+// realistic generated secrets (openssl rand -hex 32); a repeated character is now refused as low-entropy
+const HEXES = { a: crypto.randomBytes(32).toString("hex"), b: crypto.randomBytes(32).toString("hex"), c: crypto.randomBytes(32).toString("hex"), d: crypto.randomBytes(32).toString("hex") };
+const HEX = (c) => HEXES[c];
 // A complete, safe production environment (sandbox mail) - every test starts from this and breaks one thing.
 const GOOD = Object.freeze({
   NODE_ENV: "production",
@@ -55,8 +58,8 @@ test("preflight: JWT_SECRET missing, short, or a placeholder is refused", () => 
   assert.ok(has(check({ JWT_SECRET: undefined }).problems, /^JWT_SECRET is not set/));
   assert.ok(has(check({ JWT_SECRET: "  " }).problems, /^JWT_SECRET is not set/));
   assert.ok(has(check({ JWT_SECRET: "short-secret" }).problems, /^JWT_SECRET is too short \(at least 32/));
-  assert.ok(has(check({ JWT_SECRET: "a".repeat(31) }).problems, /^JWT_SECRET is too short/));
-  assert.ok(!has(check({ JWT_SECRET: "a".repeat(32) }).problems, /JWT_SECRET/));
+  assert.ok(has(check({ JWT_SECRET: HEX("a").slice(0, 31) }).problems, /^JWT_SECRET is too short/));
+  assert.ok(!has(check({ JWT_SECRET: HEX("a").slice(0, 32) }).problems, /JWT_SECRET/));
   for (const ph of ["replace_with_secure_random_secret", "please_change_this_secret_value_now_123456", "CHANGEME-CHANGEME-CHANGEME-CHANGEME", "your_secret_your_secret_your_secret_x"]) {
     const r = check({ JWT_SECRET: ph });
     assert.ok(has(r.problems, /^JWT_SECRET still holds a placeholder/), ph);
@@ -64,10 +67,46 @@ test("preflight: JWT_SECRET missing, short, or a placeholder is refused", () => 
   }
 });
 
+test("preflight (fix round): low-entropy secrets are refused - one repeated character, < 8 distinct characters, repeated short units, keyboard/alphabet sequences", () => {
+  const low = ["a".repeat(64), "ab".repeat(32), "abcdabcd".repeat(8), "1234567".repeat(10), "abcdefghijklmnopqrstuvwxyz0123456789", "0123456789abcdef0123456789abcdef", "zyxwvutsrqponmlkjihgfedcba9876543210"];
+  for (const v of low) {
+    for (const key of ["JWT_SECRET", "STORAGE_URL_SECRET", "JOBSEARCH_REPLY_SECRET"]) {
+      const r = check({ [key]: v });
+      assert.ok(has(r.problems, new RegExp(`^${key} looks too predictable`)), `${key}=${v.slice(0, 12)}...`);
+      noValues(r);
+    }
+  }
+  assert.ok(has(check({ INBOUND_MAIL_SECRET: "q".repeat(40) }).problems, /^INBOUND_MAIL_SECRET looks too predictable/));
+  for (let i = 0; i < 20; i++) assert.deepEqual(check({ JWT_SECRET: crypto.randomBytes(32).toString("hex") }).problems, [], "random hex always passes");
+  assert.deepEqual(check({ JWT_SECRET: crypto.randomBytes(30).toString("base64url") }).problems, []);
+});
+
+test("preflight (fix round): MAIL_REAL_SEND uses the app's exact rule (only \"true\"); near-misses warn that real sending stays off", () => {
+  const { realSendEnabled } = require("../utils/flags");
+  for (const v of ["TRUE", "True", " true", "true ", "yes", "1", "on"]) {
+    assert.equal(realSendEnabled({ MAIL_REAL_SEND: v }), false, v);
+    const r = check({ MAIL_REAL_SEND: v });
+    assert.ok(!has(r.problems, /MAIL_REAL_SEND=true needs/), `${v} is not real sending`);
+    assert.ok(has(r.warnings, /MAIL_REAL_SEND is set but not exactly "true": real sending stays OFF/), v);
+  }
+  assert.equal(realSendEnabled({ MAIL_REAL_SEND: "true" }), true);
+  assert.ok(has(check({ MAIL_REAL_SEND: "true" }).problems, /MAIL_REAL_SEND=true needs MAIL_PROVIDER=imap_smtp/));
+});
+
+test("preflight (fix round): DB_USER=postgres (a superuser) is warned; runPreflight can skip warnings (db-init prints them only once, server.js does)", () => {
+  assert.ok(has(check({ DB_USER: "postgres" }).warnings, /DB_USER is "postgres"/));
+  const lines = [];
+  const log = { log: (m) => lines.push(m), error: (m) => lines.push(m) };
+  runPreflight({ env: { ...GOOD }, exit: () => {}, log, writable: ok, printWarnings: false });
+  assert.deepEqual(lines, []);
+  const db = fs.readFileSync(path.join(__dirname, "..", "scripts", "db-init.js"), "utf8");
+  assert.match(db, /runPreflight\(\{ printWarnings: false \}\)/);
+});
+
 test("preflight: STORAGE_URL_SECRET missing/short/placeholder; must differ from JWT_SECRET; optional JOBSEARCH_REPLY_SECRET validated when set", () => {
   assert.ok(has(check({ STORAGE_URL_SECRET: undefined }).problems, /^STORAGE_URL_SECRET is not set/));
   assert.ok(has(check({ STORAGE_URL_SECRET: "x".repeat(10) }).problems, /^STORAGE_URL_SECRET is too short/));
-  assert.ok(has(check({ STORAGE_URL_SECRET: "replace_with_" + "a".repeat(40) }).problems, /^STORAGE_URL_SECRET still holds a placeholder/));
+  assert.ok(has(check({ STORAGE_URL_SECRET: "replace_with_" + HEX("d") }).problems, /^STORAGE_URL_SECRET still holds a placeholder/));
   assert.ok(has(check({ STORAGE_URL_SECRET: HEX("a") }).problems, /must be different/));
   assert.deepEqual(check({ JOBSEARCH_REPLY_SECRET: undefined }).problems, []);
   assert.ok(has(check({ JOBSEARCH_REPLY_SECRET: "tiny" }).problems, /^JOBSEARCH_REPLY_SECRET is too short/));

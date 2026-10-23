@@ -205,7 +205,8 @@ test(".env.production.example: every variable preflight needs; safe sandbox defa
   const all = [...text.matchAll(/^#?\s?([A-Z][A-Z0-9_]{2,})=/gm)].map((m) => m[1]);
   for (const k of all) assert.ok(known.includes(k), `${k} is not a known variable (.env.example)`);
   // what setup.sh produces passes the production preflight
-  const filled = { ...env, JWT_SECRET: "a".repeat(64), STORAGE_URL_SECRET: "b".repeat(64), JOBSEARCH_REPLY_SECRET: "c".repeat(64), DB_PASSWORD: "d".repeat(64), SITE_ADDRESS: "203-0-113-10.sslip.io" };
+  const rnd = () => require("crypto").randomBytes(32).toString("hex");
+  const filled = { ...env, JWT_SECRET: rnd(), STORAGE_URL_SECRET: rnd(), JOBSEARCH_REPLY_SECRET: rnd(), DB_PASSWORD: rnd(), SITE_ADDRESS: "203-0-113-10.sslip.io" };
   for (const k of Object.keys(filled)) if (filled[k] === "") delete filled[k];
   const r = checkEnv(filled, { storageWritable: () => true });
   assert.deepEqual(r.problems, []);

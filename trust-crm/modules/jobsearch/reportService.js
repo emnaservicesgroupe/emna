@@ -438,7 +438,7 @@ async function health({ user }) {
       mode: st.mode || "smtp",
       outbound: st.outbound || null,
       inbound: st.inbound || null,
-      realSend: st.mode !== "sandbox" && process.env.MAIL_REAL_SEND === "true",
+      realSend: st.mode !== "sandbox" && require("../../utils/flags").realSendEnabled(),
       problems: Array.isArray(st.problems) ? st.problems.map((x) => String(x).slice(0, 120)) : [],
     };
   } catch (err) {

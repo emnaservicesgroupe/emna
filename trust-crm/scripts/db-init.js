@@ -48,7 +48,8 @@ module.exports = { initDatabase };
 
 if (require.main === module) {
   require("dotenv").config();
-  require("../utils/preflight").runPreflight();
+  // problems only: the warnings are printed once, by server.js right after this step
+  require("../utils/preflight").runPreflight({ printWarnings: false });
   const db = require("../db");
   initDatabase(db)
     .then(() => db.end())

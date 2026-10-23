@@ -41,7 +41,7 @@ const POLLING_IMPLEMENTED = false;
 
 async function status() {
   const p = problems();
-  const realSend = process.env.MAIL_REAL_SEND === "true";
+  const realSend = require("../../../utils/flags").realSendEnabled();
   const outbound = p.length ? "not_configured" : realSend ? "connected" : "configured_send_disabled";
   const inbound = process.env.INBOUND_MAIL_SECRET ? "webhook" : "requires_setup";
   const outText = p.length
@@ -60,7 +60,7 @@ async function status() {
 
 async function send({ to, subject, text, html, attachments, headers } = {}) {
   if (problems().length) throw setupError();
-  if (process.env.MAIL_REAL_SEND !== "true") {
+  if (!require("../../../utils/flags").realSendEnabled()) {
     return { providerMessageId: null, accepted: false, reason: "MAIL_REAL_SEND is not true" };
   }
   const nodemailer = require("nodemailer");
