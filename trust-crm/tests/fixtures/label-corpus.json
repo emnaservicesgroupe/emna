@@ -7539,6 +7539,785 @@
    "control": true,
    "natural": true,
    "batch": "r5-own"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nNote: this applies to our Toronto location only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nNB: Toronto location only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nN.B. Only for our Calgary branch.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nP.S. Managers only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "LMIA support is provided.\n\nThis is for senior positions only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We provide work permit sponsorship.\n\nThese benefits are limited to our Ontario plants.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Visa sponsorship available.\n\nConditions: after a 6-month probation.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Visa sponsorship available.\n\nTerms: subject to government approval.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We will sponsor your work permit.\n\nPlease note: sponsorship is reserved for returning workers.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nDisclaimer: sponsorship is not guaranteed.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nCeci s'applique uniquement \u00e0 notre site de Montr\u00e9al.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nCela concerne seulement les postes de cadres.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nVeuillez noter : r\u00e9serv\u00e9 aux employ\u00e9s actuels.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nRemarque : \u00e0 partir de la deuxi\u00e8me saison.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nConditions : apr\u00e8s la p\u00e9riode d'essai.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nSponsorship is currently paused.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer LMIA support.\n\nWorkers repay the LMIA fee from their wages.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship for this role.\n\nNote: for applicants with CLB 7 or higher.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "blank-line"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nApply today with your CV.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "blank-line control",
+   "control": true
+  },
+  {
+   "text": "We offer visa sponsorship and LMIA support.\n\nNote: interviews are held on Mondays.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "blank-line control",
+   "control": true
+  },
+  {
+   "text": "Visa sponsorship available.\n\nThis is a full-time permanent position.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "blank-line control",
+   "control": true
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nEnvoyez votre CV \u00e0 notre \u00e9quipe RH.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "blank-line control",
+   "control": true
+  },
+  {
+   "text": "Positive LMIA in hand is an asset.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Having an approved LMIA is an asset.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Nice to have: positive LMIA",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Atouts : EIMT approuv\u00e9e",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Already possess a valid LMIA? Great \u2013 we will sponsor your move.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "LMIA approved; attached to a named worker.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-review",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "An approved LMIA would be a bonus.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Preferred: candidates with a positive LMIA.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Bonus points if you already hold an approved LMIA.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Une EIMT positive est un atout.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Avoir d\u00e9j\u00e0 une EIMT approuv\u00e9e est un plus.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Approved LMIA (preferred).",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Positive LMIA: an advantage.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "The LMIA is tied to a specific worker and cannot be transferred.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Desirable: valid LMIA.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "candidate-held asset"
+  },
+  {
+   "text": "Bilingualism is an asset. We offer LMIA support.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "asset control",
+   "control": true
+  },
+  {
+   "text": "Forklift licence is a plus. Visa sponsorship available.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "asset control",
+   "control": true
+  },
+  {
+   "text": "The employer covers all government and legal fees for the LMIA and work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "govt fees",
+   "control": true
+  },
+  {
+   "text": "We pay all government fees for your work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "govt fees",
+   "control": true
+  },
+  {
+   "text": "L'employeur prend en charge tous les frais gouvernementaux du permis de travail.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "govt fees",
+   "control": true
+  },
+  {
+   "text": "We support provincial nominee applications for our workers.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "govt veto"
+  },
+  {
+   "text": "Visa support through the government settlement program.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "govt veto"
+  },
+  {
+   "text": "Help with immigration: see the IRCC links below.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "govt veto"
+  },
+  {
+   "text": "The family will apply for an LMIA.",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "affirmative",
+   "control": true
+  },
+  {
+   "text": "Our home provides LMIA support.",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "affirmative",
+   "control": true
+  },
+  {
+   "text": "LMIA support: provided",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "affirmative",
+   "control": true
+  },
+  {
+   "text": "Notre r\u00e9sidence offre le parrainage.",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "affirmative",
+   "control": true
+  },
+  {
+   "text": "Nous offrons un soutien \u00e0 l'immigration : accompagnement pour le permis de travail.",
+   "expect": "stated_in_ad",
+   "batch": "t18-review",
+   "category": "affirmative",
+   "control": true
+  },
+  {
+   "text": "The family will apply for an LMIA next year.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "Our home provides LMIA support for returning workers.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "LMIA support: provided by a partner agency.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "Notre r\u00e9sidence offrait le parrainage auparavant.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "Nous offrons un soutien \u00e0 l'immigration : frais \u00e0 la charge du candidat.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "The family will not apply for an LMIA.",
+   "expect": "unavailable",
+   "batch": "t18-own",
+   "category": "affirmative vetoed"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nOnly for our Toronto office.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\n\nNote: Toronto office only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nGreat team. Toronto office only.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nNote: limited to 2 hires per season.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nThis applies to day-shift roles.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Visa sponsorship available.\n\nN.B. after one year of service.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Visa sponsorship available.\n\nPlease note that sponsorship depends on your profile.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "LMIA support provided.\n\nRemarque : seulement pour les postes saisonniers.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We sponsor work permits.\n\nTerms and conditions apply.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "We sponsor work permits.\n\nDisclaimer: candidates cover the processing fee.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "A positive LMIA is considered an asset.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Positive LMIA is a strong plus.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Un atout : une EIMT positive.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "LMIA approved (asset)",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Applicants holding a positive LMIA are preferred.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "Do you already have an approved LMIA? Apply now.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "The LMIA is non-transferable and issued to a named worker.",
+   "expect": "unknown|unavailable",
+   "batch": "t18-own",
+   "category": "adversarial wave 2"
+  },
+  {
+   "text": "LMIA approved. Experience is an asset.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We offer LMIA support; bilingualism is an asset.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We offer LMIA support, bilingualism is an asset.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nThis role is based in Toronto.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nThese are full-time permanent positions.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We offer visa sponsorship.\n\nRequirements:\n- 2 years of experience (or equivalent)",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "Nous offrons le parrainage.\n\nCeci est un poste permanent \u00e0 temps plein.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "Our family will sponsor the caregiver's work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "The household covers all government fees for the work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "adversarial wave 2",
+   "control": true
+  },
+  {
+   "text": "We are an LMIA-approved employer and will sponsor the successful candidate's work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Our company will apply for an LMIA on your behalf.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We provide full visa sponsorship for this position.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Visa sponsorship is available for this role.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "LMIA has been approved for this position.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We handle the LMIA and work permit process for you.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "The employer pays for the LMIA.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Work permit sponsorship provided.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We sponsor foreign workers through the LMIA program.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Our farm will file the LMIA for the successful applicants.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Immigration support is included in our benefits package.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We cover the cost of your work permit application.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Benefits include visa sponsorship and paid vacation.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "This position comes with an approved LMIA.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "The hotel provides LMIA support to international hires.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Our restaurant offers visa sponsorship.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We will take care of your work permit.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Nous prenons en charge les d\u00e9marches d'immigration.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "L'entreprise parraine les travailleurs \u00e9trangers.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Notre ferme s'occupe de l'EIMT.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "L'employeur fournit le permis de travail.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We assist with visa applications for successful candidates.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "The family will sponsor the caregiver through the Home Child Care Provider Pilot.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We help with immigration paperwork.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Our clinic sponsors work permits for qualified nurses.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "LMIA support: yes",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We obtain the LMIA before your arrival.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "The employer will submit the LMIA application.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Sponsorship is offered for this vacancy.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We are able to sponsor visas.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Positive LMIA obtained for 4 positions.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "Our household will apply for an LMIA for the nanny position.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
+  },
+  {
+   "text": "We facilitate the work permit process.",
+   "expect": "stated_in_ad",
+   "batch": "t18-own",
+   "category": "fresh natural positive",
+   "natural": true,
+   "control": true
   }
  ],
  "overseas": [

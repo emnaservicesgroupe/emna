@@ -48,6 +48,9 @@ const TAG_HEAD = /^(?:tags?|keywords?|seo|mots[- ]cles|etiquettes|hashtags?|sear
 const OTHER_HEAD = /^(?:about|responsibilit\w*|dut(?:y|ies)|description|summary|job\s+summary|your\s+role|tasks?|how\s+to\s+apply|apply|taches|responsabilites)\b(?:[^:\n]{0,30}:\s*|\s*$)/i;
 // A section header sharing a line with other text ("...Vancouver. Perks:", "About you: ... What we offer: ...") starts a new line.
 const INLINE_HEAD = /(\S)[ \t]+(?=(?:perks?|benefits?|what\s+we\s+offer|ce\s+que\s+nous\s+offrons|avantages?|requirements?|qualifications?|exigences?|about\s+you|about\s+the\s+role|responsibilities|how\s+to\s+apply)\s*:)/gi;
+// "We offer visa sponsorship: ..." / "Nous offrons un soutien à l'immigration : ...": a header line that already
+// names the support is a statement, not just a section title, so its text is kept.
+const HEAD_NAMES_SUPPORT = /\b(?:visas?|lmias?|eimts?|immigration|sponsor\w*|parrain\w*|permis|work\s+permits?)\b/;
 const JOIN_CAP = 500;
 const CHUNK = 1500;
 
@@ -79,7 +82,7 @@ function prepare(description) {
     const f0 = foldAligned(line);
     let m;
     if ((m = REQ_HEAD.exec(f0))) { mode = "req"; sec += 1; line = line.slice(m[0].length).trim(); }
-    else if ((m = OFFER_HEAD.exec(f0))) { mode = NEGATED_HEAD.test(m[0]) ? "none" : "offer"; sec += 1; line = line.slice(m[0].length).trim(); }
+    else if ((m = OFFER_HEAD.exec(f0))) { mode = NEGATED_HEAD.test(m[0]) ? "none" : "offer"; sec += 1; if (!HEAD_NAMES_SUPPORT.test(m[0])) line = line.slice(m[0].length).trim(); }
     else if ((m = OTHER_HEAD.exec(f0))) { mode = "none"; sec += 1; line = line.slice(m[0].length).trim(); }
     else if ((m = TAG_HEAD.exec(f0))) { mode = "tag"; sec += 1; line = line.slice(m[0].length).trim(); }
     else if (/:$/.test(line) && line.split(" ").length <= 5 && !/\?$/.test(line)) { mode = "none"; sec += 1; }
@@ -148,7 +151,7 @@ const THIRD_PARTY = /\b(?:(?:provided|offered|handled|managed|arranged|administe
 const UNRELATED_AFF = /\b(?:events?|festivals?|sports?|charity|charities|marathon|concerts?|hockey|soccer|football|league|tournament|awareness|evenements?|caritatif|commandit\w*|sponsored\s+(?:content|post|job|listing|ad|by)|contenu\s+commandite|diversity\s+initiatives?|certifications?|conferences?)\b/;
 // costs passed to the worker (checked in a +-2 sentence window), unless that sentence says the employer pays
 const FEE = /\b(?:fees?|frais|deduct\w*|retenu\w*\s+sur|deduit\w*\s+(?:de|du|sur)|withh[eo]ld\w*|payable|reimburs\w*|rembours\w*|charged|recover\w*|recuper\w*|repay\w*|paid\s+by\s+(?:the\s+)?(?:worker|candidate|employee|applicant|you)|out\s+of\s+(?:your|pocket)|cost\s+to\s+(?:you|the\s+(?:worker|candidate)))\b/;
-const EMPLOYER_SUBJ = "(?:we|we'll|we\\s+will|nous|employer|employeur|l'employeur|company|entreprise|(?:the|our|this|l'|notre|cette|le|la)\\s+(?:\\w+\\s+)?(?:company|employer|university|college|hospital|clinic|agency|organi[sz]ation|firm|institute|school|hotel|restaurant|farm|plant|facility|group|business|lab|laboratory|universite|hopital|clinique|agence|organisme|etablissement|entreprise|employeur|ferme|usine|societe|compagnie|team|hr\\s+team))";
+const EMPLOYER_SUBJ = "(?:we|we'll|we\\s+will|nous|employer|employeur|l'employeur|company|entreprise|(?:the|our|this|l'|notre|cette|le|la)\\s+(?:\\w+\\s+)?(?:company|employer|university|college|hospital|clinic|agency|organi[sz]ation|firm|institute|school|hotel|restaurant|farm|plant|facility|group|business|lab|laboratory|universite|hopital|clinique|agence|organisme|etablissement|entreprise|employeur|ferme|usine|societe|compagnie|team|hr\\s+team|family|famille|household|home|residence|menage|foyer))";
 const EMPLOYER_PAYS = new RegExp(`\\b${EMPLOYER_SUBJ}\\b(?:\\s+(?:will|also|fully|can|shall|gladly|happily|do|does|then|always|entirely|completely|directly))*\\s+(?:cover|covers|covered|pay|pays|paid|absorb\\w*|assume\\w*|assum\\w*|prend\\w*\\s+en\\s+charge|prenons\\s+en\\s+charge|rembours\\w*|reimburs\\w*|handle\\w*|bear\\w*|pick\\w*\\s+up)\\b|\\b(?:at\\s+no\\s+(?:cost|charge)|free\\s+of\\s+charge|no\\s+cost\\s+to\\s+you|employer[- ](?:paid|covered|funded)|company[- ](?:paid|covered|funded)|(?:paid|covered|funded|reimbursed|borne)\\s+(?:in\\s+full\\s+)?by\\s+(?:the\\s+)?(?:employer|company|us|our\\s+company)|pris\\w*\\s+en\\s+charge\\s+par\\s+(?:l'employeur|l'entreprise|nous|la\\s+compagnie)|a\\s+la\\s+charge\\s+de\\s+l'employeur|aux\\s+frais\\s+de\\s+l'(?:employeur|entreprise)|assumera\\s+(?:tous\\s+)?les\\s+frais|we\\s+cover)\\b|\\b(?:covers?|covered|pays?|paid|absorbs?|assumes?|assumera|reimburses?|rembourse\\w*|prend\\w*\\s+en\\s+charge)\\s+(?:for\\s+)?(?:all\\s+|the\\s+|any\\s+|full\\s+|tous\\s+les\\s+|les\\s+|your\\s+|vos\\s+)?(?:[\\w'-]+\\s+){0,3}?(?:fees?|costs?|frais|charges?|expenses?|depenses)\\b`);
 const AMOUNT = /(?:\$\s?\d[\d,.]*\s?k?|\b\d[\d,.]*\s?k?\s?(?:\$|cad\b|usd\b|dollars?\b|\u20ac|eur\b))/g;
 const WAGE_AFTER = /^\s*(?:\/|per\b|an?\b|de\s+l'|par\b|hourly|annually|monthly|weekly)\s*(?:h\b|hr\b|hrs\b|hour|heure|month|mois|year|an\b|annee|yr|week|semaine|annum)?|^\s*(?:hourly|annually|monthly|weekly|per\s+(?:hour|year|month|week))/;
@@ -191,6 +194,8 @@ const CAND_RESP = [
 
 // ---- who holds it: an LMIA/EIMT the CANDIDATE must already hold is not employer support ----
 const HOLD_ADJ = "(?:(?:an?|une?|the|la|le|l'|their|leur|own|propre|valid|valide|approved|approuvee?|positive|positif|existing|current|genuine|confirmed|employer[- ]specific|job[- ]offer|already|deja)\\s*)*";
+// asset / preference wording (never an offer by the employer)
+const ASSET = "\\b(?:assets?|atouts?|(?:a|un|une)\\s+(?:big\\s+|strong\\s+|huge\\s+|real\\s+|definite\\s+|gros\\s+|grand\\s+|vrai\\s+)?plus|(?:a|is\\s+a|would\\s+be\\s+a)\\s+bonus|bonus\\s+points?|advantage\\w*|avantageu\\w*|un\\s+avantage|preferred|preferable|preference|prefere\\w*|desirable|souhaitable|souhaite\\w*|nice\\s+to\\s+have|apprecie\\w*|considered\\s+an?\\s+(?:asset|plus))\\b";
 const CH_SUBJ = "(?<!(?:provide|provides|give|gives|offer|offers|supply|supplies|help|helps|assist|assists|support|supports|sponsor|sponsors)\\s)(?:must|need\\s+to|needs\\s+to|required\\s+to|candidates?|applicants?|workers?|those|persons?|people|individuals?|anyone|you|vous|candidat(?:e)?s?|travailleu(?:r|se)s?|ceux|celles|personnes|doit|doivent|devez|hires?|employees?)";
 const CH_VERB = "(?:have|has|hold|holds|possess|possesses|with|holding|having|bring|bringing|carrying|avec|detenant|ayant|avoir|posseder|possedant|possedent|detenir|detiennent|disposant|munis?\\s+d'(?:une\\s+)?)";
 const CAND_HELD = [
@@ -201,6 +206,16 @@ const CAND_HELD = [
   /\b(?:candidates?|applicants?|workers?|those|people|hires|travailleu\w*|candidat\w*|ceux|celles)\s+(?:who|that|qui)\s+(?:have\s+|has\s+|already\s+|ont\s+)?(?:obtained|got|secured|received|been\s+issued|obtenu|recu|deja\s+obtenu)\b[^.;]{0,30}\b(?:lmias?|eimts?)\b/,
   /\b(?:lmia|eimt)\s+holders?\b|\b(?:detenteur|detentrice|titulaire)s?\s+d'(?:une\s+)?(?:eimt|lmia)\b/,
   /\b(?:candidat(?:e)?s?|travailleu(?:r|se)s?)\s+(?:avec|ayant|detenant|possedant)\s+(?:une\s+)?(?:eimt|lmia)\b/,
+  // gap B: the candidate's own LMIA listed as an asset / nice-to-have ("Positive LMIA in hand is an asset",
+  // "Nice to have: positive LMIA", "Atouts : EIMT approuvée", "Approved LMIA (preferred)")
+  new RegExp(`\\b(?:lmias?|eimts?)\\b[^.;!?,]{0,30}?${ASSET}`),
+  new RegExp(`${ASSET}\\s*:?[^.;!?,]{0,40}?\\b(?:lmias?|eimts?)\\b`),
+  // already held by the applicant ("Already possess a valid LMIA? Great", "Avoir déjà une EIMT approuvée")
+  /\b(?:already|deja)\s+(?:\w+\s+){0,2}?(?:possess|possesses|have|has|hold|holds|own|got|obtained|detenez|detenir|avez|avoir|possedez|posseder|ont|une|un)\b[^.;!?]{0,30}?\b(?:lmias?|eimts?)\b/,
+  /\b(?:having|avoir)\s+(?:an?\s+|une\s+|deja\s+une\s+)?(?:(?:approved|positive|valid|existing|approuvee?|positive|valide)\s+)?(?:lmias?|eimts?)\b/,
+  // an LMIA attached to someone else ("LMIA approved; attached to a named worker", "tied to a specific worker")
+  /\b(?:attached|tied|linked|assigned|bound|specific|rattachee?|liee?)\s+(?:to|a)\s+(?:a|an|one|the|un|une)?\s*(?:named|specific|particular|individual|existing|nominated|designated|precis|precise|specifique|nomme\w*)\s+(?:worker|employee|person|candidate|individual|foreign\s+worker|travailleu\w*|employe\w*|personne|candidat\w*)\b/,
+  /\b(?:named|specific|particular|nominated)\s+(?:worker|employee|person|individual)\b[^.;]{0,30}\b(?:lmias?|eimts?)\b|\b(?:lmias?|eimts?)\b[^.;]{0,30}\b(?:nominative|nominatif|cannot\s+be\s+transferred|non[- ]transferable|not\s+transferable)\b/,
 ];
 const STRICT_WORD = /\b(?:must|only|required|requis\w*|exige\w*|mandatory|obligatoire|doit|doivent|devez|seulement|uniquement|need\s+to|needs\s+to|necessary|necessaire)\b/;
 
@@ -277,10 +292,12 @@ const AFFIRM = [
   /\bparrainage\s+(?:disponible|offert|fourni)\b/,
   /\b(?:lmia|eimt)(?:\s|-)*(?:supported|approved)\b/,
   new RegExp(`\\b${EMPLOYER_SUBJ}\\s+(?:have|has|hold|holds|got|obtained)\\s+(?:an?\\s+|the\\s+)?(?:approved\\s+|positive\\s+)?(?:lmia|eimt)\\b`),
+  // the employer pays the fees OF the support ("We pay all government fees for your work permit")
+  new RegExp(`\\b${EMPLOYER_SUBJ}\\b(?:\\s+(?:will|also|fully|always|directly))*\\s+(?:pay|pays|cover|covers|absorb|absorbs|reimburse|reimburses)\\s+(?:all|the|any|full|every)?\\s*(?:[\\w'-]+\\s+){0,3}?(?:fees?|costs?|expenses?|charges?)\\s+(?:for|of|related\\s+to|associated\\s+with)\\s+(?:the\\s+|your\\s+|any\\s+|an?\\s+)?${SUPPORT_NOUN}\\b`),
   // the employer pays the support costs ("LMIA fees are covered by the employer", "... sont pris en charge par l'employeur")
   new RegExp(`\\b${SUPPORT_NOUN}\\b[^.;]{0,50}\\b(?:(?:are|is|will\\s+be)\\s+(?:fully\\s+|entirely\\s+)?(?:covered|paid)\\s+by\\s+(?:the\\s+)?(?:employer|company|us)|(?:sont|est|seront|sera)\\s+(?:entierement\\s+|integralement\\s+)?pris\\w*\\s+en\\s+charge\\s+par\\s+(?:l'employeur|l'entreprise|nous))\\b`),
 ];
-const AFFIRM_VALUE = /\b(?:visa\s+sponsorship|lmia|eimt|work\s+permit(?:\s+sponsorship)?|immigration\s+support|sponsorship|parrainage)\s*[:=-]?\s*(?:yes|oui|y|true|included|available|offered|provided|\u2713|\u2714)\s*[).!]*$/;
+const AFFIRM_VALUE = /\b(?:visa\s+sponsorship|lmia|eimt|work\s+permit(?:\s+sponsorship)?|immigration|sponsorship|parrainage)(?:\s+(?:support|assistance|help|sponsorship))?\s*[:=-]?\s*(?:yes|oui|y|true|included|available|offered|provided|\u2713|\u2714)\s*[).!]*$/;
 const BARE_ITEM = /\b(?:help|assistance|aide|support|soutien)\s+(?:with|for|pour|avec)\s+(?:the\s+|your\s+|le\s+|votre\s+|la\s+)?(?:work\s+permits?|visas?|immigration|lmia|eimt|permis\s+de\s+travail)\b|\b(?:visa\s+sponsorship|work\s+permit\s+sponsorship|lmia(?:\s+approved)?|eimt|immigration\s+(?:support|assistance|sponsorship)|sponsorship|parrainage(?:\s+de\s+visa)?|soutien\s+a\s+l'immigration)\b/;
 const STRONG_WORD = /\b(?:sponsor\w*|parrain\w*|visas?|lmias?|eimts?|immigration|parrainage|work\s+permits?|permis\s+de\s+travail)\b/;
 const RELATED = /\b(?:visas?|permits?|immigration|lmias?|eimts?|work\s+authori[sz]ation|travail)\b/;
@@ -392,6 +409,9 @@ const ATTR_OK = /\b(?:successful|selected|chosen|retained|retenu\w*|selectionne\
 const SERVICE_OBJECT = /\b(?:help|helps|helping|assist|assists|assisting|support|supports|supporting|serve|serves|serving|accompagn\w*|aid\w*|conseill\w*|represent\w*)\s+(?:canadian\s+|local\s+|our\s+|nos\s+|les\s+|des\s+|small\s+)?(?:employers?|businesses|clients?|companies|entreprises|employeurs|families|familles|organi[sz]ations|farms|newcomers|immigrants|nouveaux\s+arrivants|households|corporations?)\b|\b(?:corporate|business|employer)\s+clients\b|\bfor\s+(?:our\s+)?(?:corporate\s+)?clients\b/;
 const SERVICE_FIRM = /\b(?:we\s+are|we're|notre\s+cabinet|our\s+(?:firm|practice|consultancy|agency))\b[^.;]{0,50}\b(?:immigration|consult\w*|law\s+firm|cabinet|rcic|settlement|staffing|recruitment\s+agency)\b|\b(?:immigration|settlement)\s+(?:consultancy|consultants?|law\s+firm|firm|agency|services?|organi[sz]ation|cabinet)\b/;
 const GOVT = /\b(?:province|provincial|government|gouvernement|ircc|pnp|nominee|endorsement|ymca|settlement|settlement\.org|links?|liens?)\b/;
+// "government (and legal) fees/costs" paid by the employer is a cost statement, not a government programme
+const GOVT_FEES = /\b(?:government(?:al)?|gouvernementa\w*)\s+(?:(?:and|&|et)\s+(?:legal|processing|filing|application|immigration|juridiques?|legaux)\s+)?(?:fees?|costs?|charges?|expenses?|frais|couts?)\b|\b(?:legal|processing|filing|application|immigration)\s+(?:and|&)\s+government(?:al)?\s+(?:fees?|costs?|charges?|expenses?)\b|\bfrais\s+(?:gouvernementaux|du\s+gouvernement)\b/g;
+const govtVeto = (f) => GOVT.test(EMPLOYER_PAYS.test(f) && !CAND_RESP.some((re) => re.test(f)) ? f.replace(GOVT_FEES, " ") : f);
 const PREFER_LOCAL = /\b(?:canadian|local|citizens?|permanent\s+residents?|pr|canadiens?|locaux|residents?)\s+(?:applicants?|candidates?|workers?|candidats?|travailleurs?)?\s*(?:are\s+|will\s+be\s+|sont\s+)?(?:preferred|prioriti[sz]ed|given\s+(?:priority|preference)|privilegi\w*|prefere\w*|en\s+priorite)\b|\bpriority\s+(?:to|for|given\s+to)\s+(?:canadians?|citizens?|local|permanent)/;
 const MARKETING = /\b(?:emplois?|postes|offres|jobs?)\s+(?:avec\s+|with\s+)?(?:eimt|lmia|parrainage)\b|\bmis\s+a\s+jour\b|\b(?:updated|listed|posted)\s+daily\b|\b(?:lmia|eimt|visa\s+sponsorship|sponsorship|work\s+permit)\s+(?:approved\s+)?jobs\b|\bjobs?\s+with\s+(?:visa\s+)?sponsorship\b|\bdreams?\b|\bstarts?\s+here\b|\btop\s+\d+\b/;
 const BACKREF = /\b(?:above|ci-dessus|mentioned\s+(?:earlier|before|previously)|stated\s+(?:earlier|above)|aforementioned|precedemment|plus\s+haut|earlier\s+in\s+this)\b/;
@@ -414,6 +434,11 @@ function unitQualifier(x) {
   if (OTHER_BENEFIT.test(x) && !SUPPORT_WORD.test(x) && !CLAIM_REF.test(x) && !workerSide) return false;
   return NB_NEGREF.test(x) || NB_LIMIT.test(x) || NB_TIME.test(x) || TIME_GATE.test(x) || NB_COND.test(x) || nbCost(x) || BARE_NEG_SENTENCE.test(x);
 }
+const QUAL_OPENER = /^\W*(?:note|notes|nb|n\.?\s?b\.?|p\.?\s?s\.?|this|these|that|those|conditions?|terms|please\s+note|disclaimer|important|caveat|exceptions?|ceci|cela|ces|veuillez\s+noter|remarques?|a\s+noter|attention|avertissement)\b/;
+function broadQualifier(x) {
+  return unitQualifier(x) || ONLY.test(x) || SCOPE.test(x) || CONDITION.test(x) || HEDGE.test(x) || TIME_PAST.test(x) || NEG_CUE.test(x)
+    || (!THIS_JOB.test(x) && (subsetScoped(x) || groupScoped(x))) || (ATTR_COND.test(x) && !ATTR_OK.test(x)) || CAND_RESP.some((re) => re.test(x)) || THIRD_PARTY.test(x);
+}
 function vetoReasons({ f, c, i, list, unitF, near, next, windowFee, qualified, unitIdx, unitFlag }) {
   const checks = [
     ["unit qualifier", () => unitIdx.some((j) => unitFlag(j))],
@@ -427,7 +452,7 @@ function vetoReasons({ f, c, i, list, unitF, near, next, windowFee, qualified, u
     ["groupScoped(f)", () => !THIS_JOB.test(f) && groupScoped(f)],
     ["(ATTR_COND.test(f) && !ATTR_OK.test(f))", () => (ATTR_COND.test(f) && !ATTR_OK.test(f))],
     ["SERVICE_OBJECT.test(f)", () => SERVICE_OBJECT.test(f)],
-    ["GOVT.test(f)", () => GOVT.test(f)],
+    ["GOVT.test(f)", () => govtVeto(f)],
     ["nbCost(f)", () => nbCost(f)],
     ["HEDGE.test(f)", () => HEDGE.test(f)],
     ["CONDITION.test(f)", () => CONDITION.test(f)],
@@ -449,6 +474,8 @@ function vetoReasons({ f, c, i, list, unitF, near, next, windowFee, qualified, u
   if (!debugHook) { const hit = checks.find(([, t]) => t()); return hit ? [hit[0]] : []; }
   return checks.filter(([, t]) => t()).map(([n]) => n);
 }
+// Module-private diagnostics hook (never exported; always null in production). Development probes can compile
+// the module with a setter appended; nothing in the app or the test suite can switch it on.
 let debugHook = null;
 
 /** Ad-text classification: allowlist for stated_in_ad, restrictions/denials for unavailable. */
@@ -523,9 +550,25 @@ function detectFromAdUncached(description) {
       for (let j = i + 1, n = 0; j < list.length && n < 30 && (list[j].sec === c.sec || list[j].par === c.par); j += 1, n += 1) unitIdx.add(j);
       for (let j = i - 1, n = 0; j >= 0 && n < 30 && list[j].sec === c.sec; j -= 1, n += 1) unitIdx.add(j);
     }
+    // gap A: a qualifier may follow after ONE blank line ("We offer visa sponsorship.\n\nNote: Toronto only.").
+    // The first two sentences of the next paragraph join the unit; when that paragraph opens with a short
+    // qualifier word (Note, NB, P.S., This, Conditions, Ceci, Veuillez noter...) the broader sentence-level
+    // vetoes (scope, only, condition, hedge, subset/group) apply to it as well.
+    const nextPar = [];
+    let nextParId = null;
+    for (let j = i + 1, steps = 0; j < list.length && nextPar.length < 2 && steps < 60; j += 1, steps += 1) {
+      if (list[j].par === c.par) continue;
+      if (nextParId === null) nextParId = list[j].par; // the NEXT paragraph, however many blank lines precede it
+      if (list[j].par !== nextParId || list[j].sec !== c.sec) break; // a new section header ends the unit
+      nextPar.push(j);
+    }
+    for (const j of nextPar) unitIdx.add(j);
+    const opener = nextPar.length > 0 && QUAL_OPENER.test(B(nextPar[0]));
+    const blankLineQualifier = opener && nextPar.some((j) => broadQualifier(B(j)));
     const unitF = [...unitIdx].map((j) => B(j));
     const qualified = subsetScoped(f) || groupScoped(f) || /\b(?:for|to|aux?|pour)\s+(?:our\s+|nos\s+)?(?:[\w'-]+\s+){0,2}?(?:staff|employees|roles|positions|postes|cooks|drivers|nurses|apprentices|division|plant|branch)\b/.test(f) || /\bour\s+(?:[\w'-]+\s+){0,2}(?:plant|branch|office|division|location|site|store|farm|department|usine|succursale)\b/.test(f);
     const why = vetoReasons({ f, c, i, list, unitF, near, next, windowFee, qualified, unitIdx: [...unitIdx], unitFlag });
+    if (blankLineQualifier) why.unshift("qualifier after a blank line");
     if (debugHook) debugHook(c.q, why);
     const veto = why.length > 0;
     if (veto) continue;
@@ -674,4 +717,4 @@ function detectOverseas(description) {
 
 /** Canonical sentences (for tests/diagnostics). */
 const normalizeAd = (description) => prepare(description).list;
-module.exports = { detectEmployerSupport, detectOverseas, normalizeAd, PRE_CAP, POST_CAP, _setDebugHook: (fn) => { debugHook = fn; } };
+module.exports = { detectEmployerSupport, detectOverseas, normalizeAd, PRE_CAP, POST_CAP };

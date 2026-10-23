@@ -976,3 +976,57 @@ test("round 5: natural positives (all natural rows + positive ads) stay >= 90% d
   assert.ok(hit / items.length >= 0.9, `natural positive hit rate ${hit}/${items.length}`);
   assert.ok(corpus.ads.length >= 90 && corpus.support.length >= 1500 && corpus.overseas.length >= 300);
 });
+
+// ---------------------------------------------------------------- Task 18 (label gaps A/B, GOVT, affirmatives)
+
+test("Task 18 gap A: a qualifier after a blank line vetoes the claim (one paragraph break; same section); unrelated next paragraphs do not", () => {
+  for (const t of [
+    "We offer visa sponsorship.\n\nNote: this applies to our Toronto location only.",
+    "We offer visa sponsorship.\n\n\nNote: Toronto office only.",
+    "We offer visa sponsorship.\n\nP.S. Managers only.",
+    "Visa sponsorship available.\n\nConditions: after a 6-month probation.",
+    "Nous offrons le parrainage.\n\nCeci s'applique uniquement à notre site de Montréal.",
+    "Nous offrons le parrainage.\n\nVeuillez noter : réservé aux employés actuels.",
+  ]) assert.notEqual(detectEmployerSupport(t).label, "stated_in_ad", t);
+  for (const t of [
+    "We offer visa sponsorship.\n\nApply today with your CV.",
+    "Visa sponsorship available.\n\nThis is a full-time permanent position.",
+    "We offer visa sponsorship.\n\nRequirements:\n- 2 years of experience (or equivalent)",
+  ]) assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+});
+
+test("Task 18 gap B: an LMIA held by the candidate and listed as an asset is never stated_in_ad", () => {
+  for (const t of ["Positive LMIA in hand is an asset.", "Having an approved LMIA is an asset.", "Nice to have: positive LMIA", "Atouts : EIMT approuvée", "Already possess a valid LMIA? Great – we will sponsor your move.", "LMIA approved; attached to a named worker.", "Approved LMIA (preferred).", "Positive LMIA is a strong plus."]) {
+    const r = detectEmployerSupport(t);
+    assert.ok(["unknown", "unavailable"].includes(r.label), `${t} -> ${r.label}`);
+  }
+  for (const t of ["Bilingualism is an asset. We offer LMIA support.", "We offer LMIA support, bilingualism is an asset.", "LMIA approved. Experience is an asset."]) assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+});
+
+test("Task 18: GOVT veto narrowed (employer pays government fees); new affirmatives recognised and still subject to vetoes; no exported debug hook", () => {
+  for (const t of ["The employer covers all government and legal fees for the LMIA and work permit.", "We pay all government fees for your work permit.", "The family will apply for an LMIA.", "Our home provides LMIA support.", "LMIA support: provided", "Notre résidence offre le parrainage.", "Nous offrons un soutien à l'immigration : accompagnement pour le permis de travail."]) {
+    const r = detectEmployerSupport(t);
+    assert.equal(r.label, "stated_in_ad", t);
+    assert.ok(r.evidence, t);
+  }
+  for (const t of ["We support provincial nominee applications for our workers.", "The family will apply for an LMIA next year.", "LMIA support: provided by a partner agency.", "Nous offrons un soutien à l'immigration : frais à la charge du candidat."]) assert.notEqual(detectEmployerSupport(t).label, "stated_in_ad", t);
+  assert.equal(detectEmployerSupport("The family will not apply for an LMIA.").label, "unavailable");
+  const mod = require("../modules/jobsearch/matching/employerSupport");
+  assert.equal(mod._setDebugHook, undefined, "the diagnostics hook is module-private");
+  assert.deepEqual(Object.keys(mod).sort(), ["POST_CAP", "PRE_CAP", "detectEmployerSupport", "detectOverseas", "normalizeAd"]);
+});
+
+test("Task 18: corpus grew (>= 40 new own adversarial rows by category + the reviewer's rows); natural positives incl. a fresh out-of-sample set all detected", () => {
+  const own = corpus.support.filter((r) => r.batch === "t18-own" && !r.natural);
+  const review = corpus.support.filter((r) => r.batch === "t18-review");
+  assert.ok(own.length >= 40, `own adversarial rows: ${own.length}`);
+  assert.ok(new Set(own.map((r) => r.category)).size >= 6, "several categories");
+  assert.ok(review.length >= 13);
+  assert.ok(corpus.support.length >= 1650);
+  const ads = corpus.ads.filter((a) => a.support === "stated_in_ad").map((a) => a.text);
+  const natural = corpus.support.filter((r) => r.natural || (r.control && /^(?:r[45]-review|t18-own|t18-review)$/.test(r.batch || ""))).map((r) => r.text);
+  const items = [...new Set([...ads, ...natural])];
+  const missed = items.filter((t) => detectEmployerSupport(t).label !== "stated_in_ad");
+  assert.ok(items.length >= 250, `natural positives: ${items.length}`);
+  assert.deepEqual(missed, [], "measured before this change: 203/203 in-sample; the fresh set was 34/36 before");
+});
