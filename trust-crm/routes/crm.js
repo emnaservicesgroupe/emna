@@ -3,11 +3,15 @@
 //   GET   /leads/:id                                               leads:read   (Agent: only own, else 404)
 //   PATCH /leads/:id      {status?, assigned_to?}                  leads:write; assigned_to needs users:write
 //   POST  /leads/:id/notes {text}                                  leads:write
+//   POST  /leads/:id/convert {passport_number, full_name?, nationality?, createPortalLogin}  leads:write + candidates:write (201, or 200 when already converted)
+//   PATCH /candidates/:id/stage {stage}                            candidates:write (+ CRM staff), scope via assertCandidateAccess
+//   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
 const { checkPermission } = require("../middleware/role");
 const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/errorHandler");
 const leads = require("../modules/crm/leadsAdmin");
+const convert = require("../modules/crm/convert");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -33,6 +37,31 @@ router.post(
   "/leads/:id/notes",
   checkPermission("leads:read"),
   asyncHandler(async (req, res) => res.status(201).json(await leads.addNote(req.user, req.params.id, body(req).text)))
+);
+
+// Write permissions are enforced inside the service after the scope check (foreign Agent leads: 404, not 403).
+router.post(
+  "/leads/:id/convert",
+  checkPermission("leads:read"),
+  asyncHandler(async (req, res) => {
+    const out = await convert.convertLead(req.user, req.params.id, body(req));
+    return res.status(out.created ? 201 : 200).json(out);
+  })
+);
+
+// Candidate routes: leads:read marks CRM staff (Accountant/HR hold candidates:read but are not CRM users).
+router.patch(
+  "/candidates/:id/stage",
+  checkPermission("leads:read"),
+  checkPermission("candidates:write"),
+  asyncHandler(async (req, res) => res.json(await convert.setStage(req.user, req.params.id, body(req).stage)))
+);
+
+router.get(
+  "/candidates/:id/timeline",
+  checkPermission("leads:read"),
+  checkPermission("candidates:read"),
+  asyncHandler(async (req, res) => res.json(await convert.getCandidateTimeline(req.user, req.params.id)))
 );
 
 router.use(jobsearchErrorHandler);

@@ -216,4 +216,4 @@ async function addNote(user, rawId, text) {
   });
 }
 
-module.exports = { listLeads, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX };
+module.exports = { listLeads, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX, parseId, loadScoped, inTransaction, hasPerm };
