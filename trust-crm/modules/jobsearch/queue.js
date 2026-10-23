@@ -8,7 +8,7 @@
 const db = () => require("../../db");
 
 const STALE_LOCK_MS = 15 * 60 * 1000;
-// A handler may return {[RESCHEDULE]: Date}: the item goes back to 'pending' at that time WITHOUT
+// A handler may return {[RESCHEDULE]: Date, payload?}: the item (payload replaced when given) goes back to 'pending' at that time WITHOUT
 // consuming an attempt (e.g. a per-source rate limit: the work was not done, nothing failed).
 const RESCHEDULE = Symbol("jobsearch.queue.reschedule");
 
@@ -60,10 +60,11 @@ async function fail(id, err) {
 }
 
 /** Back to 'pending' at `runAt`, giving back the attempt the claim counted. */
-async function reschedule(id, runAt) {
+async function reschedule(id, runAt, payload) {
   await db().query(
-    "UPDATE js_queue SET status = 'pending', locked_at = NULL, run_at = $2, attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'running'",
-    [id, runAt]
+    `UPDATE js_queue SET status = 'pending', locked_at = NULL, run_at = $2, attempts = GREATEST(attempts - 1, 0),
+            payload = COALESCE($3::jsonb, payload) WHERE id = $1 AND status = 'running'`,
+    [id, runAt, payload && typeof payload === "object" ? JSON.stringify(payload) : null]
   );
 }
 
@@ -109,7 +110,7 @@ async function work(handlers, { kinds, batch, n, loop = false, now, max } = {}) 
       try {
         const out = await handlers[job.kind](job);
         const at = out && typeof out === "object" ? validDate(out[RESCHEDULE]) : null;
-        if (at) await reschedule(job.id, at);
+        if (at) await reschedule(job.id, at, out.payload);
         else await complete(job.id);
       } catch (err) {
         await fail(job.id, err);

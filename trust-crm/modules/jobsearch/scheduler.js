@@ -163,6 +163,7 @@ function emptySummary(at) {
     at: at.toISOString(),
     searchesQueued: 0,
     searchesRescheduled: 0,
+    searchesAbandoned: 0,
     queueProcessed: 0,
     matched: 0,
     matchSkipped: 0,
@@ -298,6 +299,36 @@ async function eligibleCandidates(ctx) {
 }
 
 const isRateLimited = (r) => r && (r.status === "rate_limited" || ((r.runs || []).length > 0 && r.runs.some((x) => x.status === "rate_limited")));
+const MAX_RESCHEDULES = 24;
+const MAX_ITEM_AGE_MS = 6 * HOUR_MS;
+const MAX_SOURCE_BACKOFF_MS = 6 * HOUR_MS;
+const backoffKey = (sourceKey) => `source_backoff:${sourceKey}`;
+
+/** Upstream Retry-After for a source (js_module_state 'source_backoff:<key>' = {until}); null when none is active. */
+async function sourceBackoffUntil(sourceKey, now) {
+  const v = await getState(backoffKey(sourceKey));
+  const until = v && v.until ? new Date(v.until) : null;
+  return until && until.getTime() > now.getTime() ? until : null;
+}
+
+/** "Source asked to wait 3600s (Retry-After)" -> ms (the runner records Retry-After only in its message). */
+function retryAfterMsOf(r) {
+  for (const x of (r && r.runs) || []) {
+    const m = x.status === "rate_limited" && /wait (\d+)s/.exec(String(x.error || ""));
+    if (m) return Number(m[1]) * 1000;
+  }
+  return null;
+}
+
+/** A scheduled search that stayed rate-limited too long: closed with a 'rate_limited' run note, not retried. */
+async function giveUpSearch(ctx, job, p, reschedules) {
+  const src = (await db().query("SELECT id FROM js_sources WHERE key = $1", [p.sourceKey])).rows[0];
+  const message = `Scheduled search abandoned after ${reschedules} reschedule(s): source still rate-limited`;
+  if (src) await db().query("INSERT INTO js_runs (source_id, started_at, finished_at, errors) VALUES ($1,$2,$2,$3::jsonb)", [src.id, ctx.now, JSON.stringify([{ status: "rate_limited", message, attempts: 0 }])]);
+  await audit("scheduler.search_abandoned", p.candidateId, null, { queueId: Number(job.id), sourceKey: p.sourceKey, reschedules, firstQueuedAt: p.firstQueuedAt });
+  ctx.summary.searchesAbandoned += 1;
+  return { status: "rate_limited", abandoned: true, runs: [] };
+}
 
 function handlersFor(ctx) {
   const d = ctx.deps;
@@ -305,15 +336,33 @@ function handlersFor(ctx) {
   const submitDeps = { recheck: d.recheck, now: ctx.now, mailSend: d.mailSend };
   return {
     search: async (job) => {
+      const p = job.payload || {};
+      const scheduled = p.scheduled === true;
+      // Bounded rescheduling: at most MAX_RESCHEDULES, and never for an item older than MAX_ITEM_AGE_MS.
+      const reschedules = Number.isSafeInteger(p.reschedules) ? p.reschedules : 0;
+      const first = p.firstQueuedAt && !Number.isNaN(new Date(p.firstQueuedAt).getTime()) ? p.firstQueuedAt : ctx.now.toISOString();
+      const exhausted = (n) => n >= MAX_RESCHEDULES || ctx.now.getTime() - new Date(first).getTime() >= MAX_ITEM_AGE_MS;
+      const again = (at) => {
+        ctx.summary.searchesRescheduled += 1;
+        return { [queue.RESCHEDULE]: at, payload: { ...p, reschedules: reschedules + 1, firstQueuedAt: first } };
+      };
+      if (scheduled) {
+        const until = await sourceBackoffUntil(p.sourceKey, ctx.now); // honour the upstream Retry-After: no call
+        if (until) return exhausted(reschedules) ? giveUpSearch(ctx, job, p, reschedules) : again(until);
+      }
       const r = await (d.handleSearchJob || searchRunner.handleSearchJob)(job, searchDeps);
       for (const run of (r && r.runs) || []) {
-        if (run.status === "failed") ctx.summary.errors.push({ step: "search", sourceKey: run.sourceKey, candidateId: (job.payload || {}).candidateId || null, message: run.error || "search failed" });
+        if (run.status === "failed") ctx.summary.errors.push({ step: "search", sourceKey: run.sourceKey, candidateId: p.candidateId || null, message: run.error || "search failed" });
       }
-      if ((job.payload || {}).scheduled === true && isRateLimited(r)) {
-        // Not done (per-source limit / Retry-After): back to pending for the next window, attempt not consumed.
-        const waited = (r.runs || []).some((x) => x.status === "rate_limited" && x.attempts > 0);
-        ctx.summary.searchesRescheduled += 1;
-        return { [queue.RESCHEDULE]: new Date(ctx.now.getTime() + (waited ? 5 * 60000 : 60000)) };
+      if (scheduled && isRateLimited(r)) {
+        const waitMs = retryAfterMsOf(r);
+        let at = new Date(ctx.now.getTime() + 60000); // per-source rate limit: next minute window
+        if (waitMs) {
+          at = new Date(ctx.now.getTime() + Math.min(Math.max(waitMs, 60000), MAX_SOURCE_BACKOFF_MS));
+          await setState(backoffKey(p.sourceKey), { until: at.toISOString(), setAt: ctx.now.toISOString() });
+        }
+        // Not done and nothing failed: back to pending for the next window (attempt not consumed), within bounds.
+        return exhausted(reschedules) ? giveUpSearch(ctx, job, p, reschedules) : again(at);
       }
       return r;
     },
@@ -347,12 +396,19 @@ async function stepDueSearches(ctx) {
         continue;
       }
       if (!due) continue;
+      if (await sourceBackoffUntil(src.key, ctx.now)) continue; // upstream Retry-After still running
       if (!candidates) candidates = await eligibleCandidates(ctx);
       for (const candidateId of candidates) {
         const key = `sched-search:${src.key}:${candidateId}:${hourBucket}`;
         const exists = await db().query("SELECT 1 FROM js_queue WHERE idempotency_key = $1", [key]);
         if (exists.rowCount) continue;
-        await queue.enqueue({ kind: "search", payload: { sourceKey: src.key, candidateId, scheduled: true, requestedBy: null }, runAt: ctx.now, idempotencyKey: key });
+        // One live item per (source, candidate): a pending/running (e.g. rescheduled) one is enough.
+        const live = await db().query(
+          "SELECT 1 FROM js_queue WHERE kind = 'search' AND status IN ('pending','running') AND payload->>'sourceKey' = $1 AND payload->>'candidateId' = $2 LIMIT 1",
+          [src.key, String(candidateId)]
+        );
+        if (live.rowCount) continue;
+        await queue.enqueue({ kind: "search", payload: { sourceKey: src.key, candidateId, scheduled: true, requestedBy: null, reschedules: 0, firstQueuedAt: ctx.now.toISOString() }, runAt: ctx.now, idempotencyKey: key });
         ctx.summary.searchesQueued += 1;
       }
     } catch (err) {

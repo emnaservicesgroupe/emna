@@ -655,6 +655,62 @@ test("rate-limited scheduled search (I2) is rescheduled to the next window witho
   assert.equal(fixture._state.calls, 2, "each candidate searched once");
 });
 
+test("rate limits (I2 round 2): a source rate-limited for 30 hourly ticks -> <= 1 live item per pair, adapter called at most once per Retry-After window, items abandoned when too old; after the back-off the next tick searches normally", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)], failWith: "429:7200000" }); // Retry-After 2 h
+  const c = await candidate(w, { mode: "search_only" });
+  await candidate(w, { mode: "search_only" }); // a second pair on the same source shares the source back-off
+  const t0 = T0();
+  const live = () => count("SELECT count(*) AS n FROM js_queue WHERE kind='search' AND status IN ('pending','running') AND payload->>'candidateId'=$1", [String(c.id)]);
+  const callTicks = [];
+  let abandoned = 0;
+  for (let i = 0; i < 30; i += 1) {
+    const before = fixture._state.calls;
+    const s = await tick(new Date(t0.getTime() + i * HOUR));
+    abandoned += s.searchesAbandoned;
+    if (fixture._state.calls > before) {
+      assert.equal(fixture._state.calls - before, 1, `tick ${i}: one upstream call at most`);
+      callTicks.push(i);
+    }
+    assert.ok((await live()) <= 1, `tick ${i}: at most one live item for the pair`);
+  }
+  assert.ok(callTicks.length >= 2);
+  for (let k = 1; k < callTicks.length; k += 1) assert.ok(callTicks[k] - callTicks[k - 1] >= 2, `calls ${callTicks} respect the 2 h Retry-After`);
+  assert.ok(abandoned >= 1, "old items are abandoned, not rescheduled forever");
+  const note = (await q("SELECT r.errors FROM js_runs r JOIN js_sources s ON s.id=r.source_id WHERE s.key='test_fixture' AND r.errors->0->>'message' LIKE 'Scheduled search abandoned%' ORDER BY r.id DESC LIMIT 1")).rows[0];
+  assert.equal(require("../modules/jobsearch/searchRunner").runStatus(note).status, "rate_limited");
+  assert.ok(await count("SELECT count(*) AS n FROM js_queue WHERE kind='search'") <= 10, "items do not accumulate");
+
+  fixture._set({ failWith: null });
+  const before = fixture._state.calls;
+  const s = await tick(new Date(t0.getTime() + 40 * HOUR));
+  assert.deepEqual(s.errors, []);
+  assert.equal(fixture._state.calls - before, 2, "searched normally (once per candidate) once the back-off passed");
+  const last = (await q("SELECT r.* FROM js_runs r JOIN js_sources s ON s.id=r.source_id WHERE s.key='test_fixture' ORDER BY r.id DESC LIMIT 1")).rows[0];
+  assert.equal(require("../modules/jobsearch/searchRunner").runStatus(last).status, "ok");
+});
+
+test("rate limits (I2 round 2): after 24 reschedules the item completes as rate_limited instead of being rescheduled", async () => {
+  const w = await world();
+  await candidate(w, { mode: "search_only" });
+  let calls = 0;
+  const handleSearchJob = async () => {
+    calls += 1;
+    return { status: "rate_limited", found: 0, created: 0, runs: [{ sourceKey: "test_fixture", status: "rate_limited", attempts: 0, error: "Per-source rate limit of 1/min reached" }] };
+  };
+  const t0 = new Date(Math.ceil(T0().getTime() / HOUR) * HOUR); // start of an hour: all ticks share one hour bucket
+  for (let i = 0; i < 30; i += 1) await tick(new Date(t0.getTime() + i * 60000), { handleSearchJob });
+  assert.equal(calls, 25, "first run + 24 reschedules");
+  const items = (await q("SELECT * FROM js_queue WHERE kind='search'")).rows;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, "done");
+  assert.equal(items[0].payload.reschedules, 24);
+  const a = (await q("SELECT detail FROM js_audit_events WHERE action='scheduler.search_abandoned'")).rows;
+  assert.equal(a.length, 1);
+  assert.equal(a[0].detail.reschedules, 24);
+});
+
 test("stranded approvals (I3a): a job whose only source is paused is NOT auto-approved (stays ready_for_review, caps untouched); after resume it is sent exactly once", async () => {
   const w = await world();
   const emp = await employer(w, { confirmed: true });
