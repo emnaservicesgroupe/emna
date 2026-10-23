@@ -24,7 +24,7 @@
 - Sensitive document types never auto-shared: `passport, national_id, police_certificate, medical`.
 - Mail: sandbox adapter by default; real sending requires `MAIL_REAL_SEND=true`.
 - Disclaimer text (ar/en/fr) shown in the candidate portal; English exact: "This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa."
-- Brand: VITA, colors navy `#0B2A5B`, light blue `#42A5F5`, gold `#B8923B`, white. Logo file supplied by the owner is placed at `trust-crm/public/vita/logo.png` (owner to provide).
+- Brand: VITA, colors navy `#0B2A5B`, light blue `#42A5F5`, gold `#B8923B`, white. Logo file supplied by the owner is placed at `trust-crm/public/vita/logo.webp` (as shipped; the owner may replace it).
 - Never commit secrets; `.env.example` lists every new variable.
 - First SuperAdmin `alouimohamed19840@gmail.com` is created by the owner through `/auth/bootstrap-super-admin`; no password is seeded.
 

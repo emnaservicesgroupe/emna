@@ -70,9 +70,9 @@ the meaning, the default, whether the value is a secret, and whether production 
 |---|---|---|---|---|
 | `MAIL_PROVIDER` | `sandbox` (records mail in the database, sends nothing) or `imap_smtp` | `sandbox` | no | `imap_smtp` for real mail |
 | `MAIL_SANDBOX_ALLOWLIST` | Sandbox only: recipients it accepts (comma list, `*` wildcards) | `*@test.invalid` | no | no |
-| `MAIL_REAL_SEND` | Must be exactly `true` for `imap_smtp` to send. Health shows outbound `connected` only when the SMTP settings are valid **and** this is `true` (it does not test the connection). | `false` | no | `true` only when you are ready |
-| `MAIL_FROM` | From address | SMTP user | no | yes for real mail |
-| `MAIL_REPLY_TO` | Reply-To mailbox; plus-addressed with a reply token | `MAIL_FROM` | no | recommended |
+| `MAIL_REAL_SEND` | Must be exactly `true` for `imap_smtp` to send. Health shows outbound `connected` only when the SMTP settings **and** `MAIL_FROM` are valid **and** this is `true` (it does not test the connection). | `false` | no | `true` only when you are ready |
+| `MAIL_FROM` | From address, and the domain of every Reply-To and Message-ID we generate (replies are matched through them). Must be a **plain address** (`jobs@your-domain.example`): no display name, no list, no line breaks. **Required for real mail** (Task 19): without a valid value outbound is `not_configured` (Health names `MAIL_FROM`), `imap_smtp` refuses to send, and outside `NODE_ENV=test` every send stops before the provider call with a staff task (`internal_error`, "MAIL_FROM must be set…"); follow-up replies answer 503. There is no fallback. | unset (refused) | no | **yes** (also with the sandbox outside tests) |
+| `MAIL_REPLY_TO` | Reply-To mailbox; plus-addressed with a reply token. Plain address only (same rules as `MAIL_FROM`). | `MAIL_FROM` | no | recommended |
 | `MAIL_SMTP_HOST`, `MAIL_SMTP_PORT`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` | SMTP account (port 465 = TLS, otherwise STARTTLS) | unset, `587` | `MAIL_SMTP_PASS` **yes** | yes for real mail |
 | `MAIL_IMAP_HOST`, `MAIL_IMAP_USER`, `MAIL_IMAP_PASS` | **Not used.** IMAP polling is not implemented; replies arrive through the webhook (10.2). Since Task 18 sending no longer needs them. | unset | `MAIL_IMAP_PASS` yes | no |
 | `JOBSEARCH_REPLY_SECRET` | HMAC key for the `[VITA-…]` reply token | `JWT_SECRET` | **yes** | recommended (separate from `JWT_SECRET`) |
@@ -168,7 +168,9 @@ Properties:
 - **One transaction per file.** `scripts/migrate.js` runs each file inside `BEGIN … COMMIT` with an
   advisory lock, so a failing file is rolled back completely and the files after it are not applied.
 
-This was checked with `node scripts/verify-migrations.js` (see CHECKLIST "Checks run"). That script
+This was checked with `TEST_DATABASE_URL=postgres://… node scripts/verify-migrations.js` (see CHECKLIST
+"Checks run"). The database URL must be given explicitly (`TEST_DATABASE_URL`, or `DATABASE_URL`); without
+one the script prints what to set and exits with code 2 — it never falls back to `DB_*` or a `.env` file. That script
 builds throwaway schemas, loads `sql/schema.sql` plus sample rows in every original table, applies all
 migrations and compares every original row and column before and after. It never touches your tables.
 
@@ -258,14 +260,52 @@ POST /auth/register
 The password rules of section 5 apply. Role `Candidate` is refused here (400): candidate logins are created
 only with `POST /jobsearch/admin/candidate-accounts` (below), which links them to a CRM candidate.
 
-Who can do what in the job-search module:
+Who can do what in the job-search module. The table below is checked against `middleware/role.js`
+(`PERMISSIONS`) by `tests/role.test.js` ("Task 19 SETUP §6 permission matrix…"), so it cannot drift from the
+code: ✓ = the role holds the permission.
 
-| Role | Sees | Can approve and queue sends | Admin settings (automatic mode, caps, scopes, pauses, scheduler) |
-|---|---|---|---|
-| SuperAdmin, Admin | all candidates | yes | yes |
-| Manager | candidates assigned to them | yes | no |
-| Agent, Receptionist | candidates assigned to them | no (prepare only) | no |
-| Accountant, HR | nothing in this module | no | no |
+<!-- permission-matrix:start -->
+| Role | jobsearch:read | jobsearch:write | jobsearch:approve | jobsearch:admin | users:write | Sees in the module |
+|---|---|---|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ | ✓ | ✓ | all candidates |
+| Admin | ✓ | ✓ | ✓ | ✓ | ✓ | all candidates |
+| Manager | ✓ | ✓ | ✓ | — | — | candidates assigned to them |
+| Receptionist | ✓ | ✓ | — | — | — | candidates assigned to them |
+| Agent | ✓ | ✓ | — | — | — | candidates assigned to them |
+| Accountant | — | — | — | — | — | nothing |
+| HR | — | — | — | — | — | nothing |
+| Candidate | — | — | — | — | — | only their own record (ownership checks, no permissions) |
+<!-- permission-matrix:end -->
+
+What each permission allows (always limited to the candidates the user may see):
+
+- **jobsearch:read** — applications, matches, messages released to staff, interviews, dashboard, reports
+  and CSV exports, the employer directory list, the recipient preview of an application.
+- **jobsearch:write** (so **Agent and Receptionist too**, not only Managers) — create and cancel
+  applications, prepare them (package + cover letter), import a job by hand (`POST /jobsearch/jobs/manual`),
+  "Search now" for an assigned candidate (`POST /jobsearch/search/run`), record written consent with
+  evidence, pause/resume an assigned candidate, edit profile and preferences, share an employer reply with
+  the candidate, create reply drafts. They **cannot** approve, queue or send anything.
+- **jobsearch:approve** (Manager, Admin, SuperAdmin) — approve or reject prepared applications, queue
+  sends, approve a CV version on the candidate's behalf (with a note), record submission evidence and
+  manual completions, apply reply classifications, assign unmatched replies, propose / cancel interviews,
+  send reply drafts, change a candidate's mode (except to `automatic`).
+- **jobsearch:admin** (Admin, SuperAdmin) — `automatic` mode, caps, allowed countries/professions/sources,
+  module and source pauses, scheduler and queue runs, automation rules, the employer's verified **domain and
+  contact address** (Task 19: Managers may only rename an employer), employer-support confirmations,
+  candidate accounts, suspending/reinstating users (never one's own account, never the last active
+  SuperAdmin).
+- **Health** (`GET /jobsearch/health`) is shown to Manager, Admin and SuperAdmin.
+- **users:write** (Admin, SuperAdmin) — create staff accounts, **set or change `candidates.assigned_to`**
+  and **delete candidates** (Task 19). Because the assignment decides which staff member sees a
+  candidate's job-search data, staff can no longer reassign a candidate: `PUT /candidates/:id` with a
+  different `assigned_to` returns 403 for them, and `POST /candidates/add` from a staff member always
+  assigns the new candidate to that staff member. `DELETE /candidates/:id` is admin-only.
+
+Outside the module: the original `/candidates` read routes (`GET /candidates/all`, `GET /candidates/:id`),
+`POST /candidates/:id/stage` (`visa:write`: Admin, Manager, Agent) and `/finance` are **not** scoped to
+assigned candidates (see CHECKLIST limitation 2). `/documents` writes (POST/PUT/DELETE) are scoped for
+Agent/Manager/Receptionist to their assigned candidates since Task 19.
 
 **Candidates**
 
@@ -275,6 +315,8 @@ Who can do what in the job-search module:
    POST /candidates/add
    { "full_name": "…", "passport_number": "…", "assigned_to": <staff user id> }
    ```
+   Only an Admin/SuperAdmin can choose `assigned_to` (a staff member who adds a candidate is always
+   assigned themselves); reassign later with `PUT /candidates/:id { "assigned_to": … }` (admin only).
 2. Create the candidate's login, linked to that candidate:
    ```http
    POST /jobsearch/admin/candidate-accounts
@@ -408,12 +450,21 @@ To send real mail, all of these must be true:
 2. `MAIL_SMTP_HOST`, `MAIL_SMTP_USER`, `MAIL_SMTP_PASS` (and `MAIL_SMTP_PORT` if not 587; it must be
    1–65535) set. The `MAIL_IMAP_*` variables are **not** needed (since Task 18).
 3. `MAIL_REAL_SEND=true`
-4. `MAIL_FROM` set to an address of your domain with SPF, DKIM and DMARC configured at your mail host
+4. `MAIL_FROM` set to a plain address of your domain (`jobs@your-domain.example`) with SPF, DKIM and DMARC
+   configured at your mail host. **Required:** without it nothing is sent (Task 19). Replies to our mail go
+   to `MAIL_REPLY_TO` (or `MAIL_FROM`), plus-addressed with the reply token, and the Message-IDs use the
+   `MAIL_FROM` domain, so that mailbox must be the one your inbound bridge reads.
 
-The Health tab shows the mail adapter: outbound `connected` only when the SMTP settings are valid and
-`MAIL_REAL_SEND=true` (this is a configuration check, not a live connection test); `configured_send_disabled`
-when only `MAIL_REAL_SEND` is missing; `not_configured` otherwise. Inbound shows `webhook` when
-`INBOUND_MAIL_SECRET` is set, else `requires_setup`. The overall status is `connected` only when both are.
+The Health tab shows the mail adapter:
+
+- With the **sandbox** (default): "Sandbox — no real mail is sent" (the API reports `mode: "sandbox"`; its
+  `status` stays `connected` for compatibility, which only means the sandbox works).
+- With `imap_smtp`: outbound `connected` only when the SMTP settings **and** `MAIL_FROM` are valid and
+  `MAIL_REAL_SEND=true` (a configuration check, not a live connection test); `configured_send_disabled`
+  when only `MAIL_REAL_SEND` is missing; `not_configured` otherwise, and Health lists the names of the
+  missing or invalid variables (`problems`, e.g. `MAIL_FROM`; never their values). Inbound shows `webhook`
+  when `INBOUND_MAIL_SECRET` is set, else `requires_setup`. The overall status is `connected` only when
+  both are.
 
 Test first with `MAIL_PROVIDER=sandbox` and a `MAIL_SANDBOX_ALLOWLIST` of your own test address, then
 switch to real sending with one candidate whose account e-mail is yours. The sandbox allow-list does **not**
@@ -523,9 +574,9 @@ of distinct `js_cv_files.storage_key` values.
 | Health (sources, queue, stuck items, tasks) | Health | `GET /jobsearch/health` (Manager, Admin) |
 | Reports / CSV export | Reports | `GET /jobsearch/reports`, `GET /jobsearch/export.csv?type=applications\|matches\|submissions\|messages\|tasks` |
 | Withdraw consent for a candidate | Portal (candidate) | `POST /jobsearch/candidates/:id/consent/withdraw` `{ "scopeKey": "submit" }` (`search`, `prepare`, `submit` or `all`) |
-| Suspend / reinstate a user (staff or candidate; ends their sessions) | — | `POST /jobsearch/admin/users/:id/suspend` · `/reinstate` (admin) |
+| Suspend / reinstate a user (staff or candidate; ends their sessions) | — | `POST /jobsearch/admin/users/:id/suspend` · `/reinstate` (admin; your own account and the last active SuperAdmin are refused with 409) |
 | Approve a CV version | Portal step 1 (candidate) · drawer "CV versions" (Manager/Admin, note required) | `POST /jobsearch/cv-files/:id/approve` |
-| Employer directory: verified domain / contact, name | Employers & rules (Admin; Manager for employers of their candidates) | `GET /jobsearch/employers?q=` · `PUT /jobsearch/employers/:id` `{ "domain", "verifiedContactEmail", "name" }` |
+| Employer directory: verified domain / contact (Admin only), name (Admin; Manager for employers of their candidates) | Employers & rules | `GET /jobsearch/employers?q=` · `PUT /jobsearch/employers/:id` `{ "domain", "verifiedContactEmail", "name" }` (a Manager sending `domain`/`verifiedContactEmail` gets 403) |
 | Add a job by hand | Employers & rules (staff with write access) | `POST /jobsearch/jobs/manual` |
 | Record / revoke employer-support confirmation | Employers & rules (Admin) | `POST /jobsearch/employer-confirmations` · `GET` (list) · `DELETE /jobsearch/employer-confirmations/:id` |
 | Automation rules | Employers & rules (Admin) | `GET /jobsearch/automation-rules` · `POST` · `DELETE /jobsearch/automation-rules/:id` (disables) |
@@ -623,5 +674,7 @@ the `demo.*@test.invalid` users and all rows labelled DEMO before going live.
       basis and consent text (`2026-10-v1` in the portal), how long you keep CVs, backups and logs, and how a
       candidate's data is deleted on request. Decide retention periods; the module does not delete data on
       a timer.
-- [ ] Decide whether the existing unscoped `/candidates` and `/documents` routes are acceptable for your
-      staff (CHECKLIST limitation 2).
+- [ ] `MAIL_FROM` set to a plain address of your domain (Health shows no `problems` for mail).
+- [ ] Decide whether the remaining unscoped original routes (`GET /candidates/all`, `GET /candidates/:id`,
+      `POST /candidates/:id/stage`, `/finance`) are acceptable for your staff (CHECKLIST limitation 2).
+      Assignment changes and deletions are admin-only, and `/documents` writes are scoped (Task 19).
