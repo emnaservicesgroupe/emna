@@ -14,12 +14,15 @@ const PERMISSIONS = {
     "jobsearch:write",
     "jobsearch:approve",
     "jobsearch:admin",
+    "leads:read",
+    "leads:write",
+    "sitejobs:write",
   ],
-  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read", "jobsearch:read", "jobsearch:write", "jobsearch:approve"],
-  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read", "jobsearch:read", "jobsearch:write"],
+  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read", "jobsearch:read", "jobsearch:write", "jobsearch:approve", "leads:read", "leads:write", "sitejobs:write"],
+  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read", "jobsearch:read", "jobsearch:write", "leads:read", "leads:write", "sitejobs:write"],
   Accountant: ["finance:read", "finance:write", "notifications:read", "candidates:read"],
   HR: ["candidates:read", "users:read", "notifications:read"],
-  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write", "jobsearch:read", "jobsearch:write"],
+  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write", "jobsearch:read", "jobsearch:write", "leads:read"],
   // Candidates are authorised by ownership checks (modules/jobsearch/scope.js), not permissions.
   Candidate: [],
 };
