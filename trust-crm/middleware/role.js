@@ -10,12 +10,27 @@ const PERMISSIONS = {
     "notifications:read",
     "users:write",
     "audit:read",
+    "jobsearch:read",
+    "jobsearch:write",
+    "jobsearch:approve",
+    "jobsearch:admin",
+    "leads:read",
+    "leads:write",
+    "sitejobs:write",
+    "orgs:read",
+    "orgs:write",
   ],
-  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read"],
-  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read"],
+  Manager: ["candidates:read", "candidates:write", "visa:write", "documents:write", "notifications:read", "finance:read", "jobsearch:read", "jobsearch:write", "jobsearch:approve", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write"],
+  Receptionist: ["candidates:read", "candidates:write", "documents:write", "notifications:read", "jobsearch:read", "jobsearch:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read"],
   Accountant: ["finance:read", "finance:write", "notifications:read", "candidates:read"],
   HR: ["candidates:read", "users:read", "notifications:read"],
-  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write"],
+  Agent: ["candidates:read", "candidates:write", "visa:write", "documents:write", "jobsearch:read", "jobsearch:write", "leads:read"],
+  // Candidates are authorised by ownership checks (modules/jobsearch/scope.js), not permissions.
+  Candidate: [],
+  // Portal users (employer / agency organisations) hold NO staff permissions: they are authorised only by the
+  // role-specific portal middleware, with the organisation taken from crm_org_accounts. Keep these empty.
+  Employer: [],
+  Agency: [],
 };
 
 exports.checkRole = (...roles) => {

@@ -1,0 +1,59 @@
+# Caddy reverse proxy for VITA (Task 20). Automatic HTTPS (Let's Encrypt / ZeroSSL) for SITE_ADDRESS:
+#   first run without a domain:  SITE_ADDRESS=203-0-113-10.sslip.io   (setup.sh derives it from the server IP)
+#   later, your own domain:      SITE_ADDRESS=vita.your-domain.com     (DNS A record -> server IP; then
+#                                                                       docker compose up -d)
+# Ports 80 and 443 must be open to the internet for the certificate to be issued.
+{
+	# Optional ACME account e-mail (ACME_EMAIL in .env): docker-compose.yml writes it to this snippet when set.
+	import /tmp/caddy-global.d/*.caddy
+	servers {
+		timeouts {
+			read_header 10s
+			# slow mobile uploads of a CV (up to CADDY_MAX_BODY) must finish within this
+			read_body 120s
+			idle 2m
+			# no write timeout: live events (server-sent events) are long-lived responses
+		}
+	}
+}
+
+{$SITE_ADDRESS} {
+	# The first-SuperAdmin bootstrap is NEVER reachable from the internet: ./create-admin.sh calls it inside
+	# the app container (the app also refuses proxied calls in production). Any case, any extra slashes.
+	@bootstrap path_regexp bootstrap (?i)^/+auth/+bootstrap-super-admin
+	respond @bootstrap `{"error":"Not found"}` 404
+
+	# Public liveness answered by Caddy itself (no database query from the internet); Docker checks the app's
+	# own /healthz inside the server.
+	@healthz path /healthz
+	respond @healthz `{"ok":true}` 200
+
+	# Upload limit: MAX_UPLOAD_MB (10) plus multipart overhead. Raise both together.
+	request_body {
+		max_size {$CADDY_MAX_BODY:12MB}
+	}
+
+	# Compress everything except the live event stream (server-sent events must not be buffered).
+	@compress not path /jobsearch/events
+	encode @compress zstd gzip
+
+	header {
+		# HTTPS only for this exact host (no includeSubDomains: sslip.io names are shared by everyone)
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+		-X-Powered-By
+	}
+
+	# The bare address is served by the app: the public website for browsers (Accept: text/html), the JSON
+	# status for API clients. Staff and candidates reach the VITA web interface at /vita/ (linked from the site).
+
+	reverse_proxy app:5000 {
+		# flush immediately: needed for live events (GET /jobsearch/events)
+		flush_interval -1
+	}
+}

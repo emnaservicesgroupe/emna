@@ -122,3 +122,29 @@ make test
 ```
 
 This runs `npm test` in `trust-crm` and executes all Node.js tests in `tests/*.test.js`.
+
+## 9) VITA AI Job Search & Applications module (البحث الآلي عن عمل)
+
+An additive module under `/jobsearch/*` (API) and `/vita/` (admin console `admin.html`, candidate portal
+`portal.html`). It takes a candidate from CV upload and consent to matching, truthful application
+preparation, e-mail submission within recorded consent and admin rules, reply tracking and interviews.
+Existing tables and routes are unchanged; new tables are prefixed `js_`.
+
+After `sql/schema.sql`, apply the module's migrations (idempotent, one transaction per file):
+
+```bash
+npm run migrate
+node scripts/verify-migrations.js   # optional dry run on throwaway schemas
+```
+
+Status: the code and tests are complete, but the module is **not production-ready** until the owner
+connects a job source, real mail, ClamAV and HTTPS. By default mail goes to a database sandbox and no job
+feed is connected.
+
+- [Requirement checklist (what is done, tested, blocked)](../docs/vita-job-search/CHECKLIST.md)
+- [Setup and operations](../docs/vita-job-search/SETUP.md)
+- [Deploy on a Hostinger VPS with Docker (step by step)](../docs/vita-job-search/SETUP-HOSTINGER.md) — kit in [`deploy/hostinger/`](../deploy/hostinger/)
+- [Sources and providers the owner must connect](../docs/vita-job-search/SOURCES_AND_PROVIDERS.md)
+- [User guide (staff and candidates)](../docs/vita-job-search/USER_GUIDE.md)
+
+All environment variables are listed in `.env.example`.

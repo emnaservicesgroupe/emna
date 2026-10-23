@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <title>VITA</title>
+  <link rel="stylesheet" href="vita.css">
+  <link rel="stylesheet" href="print.css" media="print">
+  <script src="i18n.js" defer></script>
+  <script src="vita.js" defer></script>
+</head>
+<body data-page="index" data-title-key="index.title">
+  <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <span class="brand"><img src="logo.webp" alt="VITA" width="120" height="40"></span>
+      <div class="header-tools">
+        <label for="lang-switch" data-i18n="common.language">Language</label>
+        <select id="lang-switch" data-lang-switch>
+          <option value="ar" lang="ar">العربية</option>
+          <option value="en" lang="en">English</option>
+          <option value="fr" lang="fr">Français</option>
+        </select>
+      </div>
+    </div>
+  </header>
+  <div class="title-band">
+    <div class="title-inner">
+      <h1 class="section-title">البحث الآلي عن عمل / AI Job Search &amp; Applications</h1>
+      <p class="subtitle" data-i18n="app.subtitle">Find real opportunities, prepare truthful applications, and track every reply.</p>
+      <span class="accent" aria-hidden="true"></span>
+    </div>
+  </div>
+  <main id="main" tabindex="-1">
+    <section class="card" aria-labelledby="lang-h">
+      <h2 id="lang-h" data-i18n="index.chooseLanguage">Choose your language</h2>
+      <div class="lang-choice">
+        <button type="button" class="btn secondary" data-set-lang="ar" lang="ar">العربية</button>
+        <button type="button" class="btn secondary" data-set-lang="en" lang="en">English</button>
+        <button type="button" class="btn secondary" data-set-lang="fr" lang="fr">Français</button>
+      </div>
+    </section>
+    <h2 data-i18n="index.chooseRole">Who are you?</h2>
+    <div class="chooser">
+      <a class="card" href="portal.html">
+        <h2 data-i18n="index.candidate">I am a candidate</h2>
+        <p data-i18n="index.candidateHint">Upload your CV, check your details, choose your preferences and follow your applications.</p>
+      </a>
+      <a class="card" href="employer.html">
+        <h2 data-i18n="index.employer">I am an employer</h2>
+        <p data-i18n="index.employerHint">Send recruitment requests to VITA and review the candidates it presents to you.</p>
+      </a>
+      <a class="card" href="agency.html">
+        <h2 data-i18n="index.agency">I am a partner agency</h2>
+        <p data-i18n="index.agencyHint">Register your candidates with VITA and follow their status.</p>
+      </a>
+      <a class="card" href="admin.html">
+        <h2 data-i18n="index.staff">I am VITA staff</h2>
+        <p data-i18n="index.staffHint">Review matches and applications, approve sends, handle replies and interviews.</p>
+      </a>
+    </div>
+    <p class="notice info" data-i18n="disclaimer">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p>
+  </main>
+  <footer class="site-footer"><span data-i18n="app.footer">VITA · AI Job Search &amp; Applications</span></footer>
+</body>
+</html>

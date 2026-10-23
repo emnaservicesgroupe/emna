@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <title>VITA</title>
+  <link rel="stylesheet" href="vita.css">
+  <link rel="stylesheet" href="print.css" media="print">
+  <script src="i18n.js" defer></script>
+  <script src="vita.js" defer></script>
+  <script src="portal.js" defer></script>
+</head>
+<body data-page="portal" data-title-key="portal.title">
+  <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="index.html"><img src="logo.webp" alt="VITA" width="120" height="40"></a>
+      <div class="header-tools">
+        <span class="live-status" id="live-status" aria-live="polite"></span>
+        <label for="lang-switch" data-i18n="common.language">Language</label>
+        <select id="lang-switch" data-lang-switch>
+          <option value="ar" lang="ar">العربية</option>
+          <option value="en" lang="en">English</option>
+          <option value="fr" lang="fr">Français</option>
+        </select>
+        <button type="button" class="btn secondary small" id="logout" hidden data-i18n="common.logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+  <div class="title-band">
+    <div class="title-inner">
+      <h1 class="section-title">البحث الآلي عن عمل / AI Job Search &amp; Applications</h1>
+      <p class="subtitle" data-i18n="portal.subtitle">Your job search: CV, details, preferences, consent and applications.</p>
+      <span class="accent" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <main id="main" tabindex="-1">
+    <!-- Disclaimer: active language prominently + all three languages. -->
+    <section class="disclaimer" aria-labelledby="disclaimer-h">
+      <h2 id="disclaimer-h" class="sr-only" data-i18n="disclaimer.title">Important</h2>
+      <p class="primary" data-i18n="disclaimer">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p>
+      <details>
+        <summary data-i18n="disclaimer.allLanguages">Read this notice in all languages</summary>
+        <p data-disclaimer-lang="ar" lang="ar" dir="rtl">تساعدك هذه الخدمة على البحث عن فرص العمل والتقديم إليها. وهي لا تضمن الحصول على عمل أو كفالة صاحب العمل أو تصريح عمل أو تأشيرة.</p>
+        <p data-disclaimer-lang="en" lang="en" dir="ltr">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p>
+        <p data-disclaimer-lang="fr" lang="fr" dir="ltr">Ce service vous aide à rechercher des offres d'emploi et à y postuler. Il ne garantit ni un emploi, ni un parrainage de l'employeur, ni un permis de travail, ni un visa.</p>
+      </details>
+    </section>
+
+    <!-- ============================================================ login -->
+    <section id="login-view" class="card login-card" aria-labelledby="otp-h" hidden>
+      <h2 id="otp-h" data-i18n="otp.title">Sign in with a code</h2>
+      <form id="otp-request-form" novalidate>
+        <div class="field">
+          <label for="otp-email" data-i18n="login.email">Email</label>
+          <input id="otp-email" type="email" autocomplete="email" required>
+          <span class="hint" data-i18n="otp.emailHint">We will email you a 6-digit code. No password needed.</span>
+        </div>
+        <button type="submit" class="btn" data-i18n="otp.send">Send me a code</button>
+      </form>
+      <form id="otp-verify-form" novalidate hidden>
+        <p class="notice info" id="otp-sent" role="status" data-i18n="otp.generic">If an account exists you will receive a code.</p>
+        <div class="field">
+          <label for="otp-code" data-i18n="otp.code">6-digit code</label>
+          <input id="otp-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+          <span class="hint" data-i18n="otp.codeHint">The code expires after 10 minutes and can be used once.</span>
+        </div>
+        <div class="btn-row">
+          <button type="submit" class="btn" data-i18n="otp.verify">Sign in</button>
+          <button type="button" class="btn secondary" id="otp-back" data-i18n="otp.back">Use another email</button>
+        </div>
+      </form>
+      <p class="form-error" id="otp-error" role="alert"></p>
+    </section>
+
+    <!-- ============================================================ portal -->
+    <div id="app-view" hidden>
+      <nav aria-labelledby="steps-h">
+        <h2 id="steps-h" class="sr-only" data-i18n="steps.title">Steps</h2>
+        <ol class="stepper" id="stepper">
+          <li><button type="button" data-step="upload" data-i18n="steps.upload">Upload your CV</button></li>
+          <li><button type="button" data-step="review" data-i18n="steps.review">Check your details</button></li>
+          <li><button type="button" data-step="prefs" data-i18n="steps.prefs">Your preferences</button></li>
+          <li><button type="button" data-step="consent" data-i18n="steps.consent">Your consent</button></li>
+          <li><button type="button" data-step="status" data-i18n="steps.status">Matches &amp; applications</button></li>
+        </ol>
+      </nav>
+
+      <!-- ---------------------------------------------------------- 1 upload -->
+      <section id="step-upload" class="card" aria-labelledby="upload-h" tabindex="-1" hidden>
+        <h2 id="upload-h" data-i18n="upload.title">1. Upload your CV</h2>
+        <p data-i18n="upload.intro">PDF, Word (DOCX), PNG or JPEG, up to 10 MB. We read your CV to fill in your details; you check everything in the next step.</p>
+        <p class="notice info"><strong data-i18n="upload.noSend">Uploading a CV does not authorize sending anything.</strong></p>
+        <form id="upload-form" novalidate>
+          <div class="field">
+            <label for="cv-file" data-i18n="upload.file">CV file</label>
+            <input id="cv-file" type="file" accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg" required>
+          </div>
+          <progress id="upload-progress" max="100" value="0" hidden data-i18n-aria-label="upload.progress"></progress>
+          <p id="upload-status" role="status" aria-live="polite"></p>
+          <button type="submit" class="btn" data-i18n="upload.submit">Upload</button>
+        </form>
+        <div id="cv-versions"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- 2 review -->
+      <section id="step-review" class="card" aria-labelledby="review-h" tabindex="-1" hidden>
+        <h2 id="review-h" data-i18n="review.title">2. Check and correct your details</h2>
+        <p data-i18n="review.intro">These details were read from your CV. Correct anything that is wrong. Empty fields were not found in your CV: we never guess them.</p>
+        <form id="review-form" novalidate></form>
+      </section>
+
+      <!-- ---------------------------------------------------------- 3 preferences -->
+      <section id="step-prefs" class="card" aria-labelledby="prefs-h" tabindex="-1" hidden>
+        <h2 id="prefs-h" data-i18n="prefs.title">3. Your preferences</h2>
+        <form id="prefs-form" novalidate></form>
+      </section>
+
+      <!-- ---------------------------------------------------------- 4 consent -->
+      <section id="step-consent" class="card" aria-labelledby="consent-h" tabindex="-1" hidden>
+        <h2 id="consent-h" data-i18n="consent.title">4. Your consent</h2>
+        <div id="consent-box"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- status -->
+      <section id="step-status" aria-labelledby="status-h" tabindex="-1" hidden>
+        <h2 id="status-h" data-i18n="status.title">Your matches and applications</h2>
+        <div id="status-summary"></div>
+        <div class="tabs" role="tablist" id="status-tabs" data-i18n-aria-label="status.title">
+          <button type="button" role="tab" id="st-matches" aria-controls="sp-matches" data-st="matches" data-i18n="status.matches">Matches</button>
+          <button type="button" role="tab" id="st-apps" aria-controls="sp-apps" data-st="apps" data-i18n="status.applications">My applications</button>
+          <button type="button" role="tab" id="st-interviews" aria-controls="sp-interviews" data-st="interviews" data-i18n="status.interviews">Interviews</button>
+          <button type="button" role="tab" id="st-messages" aria-controls="sp-messages" data-st="messages" data-i18n="status.messages">Messages</button>
+        </div>
+        <div id="sp-matches" role="tabpanel" aria-labelledby="st-matches" tabindex="-1"></div>
+        <div id="sp-apps" role="tabpanel" aria-labelledby="st-apps" tabindex="-1" hidden></div>
+        <div id="sp-interviews" role="tabpanel" aria-labelledby="st-interviews" tabindex="-1" hidden></div>
+        <div id="sp-messages" role="tabpanel" aria-labelledby="st-messages" tabindex="-1" hidden></div>
+      </section>
+    </div>
+  </main>
+  <footer class="site-footer"><span data-i18n="app.footer">VITA · AI Job Search &amp; Applications</span></footer>
+
+  <div id="live" class="sr-only" aria-live="polite"></div>
+  <div id="toasts" class="toasts"></div>
+</body>
+</html>

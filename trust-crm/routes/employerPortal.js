@@ -1,0 +1,73 @@
+// Employer portal API (mounted at /employer, with its own 16 KB JSON parser in app.js). Employer role only;
+// the organisation always comes from the token's crm_org_accounts link, never from the request.
+const express = require("express");
+const { requirePortalRole } = require("../modules/orgs/portalAuth");
+const { HttpError } = require("../modules/jobsearch/httpError");
+const { asyncHandler } = require("../modules/jobsearch/errorHandler");
+const svc = require("../modules/orgs/employerRequests");
+const presentations = require("../modules/orgs/presentations");
+
+const router = express.Router();
+
+router.use((_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+router.use(requirePortalRole("Employer"));
+
+router.get(
+  "/me",
+  asyncHandler(async (req, res) => res.json({ role: "Employer", org: await svc.getOrg(req.org.id) }))
+);
+
+router.get(
+  "/requests",
+  asyncHandler(async (req, res) => res.json(await svc.list(req.org.id, req.query)))
+);
+
+router.post(
+  "/requests",
+  asyncHandler(async (req, res) => res.status(201).json(await svc.create(req.user, req.org.id, req.body)))
+);
+
+router.get(
+  "/requests/:id",
+  asyncHandler(async (req, res) => res.json(await svc.get(req.org.id, req.params.id)))
+);
+
+router.patch(
+  "/requests/:id",
+  asyncHandler(async (req, res) => res.json(await svc.update(req.user, req.org.id, req.params.id, req.body)))
+);
+
+router.post(
+  "/requests/:id/cancel",
+  asyncHandler(async (req, res) => res.json(await svc.cancel(req.user, req.org.id, req.params.id)))
+);
+
+router.get(
+  "/presentations",
+  asyncHandler(async (req, res) => res.json(await presentations.employerList(req.org.id, req.query)))
+);
+
+router.get(
+  "/presentations/:id",
+  asyncHandler(async (req, res) => res.json(await presentations.employerGet(req.org.id, req.params.id)))
+);
+
+router.post(
+  "/presentations/:id/respond",
+  asyncHandler(async (req, res) => res.json(await presentations.employerRespond(req.user, req.org.id, req.params.id, req.body)))
+);
+
+// eslint-disable-next-line no-unused-vars
+router.use((err, _req, res, _next) => {
+  if (err instanceof HttpError) {
+    if (err.retryAfter) res.set("Retry-After", String(err.retryAfter));
+    return res.status(err.status).json({ error: err.message });
+  }
+  console.error("employer portal error:", err && err.name, err && err.code, err && err.message);
+  return res.status(500).json({ error: "Internal server error" });
+});
+
+module.exports = router;

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="data:,">
+  <title>VITA</title>
+  <link rel="stylesheet" href="vita.css">
+  <link rel="stylesheet" href="print.css" media="print">
+  <script src="i18n.js" defer></script>
+  <script src="vita.js" defer></script>
+  <script src="orgs-util.js" defer></script>
+  <script src="orgs-common.js" defer></script>
+  <script src="agency.js" defer></script>
+</head>
+<body data-page="agency" data-title-key="agency.title">
+  <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="index.html"><img src="logo.webp" alt="VITA" width="120" height="40"></a>
+      <div class="header-tools">
+        <span class="who" id="who"></span>
+        <label for="lang-switch" data-i18n="common.language">Language</label>
+        <select id="lang-switch" data-lang-switch>
+          <option value="ar" lang="ar">العربية</option>
+          <option value="en" lang="en">English</option>
+          <option value="fr" lang="fr">Français</option>
+        </select>
+        <button type="button" class="btn secondary small" id="logout" hidden data-i18n="common.logout">Sign out</button>
+      </div>
+    </div>
+  </header>
+  <div class="title-band">
+    <div class="title-inner">
+      <h1 class="section-title">البحث الآلي عن عمل / AI Job Search &amp; Applications</h1>
+      <p class="subtitle" data-i18n="agency.subtitle">Register your candidates with VITA and follow their status.</p>
+      <span class="accent" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <main id="main" tabindex="-1">
+    <!-- Disclaimer: active language prominently + all three languages. -->
+    <section class="disclaimer" aria-labelledby="disclaimer-h">
+      <h2 id="disclaimer-h" class="sr-only" data-i18n="disclaimer.title">Important</h2>
+      <p class="primary" data-i18n="agency.disclaimer">VITA does not guarantee employment, sponsorship, a work permit or a visa for any candidate you register.</p>
+      <p data-i18n="disclaimer">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p>
+      <details>
+        <summary data-i18n="disclaimer.allLanguages">Read this notice in all languages</summary>
+        <p data-disclaimer-lang="ar" data-disclaimer-key="agency.disclaimer" lang="ar" dir="rtl">لا تضمن فيتا الحصول على عمل أو كفالة أو تصريح عمل أو تأشيرة لأي مرشح تسجّله.</p>
+        <p data-disclaimer-lang="en" data-disclaimer-key="agency.disclaimer" lang="en" dir="ltr">VITA does not guarantee employment, sponsorship, a work permit or a visa for any candidate you register.</p>
+        <p data-disclaimer-lang="fr" data-disclaimer-key="agency.disclaimer" lang="fr" dir="ltr">VITA ne garantit ni un emploi, ni un parrainage, ni un permis de travail, ni un visa pour les candidats que vous enregistrez.</p>
+        <p data-disclaimer-lang="ar" lang="ar" dir="rtl">تساعدك هذه الخدمة على البحث عن فرص العمل والتقديم إليها. وهي لا تضمن الحصول على عمل أو كفالة صاحب العمل أو تصريح عمل أو تأشيرة.</p>
+        <p data-disclaimer-lang="en" lang="en" dir="ltr">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p>
+        <p data-disclaimer-lang="fr" lang="fr" dir="ltr">Ce service vous aide à rechercher des offres d'emploi et à y postuler. Il ne garantit ni un emploi, ni un parrainage de l'employeur, ni un permis de travail, ni un visa.</p>
+      </details>
+    </section>
+
+    <!-- ============================================================ login -->
+    <section id="login-view" class="card login-card" aria-labelledby="otp-h" hidden>
+      <h2 id="otp-h" data-i18n="otp.title">Sign in with a code</h2>
+      <p class="small muted" data-i18n="orgs.otp.inviteOnly">Only organisations invited by VITA can sign in.</p>
+      <form id="otp-request-form" novalidate>
+        <div class="field">
+          <label for="otp-email" data-i18n="login.email">Email</label>
+          <input id="otp-email" type="email" autocomplete="email" required>
+          <span class="hint" data-i18n="otp.emailHint">We will email you a 6-digit code. No password needed.</span>
+        </div>
+        <button type="submit" class="btn" data-i18n="otp.send">Send me a code</button>
+      </form>
+      <form id="otp-verify-form" novalidate hidden>
+        <p class="notice info" id="otp-sent" role="status" data-i18n="otp.generic">If an account exists you will receive a code.</p>
+        <div class="field">
+          <label for="otp-code" data-i18n="otp.code">6-digit code</label>
+          <input id="otp-code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+          <span class="hint" data-i18n="otp.codeHint">The code expires after 10 minutes and can be used once.</span>
+        </div>
+        <div class="btn-row">
+          <button type="submit" class="btn" data-i18n="otp.verify">Sign in</button>
+          <button type="button" class="btn secondary" id="otp-resend" data-i18n="orgs.otp.resend">Send a new code</button>
+          <button type="button" class="btn secondary" id="otp-back" data-i18n="otp.back">Use another email</button>
+        </div>
+      </form>
+      <p class="form-error" id="otp-error" role="alert"></p>
+    </section>
+
+    <!-- ============================================================ portal -->
+    <div id="app-view" hidden>
+      <div class="tabs" role="tablist" id="tabs" data-i18n-aria-label="agency.sections">
+        <button type="button" role="tab" id="tab-register" aria-controls="panel-register" data-tab="register" data-i18n="agency.tab.register">Register a candidate</button>
+        <button type="button" role="tab" id="tab-candidates" aria-controls="panel-candidates" data-tab="candidates" data-i18n="agency.tab.candidates">My candidates</button>
+      </div>
+
+      <!-- ---------------------------------------------------------- register -->
+      <section id="panel-register" role="tabpanel" aria-labelledby="tab-register" tabindex="-1">
+        <div class="card">
+          <h2 data-i18n="agency.register.title">Register a candidate</h2>
+          <p class="small muted" data-i18n="agency.register.hint">Give the details of a candidate you represent. VITA reviews every registration. Registration does not guarantee employment, a work permit or a visa.</p>
+          <p class="notice ok" id="reg-done" role="status" hidden data-i18n="agency.register.done">Thank you. The candidate was sent to VITA for review.</p>
+          <form id="reg-form" novalidate>
+            <div class="grid two">
+              <div>
+                <div class="field"><label for="reg-name" data-i18n="agency.f.full_name">Full name *</label><input id="reg-name" type="text" maxlength="120" autocomplete="off" required></div>
+                <div class="field"><label for="reg-email" data-i18n="agency.f.email">Email</label><input id="reg-email" type="email" maxlength="254" autocomplete="off" dir="ltr"></div>
+                <div class="field"><label for="reg-phone" data-i18n="agency.f.phone">Phone</label><input id="reg-phone" type="text" inputmode="tel" maxlength="32" autocomplete="off" dir="ltr"><span class="hint" data-i18n="agency.contactHint">Give an email address, a phone number, or both.</span></div>
+              </div>
+              <div>
+                <div class="field"><label for="reg-country" data-i18n="agency.f.country">Country</label><input id="reg-country" type="text" maxlength="80" autocomplete="off"></div>
+                <div class="field"><label for="reg-profession" data-i18n="agency.f.profession">Profession</label><input id="reg-profession" type="text" maxlength="120" autocomplete="off"></div>
+                <div class="field"><label for="reg-passport" data-i18n="agency.f.passport_number">Passport number (optional)</label><input id="reg-passport" type="text" maxlength="40" autocomplete="off" dir="ltr"><span class="hint" data-i18n="agency.passportHint">Optional. It is used only to avoid duplicate records.</span></div>
+              </div>
+            </div>
+            <div class="field"><label for="reg-message" data-i18n="agency.f.message">Message for VITA</label><textarea id="reg-message" maxlength="4000" rows="4"></textarea></div>
+            <div class="field">
+              <div class="check"><input id="reg-consent" type="checkbox" required><label for="reg-consent" data-i18n="agency.consent">I confirm that this candidate has given me permission to share their details with VITA so that VITA can contact them about job opportunities.</label></div>
+            </div>
+            <p class="form-error" id="reg-error" role="alert"></p>
+            <div class="btn-row"><button type="submit" class="btn" id="reg-submit" data-i18n="agency.register.submit">Send to VITA</button></div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- my candidates -->
+      <section id="panel-candidates" role="tabpanel" aria-labelledby="tab-candidates" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2 data-i18n="agency.list.title">My candidates</h2><span class="spacer"></span>
+            <button type="button" class="btn secondary small" id="cand-refresh" data-i18n="common.refresh">Refresh</button>
+          </div>
+          <p class="small muted" data-i18n="agency.list.hint">Only the candidates you registered appear here, with their current status.</p>
+          <p class="small muted" id="cand-summary" aria-live="polite"></p>
+          <div id="cand-table"></div>
+          <div class="pager" id="cand-pager"></div>
+        </div>
+        <div class="card" id="cand-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="cand-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="cand-close" data-i18n="common.close">Close</button></div>
+          <div id="cand-body"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <footer class="site-footer"><span data-i18n="app.footer">VITA · AI Job Search &amp; Applications</span></footer>
+
+  <div id="live" class="sr-only" aria-live="polite"></div>
+  <div id="toasts" class="toasts"></div>
+</body>
+</html>

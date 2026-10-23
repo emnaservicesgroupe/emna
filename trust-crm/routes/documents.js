@@ -3,8 +3,21 @@ const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
 const { checkPermission } = require("../middleware/role");
 const { logAudit } = require("../utils/audit");
+const { isStaff, assertCandidateAccess } = require("../modules/jobsearch/scope");
 
 const router = express.Router();
+
+// Task 19 (I-2): staff roles (Agent, Manager, Receptionist) may write documents only for candidates
+// assigned to them (candidateScopeSql); Admin/SuperAdmin unchanged. Out of scope -> 404 (no existence leak).
+async function inStaffScope(user, candidateId) {
+  if (!isStaff(user)) return true;
+  try {
+    await assertCandidateAccess(user, typeof candidateId === "number" ? candidateId : String(candidateId));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 router.post("/", verifyToken, checkPermission("documents:write"), async (req, res) => {
   const { candidate_id, doc_type, file_path, expiry_date = null, status = "Uploaded", notes = null } = req.body;
@@ -13,6 +26,7 @@ router.post("/", verifyToken, checkPermission("documents:write"), async (req, re
   }
 
   try {
+    if (!(await inStaffScope(req.user, candidate_id))) return res.status(404).json({ error: "Candidate not found" });
     const result = await db.query(
       `INSERT INTO documents (candidate_id, doc_type, file_path, expiry_date, status, notes, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -32,6 +46,7 @@ router.put("/:id", verifyToken, checkPermission("documents:write"), async (req, 
   try {
     const oldRow = await db.query("SELECT * FROM documents WHERE id=$1 AND is_deleted=false", [req.params.id]);
     if (!oldRow.rows.length) return res.status(404).json({ error: "Document not found" });
+    if (!(await inStaffScope(req.user, oldRow.rows[0].candidate_id))) return res.status(404).json({ error: "Document not found" });
 
     const result = await db.query(
       `UPDATE documents
@@ -57,6 +72,7 @@ router.delete("/:id", verifyToken, checkPermission("documents:write"), async (re
   try {
     const oldRow = await db.query("SELECT * FROM documents WHERE id=$1 AND is_deleted=false", [req.params.id]);
     if (!oldRow.rows.length) return res.status(404).json({ error: "Document not found" });
+    if (!(await inStaffScope(req.user, oldRow.rows[0].candidate_id))) return res.status(404).json({ error: "Document not found" });
 
     const result = await db.query("UPDATE documents SET is_deleted=true, updated_at=NOW() WHERE id=$1 RETURNING *", [req.params.id]);
 
