@@ -306,6 +306,27 @@ code: ✓ = the role holds the permission.
 | Agency | — | — | — | — | — | nothing (portal role: own organisation only via `/agency/*`) |
 <!-- permission-matrix:end -->
 
+### Accounting permissions
+
+Who can do what in the accounting module (Stage 4). Checked against `middleware/role.js` by
+`tests/fin-schema.test.js`. ✓ = the role holds the permission. Candidates read their own invoices through
+ownership checks only (`GET /finance/me`), never through a staff permission.
+
+<!-- finance-permission-matrix:start -->
+| Role | finance:read | finance:write | finance:void | finance:refund | finance:export |
+|---|---|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Admin | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Manager | ✓ | — | — | — | ✓ |
+| Receptionist | — | — | — | — | — |
+| Accountant | ✓ | ✓ | ✓ | ✓ | ✓ |
+| HR | — | — | — | — | — |
+| Agent | — | — | — | — | — |
+| Candidate | — | — | — | — | — |
+| Employer | — | — | — | — | — |
+| Agency | — | — | — | — | — |
+<!-- finance-permission-matrix:end -->
+
 What each permission allows (always limited to the candidates the user may see):
 
 - **jobsearch:read** — applications, matches, messages released to staff, interviews, dashboard, reports
