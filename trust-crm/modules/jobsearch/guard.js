@@ -495,4 +495,4 @@ async function findDuplicate(client, app, job, now) {
   return null;
 }
 
-module.exports = { check, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };
+module.exports = { check, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, isFreeMail, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };

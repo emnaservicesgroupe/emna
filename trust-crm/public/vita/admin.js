@@ -197,6 +197,7 @@
     initReports();
     initHealth();
     initScheduler();
+    initDirectory();
     initDrawer();
     window.addEventListener("hashchange", routeFromHash);
   }
@@ -238,7 +239,7 @@
   var refreshSoon = V.debounce(function () { refreshCurrent(); }, 600);
   function refreshCurrent() {
     if (!S.session) return;
-    var loaders = { dashboard: loadDashboard, applications: loadApplications, review: loadReview, interviews: loadInterviews, sources: loadSources, settings: loadSettings, reports: function () {}, health: loadHealth, scheduler: loadScheduler };
+    var loaders = { dashboard: loadDashboard, applications: loadApplications, review: loadReview, interviews: loadInterviews, sources: loadSources, settings: loadSettings, reports: function () {}, health: loadHealth, scheduler: loadScheduler, directory: loadDirectory };
     (loaders[S.tab] || function () {})();
     if (S.drawerAppId) renderDrawer(S.drawerAppId, true);
   }
@@ -1441,6 +1442,285 @@
         h("h3", { text: t("health.tasks") }),
         table([t("dash.reason"), { label: t("health.count"), num: true }], hl.tasksAwaitingHuman.map(function (x) { return h("tr", null, h("td", { text: tc("task", x.reason) }), h("td", { class: "num", text: V.fmtNumber(x.count) })); })));
     }).catch(function (err) { V.setContent(box, errorBox(err)); });
+  }
+
+  // ================================================================ employers & rules (Task 18)
+  function canEditEmployers() { return isAdmin() || role() === "Manager"; }
+  function splitList(v) { return v.split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
+  function field(id, labelKey, input, hintKey) {
+    return h("div", { class: "field" }, h("label", { for: id, text: t(labelKey) }), input, hintKey ? h("span", { class: "hint", text: t(hintKey) }) : null);
+  }
+  function initDirectory() {
+    $("#directory-refresh").addEventListener("click", loadDirectory);
+    $("#emp-search").addEventListener("submit", function (e) { e.preventDefault(); loadEmployers(); });
+  }
+  function loadDirectory() {
+    loadEmployers();
+    renderManualImport();
+    $("#confirm-card").hidden = !isAdmin();
+    $("#rules-card").hidden = !isAdmin();
+    if (isAdmin()) { loadConfirmations(); loadRules(); }
+  }
+
+  function loadEmployers() {
+    var box = $("#emp-list");
+    V.setContent(box, V.loading());
+    var q = $("#emp-q").value.trim();
+    V.api("GET", "/jobsearch/employers" + qs({ q: q, pageSize: 100 })).then(function (r) {
+      var rows = r.employers.map(function (e) {
+        var cells = [
+          h("td", { text: e.name }),
+          h("td", null, e.domain ? h("span", { class: "ltr-island", text: e.domainUnicode && e.domainUnicode !== e.domain ? e.domainUnicode + " (" + e.domain + ")" : e.domain }) : h("span", { class: "muted", text: "—" })),
+          h("td", null, e.verifiedContactEmail ? h("span", { class: "ltr-island mono", text: e.verifiedContactEmail }) : h("span", { class: "muted", text: "—" })),
+          h("td", { class: "num", text: V.fmtNumber(e.jobs || 0) }),
+          h("td", { class: "num", text: V.fmtNumber(e.applications || 0) }),
+        ];
+        var actions = h("td");
+        if (canEditEmployers()) {
+          var b = h("button", { type: "button", class: "btn secondary small", text: t("dir.edit"), attrs: { "aria-label": t("dir.editNamed", { name: e.name }) } });
+          b.addEventListener("click", function () { V.setContent(actions, employerForm(e)); });
+          actions.appendChild(b);
+        }
+        cells.push(actions);
+        return h("tr", null, cells);
+      });
+      V.setContent(box, h("p", { class: "small muted", text: t("dir.count", { n: V.fmtNumber(r.total) }) }),
+        table([t("dir.name"), t("dir.domain"), t("dir.contact"), { label: t("dir.jobs"), num: true }, { label: t("dir.applications"), num: true }, t("dir.actions")], rows, { empty: t("dir.none") }));
+    }).catch(function (err) { V.setContent(box, errorBox(err)); });
+  }
+
+  function employerForm(e) {
+    var p = "emp-" + e.id + "-";
+    var name = h("input", { id: p + "name", type: "text", value: e.name, attrs: { maxlength: "200" } });
+    var domain = h("input", { id: p + "domain", type: "text", value: e.domain || "", attrs: { maxlength: "255", autocomplete: "off", placeholder: "employer.com" } });
+    var contact = h("input", { id: p + "contact", type: "email", value: e.verifiedContactEmail || "", attrs: { maxlength: "254", autocomplete: "off" } });
+    var save = h("button", { type: "submit", class: "btn small", text: t("common.save") });
+    var form = h("form", { class: "notice info", attrs: { novalidate: true } },
+      field(p + "name", "dir.name", name),
+      field(p + "domain", "dir.domain", domain, "dir.domainHint"),
+      field(p + "contact", "dir.contact", contact, "dir.contactHint"),
+      save);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var patch = {};
+      if (name.value.trim() !== e.name) patch.name = name.value.trim();
+      if (domain.value.trim() !== (e.domain || "")) patch.domain = domain.value.trim();
+      if (contact.value.trim() !== (e.verifiedContactEmail || "")) patch.verifiedContactEmail = contact.value.trim();
+      if (!Object.keys(patch).length) { V.toast(t("dir.noChange"), "bad"); return; }
+      V.confirmDialog(t("dir.saveConfirm", { name: e.name }), t("common.save")).then(function (ok) {
+        if (!ok) return;
+        V.busy(save, function () {
+          return V.api("PUT", "/jobsearch/employers/" + e.id, { body: patch }).then(function () {
+            V.toast(t("dir.saved"), "ok");
+            loadEmployers();
+          });
+        }).catch(function () {});
+      });
+    });
+    return form;
+  }
+
+  function renderManualImport() {
+    var box = $("#manual-box");
+    if (!can("write")) return V.setContent(box, V.empty(t("why.noPermission")));
+    var f = {
+      title: h("input", { id: "mi-title", type: "text", attrs: { maxlength: "200", required: true } }),
+      employerName: h("input", { id: "mi-employer", type: "text", attrs: { maxlength: "200", required: true } }),
+      location: h("input", { id: "mi-location", type: "text", attrs: { maxlength: "200" } }),
+      country: h("input", { id: "mi-country", type: "text", attrs: { maxlength: "100", list: "country-list" } }),
+      url: h("input", { id: "mi-url", type: "url", attrs: { maxlength: "2000"} }),
+      description: h("textarea", { id: "mi-description", attrs: { rows: "6", maxlength: "20000" } }),
+      closingAt: h("input", { id: "mi-closing", type: "date" }),
+    };
+    var out = h("div", { attrs: { "aria-live": "polite" } });
+    var b = h("button", { type: "submit", class: "btn", text: t("manual.importSubmit") });
+    var form = h("form", { attrs: { novalidate: true } },
+      h("div", { class: "inline-fields" }, field("mi-title", "manual.jobTitle", f.title), field("mi-employer", "filter.employer", f.employerName)),
+      h("div", { class: "inline-fields" }, field("mi-location", "drawer.location", f.location), field("mi-country", "filter.country", f.country), field("mi-closing", "drawer.closing", f.closingAt)),
+      field("mi-url", "manual.url", f.url, "manual.urlHint"),
+      field("mi-description", "manual.description", f.description, "manual.descriptionHint"),
+      b, out);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      V.$all("[aria-invalid]", form).forEach(function (x) { x.removeAttribute("aria-invalid"); });
+      var bad = function (el, key) { el.setAttribute("aria-invalid", "true"); el.focus(); V.toast(t(key), "bad"); };
+      if (!f.title.value.trim()) return bad(f.title, "manual.titleRequired");
+      if (!f.employerName.value.trim()) return bad(f.employerName, "manual.employerRequired");
+      var u = f.url.value.trim();
+      if (u && !/^https:\/\/[^\s\/?#]+\.[^\s\/?#]+(?:[\/?#]\S*)?$/i.test(u)) return bad(f.url, "manual.httpsOnly");
+      var bodyOut = { title: f.title.value.trim(), employerName: f.employerName.value.trim() };
+      ["location", "country", "description"].forEach(function (k) { if (f[k].value.trim()) bodyOut[k] = f[k].value.trim(); });
+      if (u) bodyOut.url = u;
+      if (f.closingAt.value) bodyOut.closingAt = f.closingAt.value + "T23:59:59Z";
+      V.busy(b, function () {
+        return V.api("POST", "/jobsearch/jobs/manual", { body: bodyOut }).then(function (r) {
+          var msg = r.created ? t("manual.importCreated", { id: r.job.id }) : t("manual.importExisting", { id: r.job.id });
+          V.setContent(out, h("p", { class: "notice ok small", text: msg }));
+          V.announce(msg);
+          form.reset();
+        });
+      }).catch(function (err) { V.setContent(out, errorBox(err)); });
+    });
+    V.setContent(box, form);
+  }
+
+  function loadConfirmations() {
+    var box = $("#confirm-box");
+    V.setContent(box, V.loading());
+    Promise.all([
+      V.api("GET", "/jobsearch/employer-confirmations"),
+      V.api("GET", "/jobsearch/applications" + qs({ pageSize: 100 })),
+    ]).then(function (r) {
+      V.setContent(box, confirmationForm(r[1].applications), confirmationList(r[0].confirmations));
+    }).catch(function (err) { V.setContent(box, errorBox(err)); });
+  }
+
+  function confirmationForm(apps) {
+    var sel = h("select", { id: "cf-app" }, option("", t("common.choose")), apps.map(function (a) {
+      return option(String(a.id), "#" + a.id + " · " + (a.job && a.job.title ? a.job.title : "") + " · " + (a.employer && a.employer.name ? a.employer.name : t("common.none")) + " · " + (a.candidateName || ""));
+    }));
+    var scopeJob = h("input", { id: "cf-scope-job", type: "radio", name: "cf-scope", value: "job", checked: true });
+    var scopeEmp = h("input", { id: "cf-scope-emp", type: "radio", name: "cf-scope", value: "employer" });
+    var note = h("textarea", { id: "cf-note", attrs: { rows: "3", maxlength: "2000", required: true } });
+    var b = h("button", { type: "submit", class: "btn", text: t("conf.submit") });
+    var form = h("form", { class: "notice info", attrs: { novalidate: true } },
+      h("p", { class: "small", text: t("conf.hint") }),
+      field("cf-app", "conf.application", sel),
+      h("fieldset", null, h("legend", { text: t("conf.scope") }),
+        h("div", { class: "check" }, scopeJob, h("label", { for: "cf-scope-job" }, h("strong", { text: t("conf.scopeJob") }), h("span", { class: "hint", text: t("conf.scopeJobHint") }))),
+        h("div", { class: "check" }, scopeEmp, h("label", { for: "cf-scope-emp" }, h("strong", { text: t("conf.scopeEmployer") }), h("span", { class: "hint", text: t("conf.scopeEmployerHint") })))),
+      field("cf-note", "conf.note", note, "conf.noteHint"),
+      b);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var app = apps.find(function (a) { return String(a.id) === sel.value; });
+      if (!app) { sel.setAttribute("aria-invalid", "true"); sel.focus(); V.toast(t("conf.pickApplication"), "bad"); return; }
+      sel.removeAttribute("aria-invalid");
+      var n = note.value.trim();
+      if (n.length < 10) { note.setAttribute("aria-invalid", "true"); note.focus(); V.toast(t("conf.noteTooShort"), "bad"); return; }
+      note.removeAttribute("aria-invalid");
+      var wide = scopeEmp.checked;
+      if (wide && !(app.employer && app.employer.id)) { V.toast(t("conf.noEmployer"), "bad"); return; }
+      var payload = wide ? { employerId: app.employer.id, evidenceNote: n } : { applicationId: app.id, evidenceNote: n };
+      V.confirmDialog(wide ? t("conf.confirmEmployer", { name: app.employer.name || "#" + app.employer.id }) : t("conf.confirmJob", { id: app.id }), t("conf.submit")).then(function (ok) {
+        if (!ok) return;
+        V.busy(b, function () {
+          return V.api("POST", "/jobsearch/employer-confirmations", { body: payload }).then(function () {
+            V.toast(t("conf.recorded"), "ok");
+            loadConfirmations();
+          });
+        }).catch(function () {});
+      });
+    });
+    return form;
+  }
+
+  function confirmationList(items) {
+    var rows = items.map(function (k) {
+      var cell = h("td");
+      if (!k.revoked) {
+        var rv = h("button", { type: "button", class: "btn danger small", text: t("conf.revoke") });
+        rv.addEventListener("click", function () {
+          V.confirmDialog(t("conf.revokeConfirm"), t("conf.revoke"), true).then(function (ok) {
+            if (!ok) return;
+            V.busy(rv, function () { return V.api("DELETE", "/jobsearch/employer-confirmations/" + k.id).then(function () { V.toast(t("conf.revoked"), "ok"); loadConfirmations(); }); }).catch(function () {});
+          });
+        });
+        cell.appendChild(rv);
+      } else cell.appendChild(h("span", { class: "badge neutral", text: t("conf.revokedBadge") }));
+      return h("tr", null,
+        h("td", { text: "#" + k.id }),
+        h("td", { text: k.scope === "job" ? t("conf.scopeJob") + (k.jobTitle ? " · " + k.jobTitle : "") : t("conf.scopeEmployer") }),
+        h("td", { text: k.employerName || (k.employerId ? "#" + k.employerId : "—") }),
+        h("td", null, h("div", { class: "untrusted small", text: k.evidence || "" })),
+        h("td", { text: V.fmtDateTime(k.createdAt) }),
+        cell);
+    });
+    return h("div", null, h("h3", { text: t("conf.listTitle") }), table(["#", t("conf.scope"), t("filter.employer"), t("conf.note"), t("conf.at"), t("dir.actions")], rows, { empty: t("conf.none") }));
+  }
+
+  var RULE_TYPES = ["auto_submit", "ack_reply"];
+  function loadRules() {
+    var box = $("#rules-box");
+    V.setContent(box, V.loading());
+    V.api("GET", "/jobsearch/automation-rules").then(function (r) {
+      V.setContent(box, rulesForm(), rulesList(r.rules));
+    }).catch(function (err) { V.setContent(box, errorBox(err)); });
+  }
+
+  function rulesForm() {
+    var cands = (S.dash ? S.dash.candidates : []).map(function (c) { return [String(c.candidateId), c.name + " (#" + c.candidateId + ")"]; });
+    var cand = h("select", { id: "ru-cand" }, option("", t("common.choose")), cands.map(function (c) { return option(c[0], c[1]); }));
+    var type = h("select", { id: "ru-type" }, RULE_TYPES.map(function (x) { return option(x, tc("ruleType", x)); }));
+    var countries = h("input", { id: "ru-countries", type: "text", attrs: { maxlength: "1000" } });
+    var professions = h("input", { id: "ru-professions", type: "text", attrs: { maxlength: "1000" } });
+    var sources = h("input", { id: "ru-sources", type: "text", attrs: { maxlength: "500" } });
+    var employers = h("input", { id: "ru-employers", type: "text", attrs: { maxlength: "500", inputmode: "numeric" } });
+    var note = h("textarea", { id: "ru-note", attrs: { rows: "2", maxlength: "500" } });
+    var submitOnly = h("div", null,
+      field("ru-countries", "rules.countries", countries, "rules.countriesHint"),
+      field("ru-professions", "rules.professions", professions, "rules.listHint"),
+      field("ru-sources", "rules.sources", sources, "rules.sourcesHint"));
+    type.addEventListener("change", function () { submitOnly.hidden = type.value !== "auto_submit"; });
+    var b = h("button", { type: "submit", class: "btn", text: t("rules.create") });
+    var form = h("form", { class: "notice info", attrs: { novalidate: true } },
+      h("p", { class: "small", text: t("rules.hint") }),
+      h("div", { class: "inline-fields" }, field("ru-cand", "filter.candidate", cand), field("ru-type", "rules.type", type)),
+      submitOnly,
+      field("ru-employers", "rules.employers", employers, "rules.employersHint"),
+      field("ru-note", "rules.note", note),
+      b);
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      if (!cand.value) { cand.setAttribute("aria-invalid", "true"); cand.focus(); V.toast(t("rules.pickCandidate"), "bad"); return; }
+      var payload = { candidateId: Number(cand.value), type: type.value };
+      var emp = splitList(employers.value);
+      if (emp.some(function (x) { return !/^\d{1,9}$/.test(x); })) { employers.setAttribute("aria-invalid", "true"); employers.focus(); V.toast(t("rules.badEmployers"), "bad"); return; }
+      if (emp.length) payload.employerIds = emp.map(Number);
+      if (type.value === "auto_submit") {
+        var cs = splitList(countries.value);
+        if (!cs.length) { countries.setAttribute("aria-invalid", "true"); countries.focus(); V.toast(t("rules.countriesRequired"), "bad"); return; }
+        payload.countries = cs;
+        if (splitList(professions.value).length) payload.professions = splitList(professions.value);
+        if (splitList(sources.value).length) payload.sources = splitList(sources.value);
+      } else if (!emp.length) { employers.setAttribute("aria-invalid", "true"); employers.focus(); V.toast(t("rules.employersRequired"), "bad"); return; }
+      if (note.value.trim()) payload.note = note.value.trim();
+      V.confirmDialog(t("rules.createConfirm"), t("rules.create")).then(function (ok) {
+        if (!ok) return;
+        V.busy(b, function () { return V.api("POST", "/jobsearch/automation-rules", { body: payload }).then(function () { V.toast(t("rules.created"), "ok"); loadRules(); }); }).catch(function () {});
+      });
+    });
+    return form;
+  }
+
+  function rulesList(rules) {
+    var rows = rules.map(function (r) {
+      var sc = r.scope || {};
+      var bits = [];
+      if (sc.countries) bits.push(t("rules.countries") + ": " + sc.countries.join(", "));
+      if (sc.professions) bits.push(t("rules.professions") + ": " + sc.professions.join(", "));
+      if (sc.sources) bits.push(t("rules.sources") + ": " + sc.sources.join(", "));
+      if (sc.employerIds) bits.push(t("rules.employers") + ": " + sc.employerIds.map(function (x) { return "#" + x; }).join(", "));
+      var cell = h("td");
+      if (r.active) {
+        var d = h("button", { type: "button", class: "btn danger small", text: t("rules.disable") });
+        d.addEventListener("click", function () {
+          V.confirmDialog(t("rules.disableConfirm"), t("rules.disable"), true).then(function (ok) {
+            if (!ok) return;
+            V.busy(d, function () { return V.api("DELETE", "/jobsearch/automation-rules/" + r.id).then(function () { V.toast(t("rules.disabled"), "ok"); loadRules(); }); }).catch(function () {});
+          });
+        });
+        cell.appendChild(d);
+      }
+      return h("tr", null,
+        h("td", { text: "#" + r.id }),
+        h("td", { text: (r.candidateName || "") + " (#" + r.candidateId + ")" }),
+        h("td", { text: tc("ruleType", r.type) }),
+        h("td", { class: "small", text: bits.join(" · ") || t("rules.noScope") }),
+        h("td", null, h("span", { class: "badge " + (r.enabled ? "ok" : "neutral"), text: r.enabled ? t("rules.enabled") : t("rules.off") })),
+        cell);
+    });
+    return h("div", null, h("h3", { text: t("rules.listTitle") }), table(["#", t("filter.candidate"), t("rules.type"), t("rules.scope"), t("rules.state"), t("dir.actions")], rows, { empty: t("rules.none") }));
   }
 
   function initScheduler() { $("#scheduler-refresh").addEventListener("click", loadScheduler); }

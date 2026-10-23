@@ -431,7 +431,7 @@ async function automatic(w, c, over = {}) {
   const s = await w.http("PUT", `/jobsearch/candidates/${c.id}/settings`, w.tokens.admin, { ...AUTO(c), ...over });
   assert.equal(s.status, 200, JSON.stringify(s.body));
   assert.equal(s.body.admin_approved_by, w.users.admin);
-  await E.approveAutomation(w, c);
+  await E.approveAutomation(w, c, { countries: s.body.allowed_countries && s.body.allowed_countries.length ? s.body.allowed_countries : ["Canada"] });
 }
 const supportText = (emp, extra = "") => `Electrician for industrial wiring, conduit bending and PLC troubleshooting. English required. Visa sponsorship available. International applicants are welcome. ${extra}Send your CV to ${emp.contact || `jobs@${emp.domain}`}.`;
 async function confirmSupport(w, emp) {

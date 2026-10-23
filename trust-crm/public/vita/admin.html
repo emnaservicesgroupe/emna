@@ -68,6 +68,7 @@
         <button type="button" role="tab" id="tab-reports" aria-controls="panel-reports" data-tab="reports" data-i18n="tab.reports">Reports</button>
         <button type="button" role="tab" id="tab-health" aria-controls="panel-health" data-tab="health" data-i18n="tab.health">Health</button>
         <button type="button" role="tab" id="tab-scheduler" aria-controls="panel-scheduler" data-tab="scheduler" data-i18n="tab.scheduler">Scheduler</button>
+        <button type="button" role="tab" id="tab-directory" aria-controls="panel-directory" data-tab="directory" data-i18n="tab.directory">Employers &amp; rules</button>
       </div>
 
       <!-- ---------------------------------------------------------- dashboard -->
@@ -235,6 +236,32 @@
         <div class="card">
           <div class="card-head"><h2 data-i18n="scheduler.title">Scheduler</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="scheduler-refresh" data-i18n="common.refresh">Refresh</button></div>
           <div id="scheduler-out"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- employers & rules -->
+      <section id="panel-directory" role="tabpanel" aria-labelledby="tab-directory" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="dir.employersTitle">Employer directory</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="directory-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <p class="small muted" data-i18n="dir.employersHint">Domain and verified contact decide where an automatic application may go. Only administrators and managers can change them; every change is audited.</p>
+          <form id="emp-search" class="filters" novalidate>
+            <div class="field"><label for="emp-q" data-i18n="dir.search">Search by name or domain</label><input id="emp-q" type="search" maxlength="100" autocomplete="off"></div>
+            <div class="btn-row"><button type="submit" class="btn small" data-i18n="dir.searchButton">Search</button></div>
+          </form>
+          <div id="emp-list" aria-live="polite"></div>
+        </div>
+        <div class="card" id="manual-card">
+          <h2 data-i18n="manual.importTitle">Add a job manually</h2>
+          <p class="small muted" data-i18n="manual.importHint">For a vacancy you found yourself. The same vacancy from a feed is recognised and not duplicated.</p>
+          <div id="manual-box"></div>
+        </div>
+        <div class="card" id="confirm-card">
+          <h2 data-i18n="conf.title">Employer-support confirmations</h2>
+          <div id="confirm-box"></div>
+        </div>
+        <div class="card" id="rules-card">
+          <h2 data-i18n="rules.title">Automation rules</h2>
+          <div id="rules-box"></div>
         </div>
       </section>
     </div>

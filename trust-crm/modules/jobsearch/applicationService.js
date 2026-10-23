@@ -614,6 +614,10 @@ async function autoApproveEligibility(application, opts = {}) {
     const keys = new Set([job.source_primary, ...(await c.query("SELECT src.key FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = $1", [app.job_id])).rows.map((r) => r.key)].filter(Boolean));
     if (!sourceLists.every((l) => l.some((k) => keys.has(k)))) reasons.push("source_not_allowed");
   }
+  // Employer scope of a rule (Task 18, POST /jobsearch/automation-rules employerIds): every rule that names
+  // employers must name this job's employer.
+  const empLists = rules.map((r) => (Array.isArray(r.employerIds) ? r.employerIds.map(Number).filter(Number.isSafeInteger) : [])).filter((l) => l.length);
+  if (empLists.length && !(job.employer_id && empLists.every((l) => l.includes(Number(job.employer_id))))) reasons.push("employer_not_allowed");
   if (settings.salary_limit !== null && settings.salary_limit !== undefined) reasons.push("salary_unverifiable");
 
   // Package: still valid, nothing sensitive, every version admin-approved.

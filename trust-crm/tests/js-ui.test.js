@@ -359,3 +359,29 @@ test("Task 18 unscanned files: the UI says 'Not scanned — an administrator mus
   assert.match(read("admin.js"), /f\.scan_status === "scan_unavailable"\) box\.appendChild\(h\("p", \{ class: "small", text: t\("cv\.unscannedNotice"\) \}\)\)/);
   assert.match(read("admin.js"), /tc\("block", b && b\.reason\)/, "blocked package reasons (attachment_unscanned) are shown in the drawer");
 });
+
+test("Task 18 admin 'Employers & rules' panel: directory, manual import (https only), confirmations (note >= 10, job vs employer-wide), automation rules; role-gated; text only", () => {
+  const html = read("admin.html");
+  const js = read("admin.js");
+  assert.match(html, /<button type="button" role="tab" id="tab-directory" aria-controls="panel-directory" data-tab="directory" data-i18n="tab\.directory">/);
+  assert.match(html, /<section id="panel-directory" role="tabpanel" aria-labelledby="tab-directory"/);
+  assert.match(js, /directory: loadDirectory/);
+  for (const call of [
+    /V\.api\("GET", "\/jobsearch\/employers" \+ qs\(/,
+    /V\.api\("PUT", "\/jobsearch\/employers\/" \+ e\.id, \{ body: patch \}\)/,
+    /V\.api\("POST", "\/jobsearch\/jobs\/manual", \{ body: bodyOut \}\)/,
+    /V\.api\("POST", "\/jobsearch\/employer-confirmations", \{ body: payload \}\)/,
+    /V\.api\("DELETE", "\/jobsearch\/employer-confirmations\/" \+ k\.id\)/,
+    /V\.api\("GET", "\/jobsearch\/employer-confirmations"\)/,
+    /V\.api\("GET", "\/jobsearch\/automation-rules"\)/,
+    /V\.api\("POST", "\/jobsearch\/automation-rules", \{ body: payload \}\)/,
+    /V\.api\("DELETE", "\/jobsearch\/automation-rules\/" \+ r\.id\)/,
+  ]) assert.match(js, call);
+  assert.match(js, /if \(u && !\/\^https:/, "manual import accepts https links only");
+  assert.match(js, /if \(n\.length < 10\) \{ note\.setAttribute\("aria-invalid", "true"\); note\.focus\(\); V\.toast\(t\("conf\.noteTooShort"\)/);
+  assert.match(js, /wide \? \{ employerId: app\.employer\.id, evidenceNote: n \} : \{ applicationId: app\.id, evidenceNote: n \}/, "job-specific vs employer-wide");
+  assert.match(js, /\$\("#confirm-card"\)\.hidden = !isAdmin\(\);\s*\$\("#rules-card"\)\.hidden = !isAdmin\(\);/);
+  assert.match(js, /function canEditEmployers\(\) \{ return isAdmin\(\) \|\| role\(\) === "Manager"; \}/);
+  const en = I18N.dictionaries.en;
+  for (const k of ["conf.scopeJobHint", "conf.scopeEmployerHint", "rules.hint", "ruleType.auto_submit", "ruleType.ack_reply"]) assert.ok(en[k], k);
+});

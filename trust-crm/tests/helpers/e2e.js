@@ -203,22 +203,27 @@ async function onboard(w, key, staffKey, { cvText, prefs = {}, consent = {}, set
   return c;
 }
 
-/** Automatic mode needs an admin-approved automation rule; there is no HTTP API for rules (admin data). */
-async function approveAutomation(w, c) {
-  await w.q("INSERT INTO js_automation_rules (candidate_id, rule, approved_by, approved_at, active) VALUES ($1,'{}'::jsonb,$2,now(),true)", [c.id, w.users.admin]);
+/** Automatic mode needs an admin-approved automation rule, created through POST /jobsearch/automation-rules (Task 18). */
+async function approveAutomation(w, c, { countries = ["Canada"] } = {}) {
+  const r = await w.http("POST", "/jobsearch/automation-rules", w.tokens.admin, { candidateId: c.id, type: "auto_submit", countries });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  return r.body.id;
 }
 
 /**
- * Employer directory row (domain + verified contact are staff-maintained data; no HTTP API exists).
- * The name matches what the feed upserts, so fixture jobs attach to it.
+ * Employer directory row. Employers are created by feeds/manual imports (no create API), so the row is
+ * inserted; the staff-maintained domain + verified contact are set through PUT /jobsearch/employers/:id
+ * (Task 18). The name matches what the feed upserts, so fixture jobs attach to it.
  */
 async function employer(w, name, { domain, contact = true } = {}) {
   const { normalizeEmployer } = require("../../modules/jobsearch/jobStore");
-  const row = await w.one(
-    "INSERT INTO js_employers (name, normalized_name, domain, verified_contact_email) VALUES ($1,$2,$3,$4) RETURNING *",
-    [name, normalizeEmployer(name), domain || null, contact && domain ? `jobs@${domain}` : null]
-  );
-  return { id: row.id, name, domain, contact: row.verified_contact_email };
+  const row = await w.one("INSERT INTO js_employers (name, normalized_name) VALUES ($1,$2) RETURNING *", [name, normalizeEmployer(name)]);
+  if (domain) {
+    const put = await w.http("PUT", `/jobsearch/employers/${row.id}`, w.tokens.admin, { domain, verifiedContactEmail: contact ? `jobs@${domain}` : null });
+    assert.equal(put.status, 200, JSON.stringify(put.body));
+    return { id: row.id, name, domain: put.body.domain, contact: put.body.verifiedContactEmail };
+  }
+  return { id: row.id, name, domain, contact: null };
 }
 
 function feedJob(w, emp, { id, title = "Electrician", text, closingAt, url, country = "Canada", location = "Toronto, ON" } = {}) {

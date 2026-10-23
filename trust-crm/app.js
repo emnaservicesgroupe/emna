@@ -18,6 +18,7 @@ const jobsearchSubmissionsRoutes = require("./routes/jobsearchSubmissions");
 const jobsearchAdminRoutes = require("./routes/jobsearchAdmin");
 const jobsearchInboxRoutes = require("./routes/jobsearchInbox");
 const jobsearchReportsRoutes = require("./routes/jobsearchReports");
+const jobsearchDirectoryRoutes = require("./routes/jobsearchDirectory");
 const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler");
 const { mountVita } = require("./routes/vitaStatic");
 const { trustProxySetting } = require("./utils/trustProxy");
@@ -63,6 +64,7 @@ app.use("/jobsearch", jobsearchSubmissionsRoutes);
 app.use("/jobsearch", jobsearchAdminRoutes);
 app.use("/jobsearch", jobsearchInboxRoutes);
 app.use("/jobsearch", jobsearchReportsRoutes);
+app.use("/jobsearch", jobsearchDirectoryRoutes);
 
 // VITA web UI (static, strict CSP): GET /vita -> /vita/
 mountVita(app);
