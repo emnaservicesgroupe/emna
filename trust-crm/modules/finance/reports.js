@@ -9,7 +9,6 @@ const c = require("./common");
 const { HttpError } = c;
 const db = () => require("../../db");
 
-const PG_INT_MAX = 2147483647;
 /** Issue date of an invoice (UTC day; legacy rows without issued_at fall back to created_at). */
 const INVOICE_DATE = "COALESCE(i.issued_at AT TIME ZONE 'UTC', i.created_at)::date";
 const LIVE_INVOICE = "i.is_deleted = false AND i.voided_at IS NULL AND i.status <> 'Void'";
@@ -175,8 +174,7 @@ async function byStaff(user, query = {}) {
  */
 async function candidateStatement(user, rawId) {
   c.requirePerm(user, "finance:read");
-  const id = c.parseId(rawId);
-  if (id > PG_INT_MAX) throw new HttpError(404, "Candidate not found");
+  const id = c.parseId(rawId, { notFound: "Candidate not found" });
   const cand = (await db().query("SELECT id, full_name FROM candidates WHERE id = $1 AND is_deleted = false", [id])).rows[0];
   if (!cand) throw new HttpError(404, "Candidate not found");
   const entries = `

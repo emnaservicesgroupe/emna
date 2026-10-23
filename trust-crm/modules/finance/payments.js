@@ -21,7 +21,6 @@ const REF_MAX = 120;
 const NOTES_MAX = 500;
 const KEY_MAX = 100;
 const REASON_MAX = 500;
-const PG_INT_MAX = 2147483647;
 
 const PAYMENT_SELECT = `SELECT p.id, p.invoice_id, p.candidate_id, p.amount_paid::text AS amount_paid, p.payment_method,
        to_char(p.payment_date, 'YYYY-MM-DD') AS payment_date, p.receipt_number, p.reference, p.notes, p.created_by, p.created_at,
@@ -32,16 +31,9 @@ const PAYMENT_SELECT = `SELECT p.id, p.invoice_id, p.candidate_id, p.amount_paid
   JOIN candidates c ON c.id = p.candidate_id
   CROSS JOIN LATERAL (SELECT COALESCE(SUM(f.amount), 0)::numeric(14,2) AS refunded FROM fin_refunds f WHERE f.payment_id = p.id) r`;
 
-const invoiceId = (raw) => {
-  const id = c.parseId(raw);
-  if (id > PG_INT_MAX) throw new HttpError(404, "Invoice not found");
-  return id;
-};
-const paymentId = (raw) => {
-  const id = c.parseId(raw);
-  if (id > PG_INT_MAX) throw new HttpError(404, "Payment not found");
-  return id;
-};
+// invoice_id only ever arrives in a body or a query string (400 when out of range); payment ids are path ids (404).
+const invoiceId = (raw) => c.parseId(raw, { label: "invoice_id" });
+const paymentId = (raw) => c.parseId(raw, { notFound: "Payment not found" });
 
 function normalizeMethod(v, label = "payment_method") {
   const s = typeof v === "string" ? v.trim().toLowerCase().replace(/[\s-]+/g, "_") : "";
@@ -76,6 +68,25 @@ function parseCreate(input) {
 function normalizeMethodStrict(v) {
   if (typeof v !== "string" || !METHODS.includes(v)) throw new HttpError(400, `method must be one of ${METHODS.join(", ")}`);
   return v;
+}
+
+/**
+ * The payment_date rules shared by POST /finance/payments/v2 and the legacy POST /finance/payments: not after
+ * today + 1 day (UTC, timezone slack) and not more than a year before the invoice was issued. No date = today = fine.
+ */
+async function assertPaymentDate(client, invoiceId, paymentDate) {
+  if (!paymentDate) return;
+  const d = (
+    await client.query(
+      `SELECT $1::date > (now() AT TIME ZONE 'UTC')::date + 1 AS future,
+              $1::date < ((COALESCE(i.issued_at AT TIME ZONE 'UTC', i.created_at))::date - interval '1 year') AS too_old
+         FROM invoices i WHERE i.id = $2`,
+      [paymentDate, invoiceId]
+    )
+  ).rows[0];
+  if (!d) throw new HttpError(404, "Invoice not found");
+  if (d.future) throw new HttpError(400, "payment_date cannot be in the future");
+  if (d.too_old) throw new HttpError(400, "payment_date is more than a year before the invoice was issued");
 }
 
 /**
@@ -142,12 +153,17 @@ async function findIdempotent(client, v) {
   if (!v.key) return null;
   const ex = (
     await client.query(
-      "SELECT id, invoice_id, payment_method, (amount_paid = $3::numeric) AS same_amount FROM payments WHERE invoice_id = $1 AND idempotency_key = $2 AND is_deleted = false",
-      [v.invoiceId, v.key, v.amount]
+      `SELECT id, invoice_id,
+              (amount_paid = $3::numeric AND payment_method = $4
+               AND ($5::date IS NULL OR payment_date = $5::date)
+               AND reference IS NOT DISTINCT FROM $6::text AND notes IS NOT DISTINCT FROM $7::text) AS same
+         FROM payments WHERE invoice_id = $1 AND idempotency_key = $2 AND is_deleted = false`,
+      [v.invoiceId, v.key, v.amount, v.method, v.paymentDate, v.reference, v.notes]
     )
   ).rows[0];
   if (!ex) return null;
-  if (!ex.same_amount || ex.payment_method !== v.method) throw new HttpError(409, "idempotency_key was already used with a different amount or method");
+  // A replay is only a replay when every business parameter matches (payment_date only when the caller sent one).
+  if (!ex.same) throw new HttpError(409, "idempotency key reused with different parameters");
   return ex;
 }
 
@@ -165,18 +181,7 @@ async function createPayment(user, input) {
       if (!inv) throw new HttpError(404, "Invoice not found");
       const ex = await findIdempotent(client, v);
       if (ex) return replayView(client, ex);
-      if (v.paymentDate) {
-        const d = (
-          await client.query(
-            `SELECT $1::date > (now() AT TIME ZONE 'UTC')::date + 1 AS future,
-                    $1::date < ((COALESCE(i.issued_at AT TIME ZONE 'UTC', i.created_at))::date - interval '1 year') AS too_old
-               FROM invoices i WHERE i.id = $2`,
-            [v.paymentDate, inv.id]
-          )
-        ).rows[0];
-        if (d.future) throw new HttpError(400, "payment_date cannot be in the future");
-        if (d.too_old) throw new HttpError(400, "payment_date is more than a year before the invoice was issued");
-      }
+      await assertPaymentDate(client, inv.id, v.paymentDate);
       await assertPayable(client, inv, v.amount);
       const res = await postPayment(client, user, inv, v);
       return { payment: await loadPayment(client, res.payment.id), invoice: await invoiceView(client, inv.id), replayed: false };
@@ -336,7 +341,7 @@ async function listPayments(user, query = {}) {
   const inv = one("invoice_id");
   if (inv !== undefined) where.push(`p.invoice_id = ${add(invoiceId(inv))}`);
   const cand = one("candidate_id");
-  if (cand !== undefined) where.push(`p.candidate_id = ${add(c.parseId(cand))}`);
+  if (cand !== undefined) where.push(`p.candidate_id = ${add(c.parseId(cand, { label: "candidate_id" }))}`);
   const method = one("method");
   if (method !== undefined) where.push(`p.payment_method = ${add(normalizeMethodStrict(method))}`);
   const from = one("from");
@@ -435,4 +440,4 @@ async function receiptHtml(user, rawId, { lang = "en" } = {}) {
   }
 }
 
-module.exports = { createPayment, voidPayment, refundPayment, listPayments, receiptHtml, renderReceiptHtml, postPayment, assertPayable, normalizeMethod, METHODS, LANGS };
+module.exports = { createPayment, voidPayment, refundPayment, listPayments, receiptHtml, renderReceiptHtml, postPayment, assertPayable, assertPaymentDate, normalizeMethod, METHODS, LANGS };

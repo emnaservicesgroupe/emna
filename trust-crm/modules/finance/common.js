@@ -1,6 +1,41 @@
 // Shared helpers for the accounting services: permission guard, id/date/currency/text validation, transactions.
 const { HttpError } = require("../jobsearch/httpError");
-const { hasPerm, parseId, inTransaction } = require("../crm/leadsAdmin");
+const { hasPerm, inTransaction: rawInTransaction } = require("../crm/leadsAdmin");
+
+/** Largest value of a Postgres INT column; ids above it can never exist and must not reach SQL (22003 -> 500). */
+const PG_INT_MAX = 2147483647;
+
+/**
+ * Parses a positive integer id (a number or a digit string). Malformed values are a 400 naming `label`.
+ * An id above PG_INT_MAX is a 404 `notFound` when the caller passes the message (path ids), otherwise a 400 (body and
+ * query fields, where the value is the caller's input, not a resource address).
+ */
+function parseId(raw, { label = "id", notFound = null } = {}) {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && /^\d{1,15}$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n <= 0) throw new HttpError(400, `${label} must be a positive integer`);
+  if (n > PG_INT_MAX) throw notFound ? new HttpError(404, notFound) : new HttpError(400, `${label} is too large`);
+  return n;
+}
+
+// The legacy tables carry CHECK constraints that 016 added NOT VALID: Postgres re-checks them on every UPDATE of an
+// existing row, so a record with data the rules reject (currency 'TN', status 'Unpaid', ...) fails the write with 23514.
+// That is a data problem the owner has to fix, not a server fault: answer 409 and never echo the constraint text.
+const LEGACY_TABLES = new Set(["invoices", "payments", "expenses", "fin_ledger"]);
+function legacyDataError(err) {
+  if (!err || err.code !== "23514" || !LEGACY_TABLES.has(String(err.table || ""))) return null;
+  const name = String(err.constraint || "");
+  const field = /currency/.test(name) ? "currency" : /method/.test(name) ? "method" : /status/.test(name) ? "status" : "currency/method";
+  return new HttpError(409, `this record has legacy data that must be corrected: ${field}`);
+}
+
+/** The shared transaction wrapper, with legacy check violations (23514) turned into a clean 409. */
+async function inTransaction(fn) {
+  try {
+    return await rawInTransaction(fn);
+  } catch (err) {
+    throw legacyDataError(err) || err;
+  }
+}
 
 const likeEscape = (s) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -92,4 +127,4 @@ async function nextNumber(client, prefix, counter, nowArg = null) {
   return { number: `${prefix}-${clock.y}-${row.value.padStart(6, "0")}`, ts: clock.ts, year: clock.y };
 }
 
-module.exports = { nextNumber, HttpError, hasPerm, parseId, inTransaction, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, parseRange, oneValue, pageParams };
+module.exports = { nextNumber, HttpError, hasPerm, parseId, inTransaction, legacyDataError, PG_INT_MAX, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, parseRange, oneValue, pageParams };

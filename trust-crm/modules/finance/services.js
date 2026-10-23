@@ -78,7 +78,7 @@ async function createService(user, input) {
 
 async function updateService(user, rawId, input) {
   c.requirePerm(user, "finance:write");
-  const id = c.parseId(rawId);
+  const id = c.parseId(rawId, { notFound: "Service not found" });
   const v = validate(input, { creating: false });
   if (!Object.keys(v).length) throw new HttpError(400, "No fields to update");
   return c.inTransaction(async (client) => {

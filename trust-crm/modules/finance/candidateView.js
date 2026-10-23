@@ -11,7 +11,6 @@ const invoices = require("./invoices");
 const { HttpError } = c;
 const db = () => require("../../db");
 
-const PG_INT_MAX = 2147483647;
 const MAX_INVOICES = 200;
 const notFound = () => new HttpError(404, "Not found");
 
@@ -92,8 +91,7 @@ async function me(user) {
 async function printMyInvoice(user, rawId, { lang = "en" } = {}) {
   requireCandidate(user);
   if (typeof lang !== "string" || !invoices.LANGS.includes(lang)) throw new HttpError(400, `lang must be one of ${invoices.LANGS.join(", ")}`);
-  const id = c.parseId(rawId);
-  if (id > PG_INT_MAX) throw notFound();
+  const id = c.parseId(rawId, { notFound: notFound().message });
   const client = await db().connect();
   try {
     const cand = await ownCandidateId(client, user.id);

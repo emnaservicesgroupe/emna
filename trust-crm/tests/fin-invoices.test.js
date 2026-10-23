@@ -572,3 +572,38 @@ test("legacy finance endpoints keep working next to v2 (and only /finance/me sty
     assert.equal((await http("GET", "/finance/dashboard", T.cand)).status, 403);
     assert.equal((await http("POST", "/finance/invoices", T.agent, { candidate_id: c, total_amount: 1 })).status, 403);
   }));
+
+// ------------------------------------------------------------------------------------------------ review round 1: oversized ids
+test("review 1 / item 2: ids above the Postgres int range never reach SQL (404 for path ids, 400 for body and query fields)", () =>
+  withWorld(async ({ http, T, candidate }) => {
+    const BIG = "99999999999";
+    const c = await candidate();
+    const one = { items: [{ description: "x", quantity: 1, unit_price: "1" }] };
+    const path404 = [
+      ["GET", `/finance/invoices/${BIG}`], ["GET", `/finance/invoices/${BIG}/print`], ["POST", `/finance/invoices/${BIG}/void`, { reason: "x" }],
+      ["GET", `/finance/invoices/2147483648`], ["GET", `/finance/invoices/2147483647`],
+      ["GET", `/finance/payments/${BIG}/receipt`], ["POST", `/finance/payments/${BIG}/void`, { reason: "x" }], ["POST", `/finance/payments/${BIG}/refund`, { amount: "1", reason: "x" }],
+      ["POST", `/finance/expenses/${BIG}/void`, { reason: "x" }], ["PATCH", `/finance/expense-categories/${BIG}`, { name: "n" }], ["PATCH", `/finance/services/${BIG}`, { active: false }],
+      ["GET", `/finance/reports/candidate/${BIG}`],
+    ];
+    for (const [m, u, b] of path404) {
+      const r = await http(m, u, T.acct, b);
+      assert.equal(r.status, 404, `${m} ${u} -> ${r.status} ${r.text}`);
+    }
+    const field400 = [
+      ["GET", `/finance/invoices?candidate_id=${BIG}`], ["GET", `/finance/payments?candidate_id=${BIG}`], ["GET", `/finance/payments?invoice_id=${BIG}`], ["GET", `/finance/expenses?category_id=${BIG}`],
+      ["POST", "/finance/invoices/v2", { candidate_id: Number(BIG), currency: "TND", ...one }], ["POST", "/finance/invoices/v2", { candidate_id: BIG, currency: "TND", ...one }],
+      ["POST", "/finance/invoices/v2", { candidate_id: c, currency: "TND", items: [{ service_id: Number(BIG), quantity: 1 }] }],
+      ["POST", "/finance/invoices/v2", { candidate_id: c, currency: "TND", items: [{ service_id: BIG, quantity: 1, unit_price: "1" }] }],
+      ["POST", "/finance/payments/v2", { invoice_id: BIG, amount: "1", method: "cash" }], ["POST", "/finance/payments/v2", { invoice_id: Number(BIG), amount: "1", method: "cash" }],
+      ["POST", "/finance/expenses", { title: "t", amount: "1", currency: "TND", spent_on: "2026-01-01", category_id: Number(BIG) }],
+      ["POST", "/finance/invoices", { candidate_id: BIG, total_amount: "5" }], ["POST", "/finance/payments", { invoice_id: BIG, amount_paid: "5" }],
+    ];
+    for (const [m, u, b] of field400) {
+      const r = await http(m, u, T.acct, b);
+      assert.equal(r.status, 400, `${m} ${u} ${JSON.stringify(b || "")} -> ${r.status} ${r.text}`);
+      assert.doesNotMatch(r.text, /out of range for type|invalid input syntax/i, "no database text");
+    }
+    // the largest valid id is accepted and simply not found / empty
+    assert.equal((await http("GET", "/finance/invoices?candidate_id=2147483647", T.acct)).body.total, 0);
+  }));

@@ -9,15 +9,20 @@ Status of Stage 4 (accounting). Items are ticked only when a test or a manual ch
       (otherwise they stay `NOT VALID` and guard new rows; re-running the migration validates them after the data is fixed).
 - [x] `fin_ledger` is insert-only (UPDATE, DELETE and TRUNCATE are rejected by trigger).
 
-## fin_opening — opening balance (no backfill)
+## Legacy rows: normalisation and opening ledger entries (migration 017)
 
-Migration 016 does **not** backfill `fin_ledger` from invoices/payments/expenses that existed before accounting went live.
-The ledger therefore starts empty and only contains postings made after the migration. Legacy rows keep their original
-values and no invoice/receipt number (`number` / `receipt_number` stay NULL).
+Migration 017 (`sql/migrations/017_accounting_fixes.sql`; idempotent, 016 is untouched) does three things for rows that existed before accounting went live:
 
-Before relying on ledger totals, the accountant records the **opening balance** per currency as of the go-live date
-(sum of legacy `invoices.remaining_amount` for non-deleted invoices, per currency) and keeps it with the month-end
-records. Reports that read the ledger are "since go-live"; reports that read the invoice/payment tables include legacy rows.
+1. **Normalises** the values the 016 CHECK constraints reject: `payments.payment_method` is lower-cased, trimmed, spaces/hyphens become `_`, mapped to
+   `cash | bank_transfer | card | mobile | cheque | other` (unknown -> `other`); `invoices.currency` / `expenses.currency` are trimmed and upper-cased when that gives
+   three letters A-Z. Nothing else changes (no `updated_at`, no ids, no amounts). Anything still non-conforming (for example currency `TN`, status `Unpaid`) is left alone.
+2. **Validates** the `NOT VALID` constraints that now conform (the others keep guarding new rows and are validated by a later run after the data is corrected).
+3. **Backfills opening ledger entries** (`kind` invoice = debit `total_amount`, payment = credit `amount_paid`, expense = debit `amount`; `entry_at` = the row's `created_at`,
+   actor = its `created_by`) for non-deleted legacy rows that have no ledger row, keyed by `NOT EXISTS (ref_table, ref_id, kind)`, so a re-run adds nothing. A legacy payment/expense
+   voided after 016 also gets its opening entry (its reversing `void` entry already exists). Rows with a currency the ledger cannot store wait until it is corrected.
+
+Legacy invoices and receipts stay **unnumbered** (`number` / `receipt_number` NULL). The per-invoice ledger identity now holds for legacy invoices too
+(`tests/fin-schema.test.js`). Recording the opening balance by hand is no longer needed.
 
 ## Payments, receipts, refunds (Task 3)
 
@@ -25,13 +30,13 @@ records. Reports that read the ledger are "since go-live"; reports that read the
       Void / Paid / Refunded / Draft invoices refused (409), remaining and status (Partial / Paid) computed in SQL NUMERIC.
 - [x] Receipt numbers `REC-YYYY-NNNNNN` from `fin_counters` (`receipt-YYYY`), unique and gap-free; a rejected payment burns no number.
 - [x] Idempotency: same `(invoice_id, idempotency_key)` returns the original payment (200, `replayed: true`); a different
-      amount or method with the same key is 409.
+      amount, method, payment date (when sent), reference or notes with the same key is 409 "idempotency key reused with different parameters".
 - [x] `POST /finance/payments/:id/void` (finance:void): restores invoice remaining/status, reversing ledger debit; refused
       (409) when the payment has refunds or is already void.
 - [x] Legacy `POST /finance/invoices` and `POST /finance/payments` validate currency (3 letters, upper-cased), payment method
       (case-insensitive map to cash|bank_transfer|card|mobile|cheque|other) and amounts (400 instead of a database 500), compare
       money in SQL, and also assign the invoice / receipt number and write the ledger row. Response shapes are unchanged.
-- [x] Legacy `/finance/dashboard` ignores voided invoices and voided payments.
+- [x] Legacy `/finance/dashboard` ignores voided invoices and voided payments; `total_in` is net of refunds (collected - refunded, same rows as `/finance/reports/summary`).
 
 ### Refund rule (decision)
 
@@ -108,7 +113,7 @@ A refund **returns money to the candidate and does not reopen the debt**, unless
 | §1 platform records, does not move money | by design (no gateway) | n/a |
 | §2 roles and `finance:void` / `refund` / `export` | completed | `fin-schema`, `fin-e2e`, `fin-ui` |
 | §3 migration 016, additive, idempotent, insert-only ledger | completed | `fin-schema`, `migrate`, `verify-migrations` |
-| §3 backfill of legacy rows into the ledger | **not done on purpose** (opening balance, see `fin_opening`) | `fin-schema` |
+| §3 backfill of legacy rows into the ledger | completed in migration 017 (opening entries; legacy numbers stay unnumbered) | `fin-schema` |
 | §4 services, invoices (create, list, get, void, print) | completed | `fin-invoices`, `fin-e2e` |
 | §4 payments (idempotency, overpayment, void, refund, receipt) | completed | `fin-payments`, `fin-e2e` |
 | §4 expenses, categories, void | completed | `fin-reports`, `fin-e2e` |
@@ -121,11 +126,10 @@ A refund **returns money to the candidate and does not reopen the debt**, unless
 
 ## Opening balances of pre-existing legacy invoices (how reports treat them)
 
-Invoices and payments created before migration 016 keep their values, have no `number` / `receipt_number`, no items and **no ledger rows**.
-Reports and the candidate view read the `invoices`, `payments`, `fin_refunds` and `expenses` tables, not the ledger, so a legacy row **is** counted:
-as an invoice (dated by `created_at`, because `issued_at` is empty), as an open receivable (its `remaining_amount`, ageing by `due_date`), and as a
-payment (by `payment_date`). The only place that is "since go-live" is `fin_ledger` itself (and anything you total from it directly). Legacy rows
-without a currency are `TND` (the old column default). The ledger identity above is therefore verified for numbered invoices only.
+Invoices and payments created before migration 016 keep their values, have no `number` / `receipt_number` (unnumbered) and no items. Since migration 017 they
+also have one opening **ledger** row each (see above), so ledger and tables agree. Reports and the candidate view read the `invoices`, `payments`, `fin_refunds`
+and `expenses` tables, so a legacy row is counted: as an invoice (dated by `created_at`, because `issued_at` is empty), as an open receivable (its
+`remaining_amount`, ageing by `due_date`), and as a payment (by `payment_date`). Legacy rows without a currency are `TND` (the old column default).
 
 ## Honest limits and known gaps
 
@@ -147,3 +151,28 @@ without a currency are `TND` (the old column default). The ledger identity above
   - Amounts are limited to 10 integer digits, quantities to 2 decimals, an invoice to 50 lines, text fields to their documented lengths.
   - Candidate list `GET /finance/me` returns the newest 200 invoices.
 - Not covered by any test: the print/receipt pages in a real browser's print dialog, Arabic font rendering on paper, very large datasets (the CSV cap is the guard), a restore from backup of the ledger.
+
+## Review round 1 (independent accounting review)
+
+Fixed, each with a failing test first (`fin-schema`, `fin-payments`, `fin-invoices`, `fin-reports`):
+
+- [x] **Legacy data vs the NOT VALID checks** (migration 017): normalisation and validation as described above. Records that still hold a non-conforming currency/status
+      answer **409** "this record has legacy data that must be corrected: currency" (never 500, never the constraint name) from the invoice, payment, refund, void and
+      legacy routes (a Postgres 23514 raised inside a finance transaction is translated in `modules/finance/common.js`).
+- [x] **Oversized ids**: `parseId` in `modules/finance/common.js` refuses ids above 2147483647: 404 for path ids, 400 for body and query fields
+      (candidate_id, invoice_id, payment_id, service_id, category_id, expense_id), on every route including the legacy ones (the legacy POSTs used to answer 404 for an oversized body id; they now answer 400).
+- [x] **Legacy `POST /finance/payments`** applies the same `payment_date` rules as v2 (not after today + 1 day, not more than a year before the invoice was issued) through one shared checker.
+- [x] **Idempotency replay** compares amount, method, payment date (when sent), reference and notes; any difference is 409 "idempotency key reused with different parameters".
+- [x] **Fully refunded payments** (net zero) no longer block voiding the invoice and do not have to be voided; a payment that still holds money does (409). The void posts the usual
+      reversal for the invoice only, the ledger nets to zero. The UI helper `canVoidInvoice` does not look at payments (the server decides), so it needed no change.
+- [x] **Legacy `/finance/dashboard` `total_in`** subtracts refunds; it equals `summary` collected - refunded (response keys unchanged).
+- [x] **Legacy rows and the ledger**: opening ledger entries backfilled (migration 017), documented here and in SETUP.md.
+- [x] **CSV**: the spreadsheet-injection guard now also covers a leading LF and the full-width lookalikes `＝ ＋ － ＠`.
+
+Remaining limits:
+
+- A refund **without** `reopen` leaves `remaining_amount` unchanged (money returned, debt not reopened), so the candidate's `/finance/me` totals show `paid` and `refunded`
+  while `remaining` stays 0: a display oddity, not a calculation error. Use `reopen: true` when the candidate owes the money again.
+- The invoice/receipt print page opened from the console is a blob page and does not carry the server's strict CSP header (the server-rendered print routes do).
+- The CSV guard covers a leading `= + - @ TAB CR LF` and the four full-width lookalikes; other Unicode characters that some spreadsheets might treat as formula starts are not guarded.
+- A legacy record with a currency that is not three letters, or an old status such as `Unpaid`, is never auto-corrected (it would be a guess): it is read-only until the owner fixes it, and it gets no opening ledger entry until then.

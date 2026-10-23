@@ -11,6 +11,7 @@ const { PERMISSIONS } = require("../middleware/role");
 const ROOT = path.join(__dirname, "..");
 const MIG = path.join(ROOT, "sql", "migrations");
 const SQL016 = () => fs.readFileSync(path.join(MIG, "016_accounting.sql"), "utf8");
+const SQL017 = () => fs.readFileSync(path.join(MIG, "017_accounting_fixes.sql"), "utf8");
 
 async function withDb(fn) {
   const { pool, cleanup } = await createTestDb();
@@ -227,55 +228,157 @@ test("DB with conforming legacy invoices/payments migrates cleanly, rows untouch
     await pay(pool, i, c, "cash");
     await pool.query("INSERT INTO expenses (title,amount) VALUES ('rent',12.50)");
     const before = await snapshot(pool);
-    assert.deepEqual(await db.runAll(), ["016_accounting.sql"]);
-    assert.deepEqual(await snapshot(pool), before, "no legacy value changed");
+    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql"]);
+    assert.deepEqual(await snapshot(pool), before, "no legacy value changed (all of it already conformed, so 017 normalises nothing)");
     const nul = await pool.query("SELECT count(*)::int n FROM invoices WHERE number IS NOT NULL OR subtotal IS NOT NULL OR issued_at IS NOT NULL");
     assert.equal(nul.rows[0].n, 0, "new columns stay NULL on legacy rows");
-    assert.equal((await pool.query("SELECT count(*)::int n FROM fin_ledger")).rows[0].n, 0, "no ledger backfill");
+    // 017 backfills the opening ledger rows: 2 live invoices (the deleted one gets none), 1 payment, 1 expense
+    assert.deepEqual((await pool.query("SELECT kind, count(*)::int n FROM fin_ledger GROUP BY kind ORDER BY kind")).rows, [{ kind: "expense", n: 1 }, { kind: "invoice", n: 2 }, { kind: "payment", n: 1 }]);
     assert.deepEqual(await constraintState(pool, "invoices_status_check"), [{ convalidated: true }]);
     assert.deepEqual(await constraintState(pool, "invoices_currency_check"), [{ convalidated: true }]);
     assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='payments_method_check' AND conrelid = to_regclass('payments')")).rows[0].convalidated, true);
     await pool.query(SQL016()); // re-run is safe with data present
+    await pool.query(SQL017());
+    assert.equal((await pool.query("SELECT count(*)::int n FROM fin_ledger")).rows[0].n, 4, "re-running adds nothing");
   } finally {
     await db.cleanup();
   }
 });
 
-test("DB with non-conforming legacy rows migrates without rejecting them; constraints stay NOT VALID but guard new rows", async () => {
+test("DB with non-conforming legacy rows: 016 leaves them alone, 017 normalises what it can and validates what then conforms", async () => {
   const db = await legacyDb();
   try {
     const { pool } = db;
     const c = await cand(pool);
     await pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,100,60,'TND','Unpaid')", [c]);
     await pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,10,10,'tnd','Pending')", [c]);
+    await pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,20,20,' eur ','Pending')", [c]);
+    await pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,30,30,'TN','Pending')", [c]);
     const i = (await pool.query("SELECT id FROM invoices ORDER BY id LIMIT 1")).rows[0].id;
     await pay(pool, i, c, "Bank Transfer");
+    await pay(pool, i, c, "  CHEQUE ");
+    await pay(pool, i, c, "Western-Union");
+    await pool.query("INSERT INTO expenses (title,amount,currency) VALUES ('e1',1,'tnd'), ('e2',2,'XX')");
     const before = await snapshot(pool);
-    assert.deepEqual(await db.runAll(), ["016_accounting.sql"]);
+
+    // 016 alone changes nothing and leaves the constraints NOT VALID (this is the state the review found)
+    const dir016 = fs.mkdtempSync(path.join(os.tmpdir(), "mig-016-"));
+    for (const f of fs.readdirSync(MIG).filter((x) => x <= "016_accounting.sql")) fs.copyFileSync(path.join(MIG, f), path.join(dir016, f));
+    const { runMigrations } = require("../scripts/migrate");
+    assert.deepEqual(await runMigrations(pool, dir016), ["016_accounting.sql"]);
+    fs.rmSync(dir016, { recursive: true, force: true });
     assert.deepEqual(await snapshot(pool), before);
-    assert.deepEqual(await constraintState(pool, "invoices_status_check"), [{ convalidated: false }]);
     assert.deepEqual(await constraintState(pool, "invoices_currency_check"), [{ convalidated: false }]);
     assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='payments_method_check' AND conrelid = to_regclass('payments')")).rows[0].convalidated, false);
-    await pool.query(SQL016()); // idempotent while still non-conforming
+
+    assert.deepEqual(await db.runAll(), ["017_accounting_fixes.sql"]);
+    const after = await snapshot(pool);
+    // the invoice with the legacy status 'Unpaid' cannot be updated (NOT VALID checks re-run on UPDATE): its currency was already fine
+    assert.deepEqual(after.invoices.map((r) => r.currency), ["TND", "TND", "EUR", "TN"]);
+    assert.deepEqual(after.invoices.map((r) => r.status), ["Unpaid", "Pending", "Pending", "Pending"], "status values are never rewritten");
+    assert.deepEqual(after.payments.map((r) => r.payment_method), ["bank_transfer", "cheque", "other"]);
+    assert.deepEqual(after.expenses.map((r) => r.currency), ["TND", "XX"], "an unfixable currency is left exactly as it was");
+    for (const [a, b] of [[after.invoices, before.invoices], [after.payments, before.payments], [after.expenses, before.expenses]]) {
+      assert.deepEqual(a.map((r) => [r.id, r.created_at]), b.map((r) => [r.id, r.created_at]), "ids and timestamps untouched");
+    }
+    assert.deepEqual(after.invoices.map((r) => r.updated_at), before.invoices.map((r) => r.updated_at), "updated_at untouched");
+    // payment_method is now fully conforming -> validated; the currency constraints still have a 'TN' / 'XX' row
+    assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='payments_method_check' AND conrelid = to_regclass('payments')")).rows[0].convalidated, true);
+    assert.deepEqual(await constraintState(pool, "invoices_currency_check"), [{ convalidated: false }]);
+    assert.deepEqual(await constraintState(pool, "invoices_status_check"), [{ convalidated: false }]);
+    assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='expenses_currency_check' AND conrelid = to_regclass('expenses')")).rows[0].convalidated, false);
+    await pool.query(SQL017()); // idempotent while still non-conforming
+    await pool.query(SQL016());
     // new rows are still guarded
     await assert.rejects(pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,status) VALUES ($1,1,1,'Unpaid')", [c]), /check constraint/i);
     await assert.rejects(pay(pool, i, c, "Bank Transfer"), /check constraint/i);
-    // the legacy payment flow (finance.js: UPDATE remaining_amount/status) keeps working on a grandfathered row whose
-    // only violation is the old status; a row with a non-conforming currency must be corrected first (NOT VALID
-    // constraints are re-checked on UPDATE by Postgres)
-    await pool.query("UPDATE invoices SET remaining_amount=0, status='Paid' WHERE id=$1", [i]);
-    // once the data is fixed by the owner, re-running validates the constraints
-    await pool.query("UPDATE payments SET payment_method='bank_transfer'");
-    await pool.query("UPDATE invoices SET currency='TND'");
-    await pool.query(SQL016());
+    // once the owner corrects the rest, re-running validates the constraints
+    await pool.query("UPDATE invoices SET status='Paid', remaining_amount=0 WHERE status='Unpaid'");
+    await pool.query("UPDATE invoices SET currency='TND' WHERE currency='TN'");
+    await pool.query("UPDATE expenses SET currency='EUR' WHERE currency='XX'");
+    await pool.query(SQL017());
     assert.deepEqual(await constraintState(pool, "invoices_status_check"), [{ convalidated: true }]);
     assert.deepEqual(await constraintState(pool, "invoices_currency_check"), [{ convalidated: true }]);
-    assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='payments_method_check' AND conrelid = to_regclass('payments')")).rows[0].convalidated, true);
+    assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='expenses_currency_check' AND conrelid = to_regclass('expenses')")).rows[0].convalidated, true);
   } finally {
     await db.cleanup();
   }
 });
 
+test("migration 017 is registered, idempotent and a no-op on a fresh database", () =>
+  withDb(async (pool) => {
+    const { runMigrations } = require("../scripts/migrate");
+    assert.equal((await pool.query("SELECT 1 FROM schema_migrations WHERE name='017_accounting_fixes.sql'")).rowCount, 1);
+    assert.deepEqual(await runMigrations(pool), []);
+    await pool.query(SQL017());
+    await pool.query(SQL017());
+    assert.equal((await pool.query("SELECT count(*)::int n FROM fin_ledger")).rows[0].n, 0, "nothing to backfill on a fresh database");
+  }));
+
+test("017 ledger backfill: opening rows for pre-016 invoices, payments and expenses; per-invoice identity holds; re-running adds nothing", async () => {
+  const db = await legacyDb();
+  try {
+    const { pool } = db;
+    const c = await cand(pool);
+    const u = (await pool.query("INSERT INTO users (full_name,email,password,role) VALUES ('Old','old@x.io','h','Admin') RETURNING id")).rows[0].id;
+    const stamp = "2025-06-01 10:00:00";
+    const mkInv = async (total, remaining, extra = "", cur = "tnd") =>
+      (await pool.query(`INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,created_by,created_at,is_deleted${extra ? "," + extra.split("=")[0] : ""}) VALUES ($1,$2,$3,$4,$5,$6,false${extra ? "," + extra.split("=")[1] : ""}) RETURNING id`, [c, total, remaining, cur, u, stamp])).rows[0].id;
+    const i1 = await mkInv(100, 70);
+    const i2 = await mkInv(40, 40, "", "EUR");
+    const bad = await mkInv(30, 30, "", "TN");
+    const gone = (await pool.query("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,is_deleted) VALUES ($1,9,9,true) RETURNING id", [c])).rows[0].id;
+    const p1 = (await pool.query("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method,created_by,created_at) VALUES ($1,$2,10,'Cash',$3,$4) RETURNING id", [i1, c, u, stamp])).rows[0].id;
+    const p2 = (await pool.query("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method,created_by,created_at) VALUES ($1,$2,20,'cash',$3,$4) RETURNING id", [i1, c, u, stamp])).rows[0].id;
+    await pool.query("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method,is_deleted) VALUES ($1,$2,3,'cash',true)", [i2, c]);
+    const e1 = (await pool.query("INSERT INTO expenses (title,amount,currency,created_by,created_at) VALUES ('rent',55.5,'tnd',$1,$2) RETURNING id", [u, stamp])).rows[0].id;
+    await pool.query("INSERT INTO expenses (title,amount,is_deleted) VALUES ('gone',5,true)");
+    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql"]);
+
+    const rows = async () => (await pool.query("SELECT kind, ref_table, ref_id::int, candidate_id, currency, debit::text d, credit::text cr, actor_id, entry_at = $1::timestamp AS at_created FROM fin_ledger ORDER BY id", [stamp])).rows;
+    const got = await rows();
+    const key = (r) => `${r.kind}:${r.ref_table}:${r.ref_id}`;
+    assert.deepEqual(
+      got.map(key).sort(),
+      [`invoice:invoices:${i1}`, `invoice:invoices:${i2}`, `payment:payments:${p1}`, `payment:payments:${p2}`, `expense:expenses:${e1}`].sort(),
+      "deleted rows and the invoice with currency 'TN' get no ledger row"
+    );
+    const inv1 = got.find((r) => key(r) === `invoice:invoices:${i1}`);
+    assert.deepEqual({ ...inv1 }, { kind: "invoice", ref_table: "invoices", ref_id: i1, candidate_id: String(c), currency: "TND", d: "100.00", cr: "0.00", actor_id: String(u), at_created: true });
+    const pay1 = got.find((r) => key(r) === `payment:payments:${p1}`);
+    assert.deepEqual({ ...pay1 }, { kind: "payment", ref_table: "payments", ref_id: p1, candidate_id: String(c), currency: "TND", d: "0.00", cr: "10.00", actor_id: String(u), at_created: true });
+    const ex = got.find((r) => r.kind === "expense");
+    assert.deepEqual({ ...ex }, { kind: "expense", ref_table: "expenses", ref_id: e1, candidate_id: null, currency: "TND", d: "55.50", cr: "0.00", actor_id: String(u), at_created: true });
+    // the per-invoice identity: ledger balance = total - live paid = remaining_amount (no refunds on legacy rows)
+    const bal = (
+      await pool.query(
+        `SELECT i.id, (COALESCE(SUM(l.debit),0) - COALESCE(SUM(l.credit),0))::text AS ledger, i.remaining_amount::text AS remaining
+           FROM invoices i LEFT JOIN fin_ledger l ON (l.ref_table='invoices' AND l.ref_id=i.id) OR (l.ref_table='payments' AND l.ref_id IN (SELECT id FROM payments WHERE invoice_id=i.id))
+          WHERE i.id = ANY($1) GROUP BY i.id ORDER BY i.id`,
+        [[i1, i2]]
+      )
+    ).rows;
+    assert.deepEqual(bal.map((r) => [r.ledger, r.remaining]), [["70.00", "70.00"], ["40.00", "40.00"]]);
+    // legacy numbers stay unnumbered
+    assert.equal((await pool.query("SELECT count(*)::int n FROM invoices WHERE number IS NOT NULL")).rows[0].n, 0);
+    assert.equal((await pool.query("SELECT count(*)::int n FROM payments WHERE receipt_number IS NOT NULL")).rows[0].n, 0);
+
+    // re-running adds nothing
+    await pool.query(SQL017());
+    await pool.query(SQL017());
+    assert.deepEqual(await rows(), got);
+    // once the odd currency is corrected, the next run picks that invoice up (and only that)
+    await pool.query("UPDATE invoices SET currency='TND' WHERE id=$1", [bad]);
+    await pool.query(SQL017());
+    const again = await rows();
+    assert.equal(again.length, got.length + 1);
+    assert.equal(again[again.length - 1].ref_id, bad);
+    await pool.query(SQL017());
+    assert.equal((await rows()).length, got.length + 1);
+  } finally {
+    await db.cleanup();
+  }
+});
 test("legacy finance route SQL (insert invoice, pay with FOR UPDATE, dashboard sums) still works after 016", () =>
   withDb(async (pool) => {
     const cid = await cand(pool);
@@ -336,8 +439,17 @@ test("SETUP.md finance permission matrix equals PERMISSIONS (docs cannot drift)"
   assert.deepEqual([...seen].sort(), Object.keys(PERMISSIONS).sort(), "every role is documented");
 });
 
-test("CHECKLIST documents the opening balance (no ledger backfill)", () => {
-  const f = path.join(ROOT, "..", "docs", "vita-accounting", "CHECKLIST.md");
-  assert.ok(fs.existsSync(f));
-  assert.match(fs.readFileSync(f, "utf8"), /fin_opening/);
+test("CHECKLIST and SETUP document the ledger backfill of migration 017 (no leftover 'no backfill' claim)", () => {
+  const dir = path.join(ROOT, "..", "docs", "vita-accounting");
+  const checklist = fs.readFileSync(path.join(dir, "CHECKLIST.md"), "utf8");
+  const setup = fs.readFileSync(path.join(dir, "SETUP.md"), "utf8");
+  assert.match(checklist, /Review round 1/);
+  assert.match(checklist, /017_accounting_fixes/);
+  assert.match(checklist, /backfill/i);
+  assert.match(checklist, /unnumbered/i);
+  assert.doesNotMatch(checklist, /fin_opening/, "the opening-balance note is replaced");
+  assert.doesNotMatch(checklist, /not done on purpose/);
+  assert.match(setup, /017/);
+  assert.match(setup, /unnumbered/i);
+  assert.doesNotMatch(setup, /fin_opening/);
 });

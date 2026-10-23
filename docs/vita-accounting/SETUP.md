@@ -1,6 +1,6 @@
 # VITA Accounting — setup and daily use
 
-Accounting is part of the same VITA app: no extra service, container or database. It is switched on by migration 016, which runs with the
+Accounting is part of the same VITA app: no extra service, container or database. It is switched on by migrations 016 and 017, which run with the
 normal update (`./update.sh` / app start). Real payments are **recorded by hand** by staff; nothing is charged automatically.
 What was and was not verified: [CHECKLIST.md](CHECKLIST.md).
 
@@ -71,9 +71,16 @@ check "My payments". Void the test invoice's payments/invoice afterwards (or use
 
 ## 5. Opening balance and old invoices
 
-Invoices and payments that existed before accounting was installed are kept as they were and are **not** copied into the ledger. They have no
-invoice/receipt number. Reports and the candidate view still count them (they read the invoice and payment tables). On the go-live day, write down per
-currency the total of the open balances of the old invoices (Receivables report) and keep that note with your month-end records.
+Invoices, payments and expenses that existed before accounting was installed keep their values and stay **unnumbered** (no invoice or receipt number).
+Migration 017 gives each of them one **opening ledger entry** (invoice = debit, payment = credit, expense = debit, dated by the row's creation time and
+attributed to the user who created it), so the ledger identity (ledger balance = total - paid = remaining) also holds for old invoices. Deleted rows get no
+entry. It also tidies old data so old records can be voided, refunded and paid: payment methods are mapped to the allowed list (`Cash` -> `cash`,
+`Bank Transfer` -> `bank_transfer`, anything unknown -> `other`) and currencies are trimmed and upper-cased (`tnd` -> `TND`).
+
+A record whose currency is still not three letters (for example `TN`) is left as it is: the console answers "this record has legacy data that must be
+corrected: currency" (409) when you try to change it, and it gets no opening entry yet. Correct the currency in the database (with your developer), run the
+update again (`npm run migrate` re-applies nothing, so re-run `sql/migrations/017_accounting_fixes.sql` by hand), and the entry is added and the
+remaining checks are completed. Running 017 twice never duplicates anything.
 
 ## 6. Backup advice
 

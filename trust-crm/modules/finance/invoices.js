@@ -30,7 +30,7 @@ function taxRatePercent() {
 function validateCreate(input) {
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
   for (const k of Object.keys(input)) if (!["candidate_id", "currency", "due_date", "notes", "items"].includes(k)) throw new HttpError(400, `Unknown field: ${k}`);
-  const candidateId = c.parseId(input.candidate_id === undefined || input.candidate_id === null ? "" : typeof input.candidate_id === "number" ? String(input.candidate_id) : input.candidate_id);
+  const candidateId = c.parseId(input.candidate_id, { label: "candidate_id" });
   const currency = c.parseCurrency(input.currency);
   const dueDate = input.due_date === undefined || input.due_date === null ? null : c.parseDate(input.due_date, "due_date");
   const notes = c.cleanText(input.notes, "notes", NOTES_MAX);
@@ -42,7 +42,7 @@ function validateCreate(input) {
     for (const k of Object.keys(it)) if (!["service_id", "description", "quantity", "unit_price"].includes(k)) throw new HttpError(400, `Unknown field: ${at}.${k}`);
     let serviceId = null;
     if (it.service_id !== undefined && it.service_id !== null) {
-      serviceId = c.parseId(typeof it.service_id === "number" ? String(it.service_id) : it.service_id);
+      serviceId = c.parseId(it.service_id, { label: `${at}.service_id` });
     }
     const description = c.cleanText(it.description, `${at}.description`, DESC_MAX);
     if (!description && serviceId === null) throw new HttpError(400, `${at}.description or ${at}.service_id is required`);
@@ -187,7 +187,7 @@ async function listInvoices(user, query = {}, opts = {}) {
   const add = (val) => (params.push(val), `$${params.length}`);
 
   const candidateId = c.oneValue(query.candidate_id, "candidate_id");
-  if (candidateId !== undefined && candidateId !== "") where.push(`i.candidate_id = ${add(c.parseId(candidateId))}`);
+  if (candidateId !== undefined && candidateId !== "") where.push(`i.candidate_id = ${add(c.parseId(candidateId, { label: "candidate_id" }))}`);
   const status = c.oneValue(query.status, "status");
   if (status !== undefined && status !== "") {
     if (!STATUSES.includes(status)) throw new HttpError(400, `status must be one of ${STATUSES.join(", ")}`);
@@ -225,7 +225,7 @@ async function listInvoices(user, query = {}, opts = {}) {
 
 async function getInvoice(user, rawId) {
   c.requirePerm(user, "finance:read");
-  const id = c.parseId(rawId);
+  const id = c.parseId(rawId, { notFound: "Invoice not found" });
   const client = await db().connect();
   try {
     const inv = await loadFull(client, id);
@@ -238,7 +238,7 @@ async function getInvoice(user, rawId) {
 
 async function voidInvoice(user, rawId, input) {
   c.requirePerm(user, "finance:void");
-  const id = c.parseId(rawId);
+  const id = c.parseId(rawId, { notFound: "Invoice not found" });
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
   for (const k of Object.keys(input)) if (k !== "reason") throw new HttpError(400, `Unknown field: ${k}`);
   const reason = c.requiredText(input.reason, "reason", REASON_MAX);
@@ -246,7 +246,17 @@ async function voidInvoice(user, rawId, input) {
     const cur = await loadFull(client, id, { lock: true });
     if (!cur) throw new HttpError(404, "Invoice not found");
     if (cur.status === "Void") throw new HttpError(409, "Invoice is already void");
-    const live = Number((await client.query("SELECT count(*) AS n FROM payments WHERE invoice_id = $1 AND is_deleted = false AND voided_at IS NULL", [id])).rows[0].n);
+    // A live payment that has been refunded in full (net zero) holds no money and does not block the void.
+    const live = Number(
+      (
+        await client.query(
+          `SELECT count(*) AS n FROM payments p
+            WHERE p.invoice_id = $1 AND p.is_deleted = false AND p.voided_at IS NULL
+              AND p.amount_paid - COALESCE((SELECT SUM(f.amount) FROM fin_refunds f WHERE f.payment_id = p.id), 0) > 0`,
+          [id]
+        )
+      ).rows[0].n
+    );
     if (live > 0) throw new HttpError(409, "Invoice has payments: void or refund the payments first");
     await client.query("UPDATE invoices SET status = 'Void', voided_at = now(), void_reason = $2, remaining_amount = 0, updated_at = now() WHERE id = $1", [id, reason]);
     await client.query(

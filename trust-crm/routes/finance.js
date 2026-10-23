@@ -11,7 +11,6 @@ const common = require("../modules/finance/common");
 const payments = require("../modules/finance/payments");
 
 const router = express.Router();
-const PG_INT_MAX = 2147483647;
 const bodyOf = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
 
 function fail(res, err) {
@@ -30,7 +29,9 @@ router.get("/dashboard", verifyToken, checkPermission("finance:read"), async (_r
   try {
     const result = await db.query(`
       SELECT
-        COALESCE((SELECT SUM(amount_paid) FROM payments WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_in,
+        -- money in = live payments minus what was refunded on them (the same rows as /finance/reports/summary collected - refunded)
+        COALESCE((SELECT SUM(amount_paid) FROM payments WHERE is_deleted=false AND voided_at IS NULL), 0)
+          - COALESCE((SELECT SUM(f.amount) FROM fin_refunds f JOIN payments p ON p.id = f.payment_id WHERE p.is_deleted=false AND p.voided_at IS NULL), 0) AS total_in,
         COALESCE((SELECT SUM(amount) FROM expenses WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_out,
         COALESCE((SELECT SUM(total_amount) FROM invoices WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_invoiced,
         COALESCE((SELECT SUM(remaining_amount) FROM invoices WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_remaining
@@ -46,8 +47,7 @@ router.post("/invoices", verifyToken, checkPermission("finance:write"), async (r
   if (!candidate_id || !total_amount) return res.status(400).json({ error: "candidate_id and total_amount are required" });
 
   try {
-    const candidateId = common.parseId(candidate_id);
-    if (candidateId > PG_INT_MAX) throw new common.HttpError(404, "Candidate not found");
+    const candidateId = common.parseId(candidate_id, { label: "candidate_id" });
     const total = parseMoney(total_amount, { label: "total_amount", positive: true, maxIntDigits: 10 });
     const cur = normalizeCurrency(currency);
     const due = due_date === null ? null : common.parseDate(due_date, "due_date");
@@ -83,8 +83,7 @@ router.post("/payments", verifyToken, checkPermission("finance:write"), async (r
   if (!invoice_id || !amount_paid) return res.status(400).json({ error: "invoice_id and amount_paid are required" });
 
   try {
-    const invoiceId = common.parseId(invoice_id);
-    if (invoiceId > PG_INT_MAX) throw new common.HttpError(404, "Invoice not found");
+    const invoiceId = common.parseId(invoice_id, { label: "invoice_id" });
     // Decimal string end to end: "amount_paid must be greater than zero" is parseMoney's own message for 0.
     const amount = parseMoney(amount_paid, { label: "amount_paid", positive: true, maxIntDigits: 10 });
     const method = payments.normalizeMethod(payment_method);
@@ -94,6 +93,7 @@ router.post("/payments", verifyToken, checkPermission("finance:write"), async (r
     const out = await common.inTransaction(async (client) => {
       const inv = (await client.query("SELECT * FROM invoices WHERE id = $1 AND is_deleted = false FOR UPDATE", [invoiceId])).rows[0];
       if (!inv) throw new common.HttpError(404, "Invoice not found");
+      await payments.assertPaymentDate(client, inv.id, date);
       await payments.assertPayable(client, inv, amount, { legacy: true });
       return payments.postPayment(client, req.user, inv, { amount, method, paymentDate: date, notes: note, reference: null, key: null });
     });

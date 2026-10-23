@@ -11,6 +11,8 @@
 // candidate, the debt is not reopened), hence   ledger_balance = remaining_amount + refunds_without_reopen.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("fs");
+const path = require("path");
 const jwt = require("jsonwebtoken");
 const { createTestDb, loadApp } = require("./helpers/db");
 const { createEmployerUser, createAgencyUser } = require("./helpers/orgs");
@@ -272,13 +274,14 @@ test("idempotency: same key returns the original (200, replayed), conflicting bo
     const i = await invoice("100.00");
     const a = await pay(i.id, "25", { idempotency_key: "k-1", reference: "R1" });
     assert.equal(a.status, 201);
-    const b = await pay(i.id, "25.00", { idempotency_key: "k-1", reference: "other reference ignored" });
+    const b = await pay(i.id, "25.00", { idempotency_key: "k-1", reference: "R1" });
     assert.equal(b.status, 200, b.text);
     assert.equal(b.body.replayed, true);
     assert.equal(b.body.payment.id, a.body.payment.id);
     assert.equal(b.body.payment.receipt_number, a.body.payment.receipt_number);
     assert.equal(b.body.payment.reference, "R1");
     assert.equal(b.body.invoice.remaining_amount, "75.00");
+    assert.equal((await pay(i.id, "25", { idempotency_key: "k-1", reference: "R2" })).status, 409, "different reference");
     assert.equal((await pay(i.id, "26", { idempotency_key: "k-1" })).status, 409, "different amount");
     assert.equal((await pay(i.id, "25", { idempotency_key: "k-1", method: "card" })).status, 409, "different method");
     assert.equal((await inv(i.id)).payments.length, 1);
@@ -747,4 +750,172 @@ test("legacy dashboard ignores voided invoices and payments; validatePaymentAmou
     d = (await http("GET", "/finance/dashboard", T.acct)).body;
     assert.deepEqual([Number(d.total_in), Number(d.total_invoiced), Number(d.total_remaining)], [0, 100, 100]);
     assert.equal(typeof validatePaymentAmount, "function");
+  }));
+
+// ================================================================================================ review round 1
+const SQL017 = () => fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "017_accounting_fixes.sql"), "utf8");
+const LEGACY_CHECKS = [
+  ["invoices", "invoices_currency_check", "currency ~ '^[A-Z]{3}$'"],
+  ["payments", "payments_method_check", "payment_method IN ('cash','bank_transfer','card','mobile','cheque','other')"],
+  ["expenses", "expenses_currency_check", "currency ~ '^[A-Z]{3}$'"],
+];
+/** Puts the DB back into its pre-017 shape: the three legacy CHECKs dropped, to be re-added NOT VALID by restoreChecks. */
+const dropChecks = async (q) => {
+  for (const [t, n] of LEGACY_CHECKS) await q(`ALTER TABLE ${t} DROP CONSTRAINT ${n}`);
+};
+const restoreChecks = async (q) => {
+  for (const [t, n, d] of LEGACY_CHECKS) await q(`ALTER TABLE ${t} ADD CONSTRAINT ${n} CHECK (${d}) NOT VALID`);
+};
+const validated = async (q, table, name) => (await q("SELECT convalidated FROM pg_constraint WHERE conname = $1 AND conrelid = to_regclass($2)", [name, table])).rows[0].convalidated;
+
+test("review 1 / item 1: after migration 017 legacy rows can be voided, refunded, paid and voided; a still-bad currency is a clean 409", () =>
+  withWorld(async ({ http, T, q, one, candidate }) => {
+    const c = await candidate();
+    await dropChecks(q);
+    const ia = (await one("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,100,70,'tnd','Partial') RETURNING id", [c])).id;
+    const pCash = (await one("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method) VALUES ($1,$2,10,'Cash') RETURNING id", [ia, c])).id;
+    const pBank = (await one("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method) VALUES ($1,$2,20,'Bank Transfer') RETURNING id", [ia, c])).id;
+    const exp = (await one("INSERT INTO expenses (title,amount,currency) VALUES ('rent',5,'tnd') RETURNING id")).id;
+    const ib = (await one("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,50,50,'TN','Pending') RETURNING id", [c])).id;
+    const pOdd = (await one("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method) VALUES ($1,$2,5,'  weird-Method ') RETURNING id", [ib, c])).id;
+    const ic = (await one("INSERT INTO invoices (candidate_id,total_amount,remaining_amount,currency,status) VALUES ($1,20,20,'TN','Pending') RETURNING id", [c])).id;
+    await restoreChecks(q);
+    // before the migration the legacy row cannot be updated at all (this is the reported defect)
+    await assert.rejects(q("UPDATE payments SET voided_at = now(), void_reason = 'x' WHERE id = $1", [pCash]), /check constraint/i);
+
+    await q(SQL017());
+    await q(SQL017()); // idempotent
+    assert.deepEqual((await q("SELECT payment_method m FROM payments ORDER BY id")).rows.map((r) => r.m), ["cash", "bank_transfer", "other"]);
+    assert.deepEqual((await q("SELECT id, currency FROM invoices ORDER BY id")).rows.map((r) => r.currency), ["TND", "TN", "TN"], "tnd -> TND; TN is left untouched");
+    assert.equal((await one("SELECT currency FROM expenses WHERE id=$1", [exp])).currency, "TND");
+    assert.equal(await validated(q, "payments", "payments_method_check"), true);
+    assert.equal(await validated(q, "expenses", "expenses_currency_check"), true);
+    assert.equal(await validated(q, "invoices", "invoices_currency_check"), false, "TN still violates the currency rule, so it stays NOT VALID");
+
+    const v = await http("POST", `/finance/payments/${pCash}/void`, T.acct, { reason: "entered twice" });
+    assert.equal(v.status, 200, v.text);
+    assert.equal(v.body.invoice.remaining_amount, "80.00");
+    const r = await http("POST", `/finance/payments/${pBank}/refund`, T.acct, { amount: "5", reason: "part" });
+    assert.equal(r.status, 201, r.text);
+    const lp = await http("POST", "/finance/payments", T.acct, { invoice_id: ia, amount_paid: "10", payment_method: "cash" });
+    assert.equal(lp.status, 201, lp.text);
+    const v2 = await http("POST", "/finance/payments/v2", T.acct, { invoice_id: ia, amount: "10", method: "card" });
+    assert.equal(v2.status, 201, v2.text);
+    const ve = await http("POST", `/finance/expenses/${exp}/void`, T.acct, { reason: "dup" });
+    assert.equal(ve.status, 200, ve.text);
+
+    // the record that still has bad data: 409 with a clear message, never a 500 and never the constraint text
+    const clean = (res, label) => {
+      assert.equal(res.status, 409, `${label}: ${res.text}`);
+      assert.match(res.body.error, /legacy data that must be corrected: currency/, label);
+      assert.doesNotMatch(res.text, /constraint|violates|check_|_check|invoices_currency|"invoices"/i, `${label} must not leak the constraint`);
+    };
+    clean(await http("POST", "/finance/payments", T.acct, { invoice_id: ib, amount_paid: "10", payment_method: "cash" }), "legacy pay");
+    clean(await http("POST", "/finance/payments/v2", T.acct, { invoice_id: ib, amount: "10", method: "cash" }), "v2 pay");
+    clean(await http("POST", `/finance/invoices/${ic}/void`, T.acct, { reason: "x" }), "void invoice");
+    clean(await http("POST", `/finance/payments/${pOdd}/void`, T.acct, { reason: "x" }), "void payment");
+    clean(await http("POST", `/finance/payments/${pOdd}/refund`, T.acct, { amount: "1", reason: "x" }), "refund");
+    assert.equal((await one("SELECT count(*)::int n FROM payments WHERE invoice_id=$1", [ib])).n, 1, "the failed payments were rolled back");
+    assert.equal((await one("SELECT voided_at FROM payments WHERE id=$1", [pOdd])).voided_at, null);
+    // once the owner corrects the data, the same call works and the next run of 017 validates the constraint
+    await q("UPDATE invoices SET currency = 'TND' WHERE id = ANY($1)", [[ib, ic]]);
+    assert.equal((await http("POST", `/finance/payments/${pOdd}/void`, T.acct, { reason: "x" })).status, 200);
+    await q(SQL017());
+    assert.equal(await validated(q, "invoices", "invoices_currency_check"), true);
+  }));
+
+test("review 1 / item 3: legacy POST /finance/payments applies the same payment_date rules as v2", () =>
+  withWorld(async ({ http, T, invoice, q }) => {
+    const i = await invoice("100.00");
+    const post = (payment_date) => http("POST", "/finance/payments", T.acct, { invoice_id: i.id, amount_paid: "10", payment_method: "cash", payment_date });
+    for (const d of ["2099-01-01", "1990-01-01", dayOffset(3)]) {
+      const r = await post(d);
+      assert.equal(r.status, 400, `${d}: ${r.text}`);
+      const v2 = await http("POST", "/finance/payments/v2", T.acct, { invoice_id: i.id, amount: "10", method: "cash", payment_date: d });
+      assert.equal(v2.status, 400, `v2 ${d}`);
+      assert.equal(r.body.error, v2.body.error, "one shared checker, one message");
+    }
+    assert.equal((await q("SELECT count(*) n FROM payments")).rows[0].n, "0");
+    assert.equal((await post(dayOffset(1))).status, 201, "tomorrow (timezone slack) is allowed");
+    assert.equal((await post(dayOffset(-2))).status, 201);
+  }));
+
+test("review 1 / item 4: an idempotency key reused with any different parameter is 409; identical replay is 200", () =>
+  withWorld(async ({ http, T, invoice, pay, q }) => {
+    const i = await invoice("100.00");
+    const base = { idempotency_key: "key-1", reference: "REF-1", notes: "note 1", payment_date: dayOffset(-1), method: "bank_transfer" };
+    const first = await pay(i.id, "10", base);
+    assert.equal(first.status, 201, first.text);
+    const same = await pay(i.id, "10.00", base);
+    assert.equal(same.status, 200);
+    assert.equal(same.body.replayed, true);
+    assert.equal((await pay(i.id, 10, { idempotency_key: "key-1", reference: "REF-1", notes: "note 1", method: "bank_transfer" })).status, 200, "payment_date omitted: not compared");
+    const variants = {
+      amount: ["11", base],
+      method: ["10", { ...base, method: "card" }],
+      payment_date: ["10", { ...base, payment_date: dayOffset(-2) }],
+      reference: ["10", { ...base, reference: "REF-2" }],
+      "reference omitted": ["10", { ...base, reference: undefined }],
+      notes: ["10", { ...base, notes: "note 2" }],
+      "notes omitted": ["10", { ...base, notes: undefined }],
+    };
+    for (const [label, [amount, extra]] of Object.entries(variants)) {
+      const r = await pay(i.id, amount, extra);
+      assert.equal(r.status, 409, `${label}: ${r.text}`);
+      assert.equal(r.body.error, "idempotency key reused with different parameters", label);
+    }
+    assert.equal((await q("SELECT count(*) n FROM payments")).rows[0].n, "1");
+  }));
+
+test("review 1 / item 5: a fully refunded payment no longer blocks voiding the invoice; a payment with money left still does", () =>
+  withWorld(async ({ http, T, invoice, pay, refund, inv, q, ledgerBalance }) => {
+    // refund with reopen, then void
+    const a = await invoice("100.00");
+    const pa = (await pay(a.id, "100")).body.payment;
+    assert.equal((await refund(pa.id, "100", { reopen: true })).status, 201);
+    const va = await http("POST", `/finance/invoices/${a.id}/void`, T.acct, { reason: "cancelled" });
+    assert.equal(va.status, 200, va.text);
+    assert.equal(va.body.status, "Void");
+    assert.equal(va.body.remaining_amount, "0.00");
+    assert.equal(await ledgerBalance(a.id), "0.00", "invoice debit, payment credit, refund debit and the void reversal net to zero");
+    assert.equal((await q("SELECT voided_at FROM payments WHERE id=$1", [pa.id])).rows[0].voided_at, null, "the refunded payment is left as it is");
+    // refund without reopen (status Refunded), then void
+    const b = await invoice("100.00");
+    const pb = (await pay(b.id, "60")).body.payment;
+    const pb2 = (await pay(b.id, "40")).body.payment;
+    assert.equal((await refund(pb.id, "60")).status, 201);
+    assert.equal((await http("POST", `/finance/invoices/${b.id}/void`, T.acct, { reason: "x" })).status, 409, "pb2 still holds 40.00");
+    assert.equal((await refund(pb2.id, "40")).status, 201);
+    assert.equal((await inv(b.id)).status, "Refunded");
+    assert.equal((await http("POST", `/finance/invoices/${b.id}/void`, T.acct, { reason: "x" })).status, 200);
+    assert.equal(await ledgerBalance(b.id), "0.00");
+    // a live payment with money left (never refunded, or only partly refunded) still blocks
+    const c = await invoice("100.00");
+    await pay(c.id, "40");
+    assert.equal((await http("POST", `/finance/invoices/${c.id}/void`, T.acct, { reason: "x" })).status, 409);
+    const d = await invoice("100.00");
+    const pd = (await pay(d.id, "40")).body.payment;
+    assert.equal((await refund(pd.id, "30", { reopen: true })).status, 201);
+    const blocked = await http("POST", `/finance/invoices/${d.id}/void`, T.acct, { reason: "x" });
+    assert.equal(blocked.status, 409);
+    assert.match(blocked.body.error, /payments/);
+  }));
+
+test("review 1 / item 6: legacy dashboard total_in subtracts refunds and ties to summary collected - refunded", () =>
+  withWorld(async ({ http, T, invoice, pay, refund }) => {
+    const i = await invoice("100.00");
+    const p1 = (await pay(i.id, "10")).body.payment;
+    await pay(i.id, "10");
+    assert.equal((await refund(p1.id, "10")).status, 201);
+    const d = (await http("GET", "/finance/dashboard", T.acct)).body;
+    assert.equal(String(d.total_in), "10.00");
+    assert.deepEqual(Object.keys(d).sort(), ["total_in", "total_invoiced", "total_out", "total_remaining"]);
+    const rows = (await http("GET", "/finance/reports/summary", T.acct)).body.rows;
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0].collected, rows[0].refunded], ["20.00", "10.00"]);
+    assert.equal(String(d.total_in), "10.00", "collected 20.00 - refunded 10.00");
+    // a voided payment is not collected and has no refunds to subtract
+    const p3 = (await pay(i.id, "5")).body.payment;
+    assert.equal((await http("POST", `/finance/payments/${p3.id}/void`, T.acct, { reason: "x" })).status, 200);
+    assert.equal(String((await http("GET", "/finance/dashboard", T.acct)).body.total_in), "10.00");
   }));

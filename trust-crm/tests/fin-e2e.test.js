@@ -381,7 +381,7 @@ test("E1: reports/summary equals raw rows per currency (all time and a date wind
   assert.notDeepEqual(win.body.rows, all.body.rows, "the window really filters");
   // the legacy dashboard totals tie to the same rows (summed over currencies, as it always did)
   const dash = (await http("GET", "/finance/dashboard", T().acct)).body;
-  assert.equal(cents(String(dash.total_in)), all.body.rows.reduce((t, r) => t + cents(r.collected), 0n));
+  assert.equal(cents(String(dash.total_in)), all.body.rows.reduce((t, r) => t + cents(r.collected) - cents(r.refunded), 0n), "money in = collected - refunded");
   assert.equal(cents(String(dash.total_out)), all.body.rows.reduce((t, r) => t + cents(r.expenses), 0n));
 });
 
@@ -560,7 +560,7 @@ test("E6: ledger sums per invoice match the documented identity; the ledger is i
   }
   let checked = 0;
   for (const i of R.invoices) {
-    if (!i.number) continue; // pre-accounting rows have no ledger rows (no backfill)
+    if (!i.number) continue; // this row is inserted by SQL after the migrations ran, so it has neither a number nor ledger rows (migration 017 backfills real pre-016 rows; see fin-schema)
     const ledger = perInvoice.get(String(i.id)) || 0n;
     if (i.status === "Void") {
       assert.equal(ledger, 0n, `void invoice ${i.number}: debit and reversal net to zero`);

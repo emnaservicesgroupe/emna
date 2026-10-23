@@ -1,7 +1,7 @@
 // CSV exports (finance:export): invoices, payments, expenses, optionally limited to ?from&to.
 //
 // Format: UTF-8 with a BOM (Excel reads Arabic correctly), EVERY cell quoted with embedded quotes doubled, CRLF line ends.
-// Spreadsheet-injection guard: a cell whose first character is = + - @ TAB or CR gets a leading single quote so a
+// Spreadsheet-injection guard: a cell whose first character is = + - @ TAB CR LF (or the full-width = + - @) gets a leading single quote so a
 // spreadsheet shows it as text instead of running it as a formula. Amounts are plain decimal strings straight from NUMERIC.
 // Row cap: FIN_EXPORT_MAX_ROWS (default and maximum 50000); when more rows match, the file is cut at the cap and the route
 // answers with the header X-Row-Limit-Hit: true. Voided rows are exported (with voided_at / void_reason), not hidden.
@@ -13,7 +13,7 @@ const { HttpError } = c;
 const db = () => require("../../db");
 
 const HARD_MAX_ROWS = 50000;
-const FORMULA_START = /^[=+\-@\t\r]/;
+const FORMULA_START = /^[=+\-@\t\r\n\uFF1D\uFF0B\uFF0D\uFF20]/; // also LF and the full-width lookalikes of = + - @
 const TS = (expr) => `to_char(${expr}, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
 
 function maxRows() {

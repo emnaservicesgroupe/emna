@@ -377,7 +377,7 @@ test("legacy /finance/dashboard totals tie to the new summary for the same data 
     const total = (k) => sum.reduce((a, r) => a + cents(r[k]), 0n);
     const dash = (await w.http("GET", "/finance/dashboard", w.T.acct)).body;
     assert.equal(fmt(total("invoiced")), String(dash.total_invoiced));
-    assert.equal(fmt(total("collected")), String(dash.total_in));
+    assert.equal(fmt(total("collected") - total("refunded")), String(dash.total_in), "money in = collected - refunded");
     assert.equal(fmt(total("expenses")), String(dash.total_out));
     // Voiding an expense through the API moves both identically.
     const e = (await w.http("POST", "/finance/expenses", w.T.acct, expense({ amount: "77.70", spent_on: dayOffset(0) }))).body;
@@ -832,3 +832,16 @@ test("role matrix: Manager reads and exports but cannot write or void; Agent/Rec
     assert.equal((await w.http("GET", "/finance/reports/summary", null)).status, 401);
     assert.equal((await w.http("GET", "/finance/expenses", "garbage")).status, 400);
   }));
+
+// ================================================================================================ review round 1
+test("review 1: csvCell also guards a leading LF and the full-width lookalikes of = + - @", () => {
+  const { csvCell } = require("../modules/finance/exportCsv");
+  for (const lead of ["\n", "＝", "＋", "－", "＠", "=", "+", "-", "@", "\t", "\r"]) {
+    const cell = csvCell(`${lead}cmd`);
+    assert.equal(cell, `"'${`${lead}cmd`.replace(/"/g, '""')}"`, `leading ${JSON.stringify(lead)} is neutralised`);
+  }
+  for (const safe of ["Plain", "a\nb", "x=y", "1+1", "＝not first", "أمينة", "", null, 12]) {
+    const cell = csvCell(safe === "＝not first" ? "ok ＝" : safe);
+    assert.ok(!cell.startsWith(`"'`), `${JSON.stringify(safe)} is left alone`);
+  }
+});

@@ -8,7 +8,6 @@ const c = require("./common");
 const { HttpError } = c;
 const db = () => require("../../db");
 
-const PG_INT_MAX = 2147483647;
 const TITLE_MAX = 160;
 const PAYEE_MAX = 160;
 const NOTES_MAX = 500;
@@ -19,16 +18,8 @@ const EXPENSE_FROM = `FROM expenses e LEFT JOIN expense_categories k ON k.id = e
 const EXPENSE_COLS = `e.id, e.title, e.amount::text AS amount, e.currency, to_char(e.spent_on, 'YYYY-MM-DD') AS spent_on, e.category_id, k.name AS category_name,
   e.payee, e.notes, e.created_by, e.created_at, e.voided_at, e.void_reason`;
 
-const expenseId = (raw) => {
-  const id = c.parseId(raw);
-  if (id > PG_INT_MAX) throw new HttpError(404, "Expense not found");
-  return id;
-};
-const categoryId = (raw, label = "category_id") => {
-  const id = c.parseId(typeof raw === "number" ? String(raw) : raw);
-  if (id > PG_INT_MAX) throw new HttpError(400, `${label}: category not found`);
-  return id;
-};
+const expenseId = (raw) => c.parseId(raw, { notFound: "Expense not found" });
+const categoryId = (raw, label = "category_id") => c.parseId(raw, { label });
 
 async function loadExpense(client, id) {
   return (await client.query(`SELECT ${EXPENSE_COLS} ${EXPENSE_FROM} WHERE e.id = $1 AND e.is_deleted = false`, [id])).rows[0] || null;
@@ -89,7 +80,7 @@ async function listExpenses(user, query = {}) {
     return v === undefined || v === "" ? undefined : v;
   };
   const cat = one("category_id");
-  if (cat !== undefined) where.push(`e.category_id = ${add(c.parseId(cat) > PG_INT_MAX ? 0 : c.parseId(cat))}`);
+  if (cat !== undefined) where.push(`e.category_id = ${add(categoryId(cat))}`);
   const { from, to } = c.parseRange(query);
   if (from) where.push(`e.spent_on >= ${add(from)}::date`);
   if (to) where.push(`e.spent_on <= ${add(to)}::date`);
@@ -133,11 +124,7 @@ async function voidExpense(user, rawId, input) {
 
 // ------------------------------------------------------------------------------------------------ categories
 const CAT_COLS = "id, name, active";
-const catId = (raw) => {
-  const id = c.parseId(raw);
-  if (id > PG_INT_MAX) throw new HttpError(404, "Category not found");
-  return id;
-};
+const catId = (raw) => c.parseId(raw, { notFound: "Category not found" });
 
 async function listCategories(user, query = {}) {
   c.requirePerm(user, "finance:read");
