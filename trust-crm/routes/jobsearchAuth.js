@@ -51,8 +51,9 @@ router.post(
       res.set("Retry-After", String(limit.retryAfter));
       throw new HttpError(429, "Too many attempts. Please try again later.");
     }
-    const { token } = await otp.verifyOtp(email, code);
-    return res.json({ token });
+    const { token, role } = await otp.verifyOtp(email, code);
+    // Candidate response stays exactly { token } (unchanged contract); portal roles also report their role.
+    return res.json(role === "Candidate" ? { token } : { token, role });
   })
 );
 

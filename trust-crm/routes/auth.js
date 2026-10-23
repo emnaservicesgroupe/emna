@@ -35,6 +35,11 @@ router.post("/register", verifyToken, checkPermission("users:write"), async (req
       return res.status(400).json({ error: "Candidate accounts are created with POST /jobsearch/admin/candidate-accounts, not /auth/register" });
     }
 
+    // Employer / Agency logins are created only by invitation from a staff-managed organisation.
+    if (role === "Employer" || role === "Agency") {
+      return res.status(400).json({ error: "Employer and Agency accounts are created by inviting a user to an organisation, not /auth/register" });
+    }
+
     const normalizedEmail = String(email).trim().toLowerCase();
     const weak = checkPassword(password, normalizedEmail);
     if (weak) return res.status(400).json({ error: weak });

@@ -1,6 +1,9 @@
 const jwt = require("jsonwebtoken");
 const db = require("../db");
 
+const VERSIONED_ROLES = new Set(["Candidate", "Employer", "Agency"]);
+const ORG_ROLES = { Employer: ["employer", "crm_employers"], Agency: ["agency", "crm_agencies"] };
+
 exports.verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
@@ -17,9 +20,9 @@ exports.verifyToken = async (req, res, next) => {
   }
 
   // Legacy tokens (issued by /auth/login) carry no `tv` claim: unchanged behaviour.
-  // Candidate tokens are only ever issued with `tv`, so one without it is refused.
+  // Candidate / Employer / Agency tokens are only ever issued with `tv`, so one without it is refused.
   if (verified.tv === undefined) {
-    if (verified.role === "Candidate") {
+    if (VERSIONED_ROLES.has(verified.role)) {
       return res.status(401).json({ error: "Session expired" });
     }
     req.user = verified;
@@ -32,6 +35,16 @@ exports.verifyToken = async (req, res, next) => {
     const user = result.rows[0];
     if (!user || !user.is_active || user.token_version !== verified.tv || user.role !== verified.role) {
       return res.status(401).json({ error: "Session expired" });
+    }
+    // Portal users: the linked organisation must exist and not be suspended (takes effect on the next request).
+    if (ORG_ROLES[verified.role]) {
+      const [orgType, table] = ORG_ROLES[verified.role];
+      const org = await db.query(
+        `SELECT 1 FROM crm_org_accounts oa JOIN ${table} o ON o.id = oa.org_id
+          WHERE oa.user_id = $1 AND oa.org_type = $2 AND o.status <> 'suspended'`,
+        [verified.id, orgType]
+      );
+      if (org.rowCount === 0) return res.status(401).json({ error: "Session expired" });
     }
   } catch (err) {
     console.error("Session check failed:", err && (err.code || err.name));

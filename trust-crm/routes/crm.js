@@ -30,7 +30,7 @@ router.use((_req, res, next) => {
 });
 router.use(verifyToken);
 router.use((req, res, next) => {
-  if (req.user && req.user.role === "Candidate") return res.status(403).json({ error: "Access denied" });
+  if (req.user && (req.user.role === "Candidate" || req.user.role === "Employer" || req.user.role === "Agency")) return res.status(403).json({ error: "Access denied" });
   return next();
 });
 

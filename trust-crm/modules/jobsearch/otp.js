@@ -112,6 +112,8 @@ function generateCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
 }
 
+// Eligible roles: Candidate (js_candidate_accounts) and Employer / Agency (crm_org_accounts joined to an
+// organisation of the matching type that is not suspended). Returns { id, token_version, role } or null.
 async function findEligibleUser(email) {
   const r = await db().query(
     `SELECT u.id, u.token_version
@@ -122,7 +124,22 @@ async function findEligibleUser(email) {
       LIMIT 1`,
     [email]
   );
-  return r.rows[0] || null;
+  if (r.rows[0]) return { ...r.rows[0], role: "Candidate" };
+
+  const o = await db().query(
+    `SELECT u.id, u.token_version, u.role
+       FROM users u
+       JOIN crm_org_accounts oa ON oa.user_id = u.id
+       LEFT JOIN crm_employers e ON oa.org_type = 'employer' AND e.id = oa.org_id
+       LEFT JOIN crm_agencies g ON oa.org_type = 'agency' AND g.id = oa.org_id
+      WHERE lower(u.email) = $1 AND u.is_active = true
+        AND ((u.role = 'Employer' AND oa.org_type = 'employer' AND e.id IS NOT NULL AND e.status <> 'suspended')
+          OR (u.role = 'Agency' AND oa.org_type = 'agency' AND g.id IS NOT NULL AND g.status <> 'suspended'))
+      ORDER BY u.id
+      LIMIT 1`,
+    [email]
+  );
+  return o.rows[0] || null;
 }
 
 function errTag(err) {
@@ -247,10 +264,10 @@ async function verifyOtp(email, code) {
   const user = await findEligibleUser(e);
   if (!user) throw invalid();
   if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is not configured");
-  const token = jwt.sign({ id: user.id, role: "Candidate", tv: user.token_version }, process.env.JWT_SECRET, {
+  const token = jwt.sign({ id: user.id, role: user.role, tv: user.token_version }, process.env.JWT_SECRET, {
     expiresIn: TOKEN_TTL,
   });
-  return { token };
+  return { token, role: user.role };
 }
 
 module.exports = {

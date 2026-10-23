@@ -302,6 +302,8 @@ code: ✓ = the role holds the permission.
 | Accountant | — | — | — | — | — | nothing |
 | HR | — | — | — | — | — | nothing |
 | Candidate | — | — | — | — | — | only their own record (ownership checks, no permissions) |
+| Employer | — | — | — | — | — | nothing (portal role: own organisation only via `/employer/*`) |
+| Agency | — | — | — | — | — | nothing (portal role: own organisation only via `/agency/*`) |
 <!-- permission-matrix:end -->
 
 What each permission allows (always limited to the candidates the user may see):
