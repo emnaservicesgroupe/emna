@@ -49,7 +49,9 @@ async function getSettings({ user, candidateId }) {
   const id = await authorize(user, candidateId, "read");
   const r = await db().query(`SELECT ${COLUMNS} FROM js_candidate_settings WHERE candidate_id = $1`, [id]);
   const p = await db().query("SELECT countries, categories, availability, salary_min, salary_currency, residence_country, needs_work_auth_support FROM js_preferences WHERE candidate_id = $1", [id]);
-  return { candidate_id: id, ...(r.rows[0] || DEFAULTS), preferences: p.rows[0] || null };
+  const row = { ...(r.rows[0] || DEFAULTS) };
+  if (user.role === "Candidate") delete row.admin_approved_by; // which administrator approved: staff-only
+  return { candidate_id: id, ...row, preferences: p.rows[0] || null };
 }
 
 async function writeAudit(client, user, action, id, detail) {

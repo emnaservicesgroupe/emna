@@ -129,6 +129,7 @@ async function cancelQueuedForCandidate(candidateId, reason, client, { includeRe
       ]);
     }
   }
+  await closeQueuedSubmissions(client, ids, reason);
   // Queue items for this candidate (by application or candidate id in the payload); only
   // not-yet-claimed submit jobs can be stopped here.
   await client.query(
@@ -139,6 +140,22 @@ async function cancelQueuedForCandidate(candidateId, reason, client, { includeRe
     [ids.map(String), String(candidateId), reason, CANCELLABLE_QUEUE_KINDS]
   );
   return ids.length;
+}
+
+/**
+ * The not-yet-sent submission attempts ('queued', intent NOT recorded) of applications that were just
+ * cancelled / pulled back: 'failed' with reason 'cancelled' (js_submissions has no 'cancelled' status). A
+ * stale 'queued' row would otherwise count against caps and duplicate checks forever. Rows already in
+ * phase 'sending' (provider call in flight) are left to the submitter, which records their outcome.
+ */
+async function closeQueuedSubmissions(client, applicationIds, reason) {
+  if (!applicationIds.length) return 0;
+  return (await client.query(
+    `UPDATE js_submissions SET status = 'failed',
+            evidence = COALESCE(evidence, '{}'::jsonb) || jsonb_build_object('phase', 'blocked', 'reason', 'cancelled', 'cancelReason', $2::text, 'blockedAt', now())
+      WHERE application_id = ANY($1::int[]) AND status = 'queued' AND COALESCE(evidence->>'phase', '') <> 'sending'`,
+    [applicationIds, String(reason || "cancelled").slice(0, 300)]
+  )).rowCount;
 }
 
 /** Pause (for search) + cancel work for the given scope keys. Caller holds the transaction. */
@@ -275,4 +292,4 @@ async function eligibilityFor({ user, candidateId }) {
   return searchEligible(id);
 }
 
-module.exports = { grantConsent, withdrawConsent, activeConsent, searchEligible, cancelQueuedForCandidate, cancelForDeactivatedUser, setUserActive, CANCELLABLE_QUEUE_KINDS, listConsents, eligibilityFor, moduleState, isAdmin };
+module.exports = { grantConsent, withdrawConsent, activeConsent, searchEligible, cancelQueuedForCandidate, closeQueuedSubmissions, cancelForDeactivatedUser, setUserActive, CANCELLABLE_QUEUE_KINDS, listConsents, eligibilityFor, moduleState, isAdmin };

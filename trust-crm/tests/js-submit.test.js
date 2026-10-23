@@ -372,9 +372,16 @@ test("consent withdrawn after queueing (real withdrawal): the claimed item runs,
   await consentService.withdrawConsent({ user: { id: w.userId, role: "Candidate" }, candidateId: w.candidateId, scopeKey: "submit" });
   assert.equal(await status(w.appId), "cancelled");
   assert.equal((await q("SELECT status FROM js_queue WHERE id=$1", [r.job.id])).rows[0].status, "cancelled");
-  const out = await submitter.handleSubmit(r.job, DEPS); // the item was already claimed when the withdrawal landed
-  assert.equal(out.status, "blocked");
-  const [sub] = await subsOf(w.appId);
+  // The withdrawal itself closes the not-yet-sent attempt (Task 16: a cancelled application never keeps a
+  // 'queued' submission, even when its queue item is cancelled before any worker claims it) ...
+  let [sub] = await subsOf(w.appId);
+  assert.equal(sub.status, "failed");
+  assert.equal(sub.evidence.reason, "cancelled");
+  // ... so an item that was already claimed when the withdrawal landed finds nothing to send.
+  const out = await submitter.handleSubmit(r.job, DEPS);
+  assert.equal(out.status, "noop");
+  assert.equal(out.reason, "submission_failed");
+  [sub] = await subsOf(w.appId);
   assert.equal(sub.status, "failed");
   assert.equal(sub.evidence.reason, "cancelled");
   assert.equal(await status(w.appId), "cancelled");
@@ -646,8 +653,10 @@ test("sensitive document: sent only when authorized (exact sha256 attached); aut
   const r3 = await queued(w3);
   await applicationService.revokeSharing({ id: w3.appId, actor: w3.candidateUser, authorizationId: w3.authId });
   assert.equal(await status(w3.appId), "preparing");
-  const out3 = await submitter.handleSubmit(r3.job, DEPS);
-  assert.equal(out3.code, "application_not_sendable");
+  assert.equal((await subsOf(w3.appId))[0].status, "failed", "the revocation closes the queued attempt at once");
+  assert.equal((await subsOf(w3.appId))[0].evidence.reason, "cancelled");
+  const out3 = await submitter.handleSubmit(r3.job, DEPS); // a worker that had already claimed the item
+  assert.equal(out3.status, "noop");
   assert.equal((await subsOf(w3.appId))[0].status, "failed");
   assert.equal((await outbound(w3.recipient)).length, 0);
 });

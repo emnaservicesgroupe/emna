@@ -428,6 +428,7 @@ async function cancelQueueItems(client, applicationId, reason) {
         AND COALESCE(payload->>'applicationId', payload->>'application_id') = $1`,
     [String(applicationId), reason, CANCELLABLE_QUEUE_KINDS]
   );
+  await consentService.closeQueuedSubmissions(client, [applicationId], reason);
 }
 
 /** Candidate (own) or in-scope staff cancels a not-yet-sent application; pending queue work is cancelled. */
@@ -535,16 +536,23 @@ function docVersionApproved(entries, row) {
   });
 }
 
-/** Sends counted against caps in the window: submissions in counted states + approved/queued apps not yet submitted. */
-async function countRecentSends(c, candidateId, interval) {
+/**
+ * Sends counted against caps in the window: submissions in counted states + approved/queued apps not yet
+ * submitted. Rows are stamped by the DB clock while the caller (the scheduler) may pass its own tick clock
+ * `now`; the window therefore starts at LEAST(now, DB now()) - interval, the SAME rule as the pre-send
+ * guard's cap check. With equal clocks (production) that is the plain rolling window; when the clocks
+ * differ (an injected test clock, skew) the window only grows - a cap can count more, never fewer, sends.
+ */
+async function countRecentSends(c, candidateId, interval, now) {
+  const at = now instanceof Date && !Number.isNaN(now.getTime()) ? now : null;
   const r = await c.query(
     `SELECT
        (SELECT count(*) FROM js_submissions s JOIN js_applications a ON a.id = s.application_id
-         WHERE a.candidate_id = $1 AND s.status = ANY($2::text[]) AND s.created_at > now() - $3::interval)
+         WHERE a.candidate_id = $1 AND s.status = ANY($2::text[]) AND s.created_at > LEAST(COALESCE($4::timestamptz, now()), now()) - $3::interval)
      + (SELECT count(*) FROM js_applications a
-         WHERE a.candidate_id = $1 AND a.status IN ('approved','queued') AND a.updated_at > now() - $3::interval
+         WHERE a.candidate_id = $1 AND a.status IN ('approved','queued') AND a.updated_at > LEAST(COALESCE($4::timestamptz, now()), now()) - $3::interval
            AND NOT EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id)) AS n`,
-    [candidateId, COUNTED_SUBMISSION_STATES, interval]
+    [candidateId, COUNTED_SUBMISSION_STATES, interval, at]
   );
   return Number(r.rows[0].n);
 }
@@ -565,7 +573,8 @@ async function countRecentSends(c, candidateId, interval) {
  *    country of residence, employer_support === 'confirmed' (no conflict); overseas acceptance === true
  *    whenever the candidate is abroad. Unknown residence/country/support need = the risky case.
  * @param {object|number} application js_applications row or id
- * @param {{client?: object}} [opts] run inside the caller's (locked) transaction
+ * @param {{client?: object, now?: Date}} [opts] run inside the caller's (locked) transaction; `now` = clock
+ *   for the cap windows (the scheduler passes its tick clock; default: the DB clock)
  * @returns {Promise<{allowed: boolean, reasons: string[]}>}
  */
 async function autoApproveEligibility(application, opts = {}) {
@@ -619,8 +628,8 @@ async function autoApproveEligibility(application, opts = {}) {
   // Caps (0 = no automatic sends).
   if (!(settings.cap_per_day > 0) || !(settings.cap_per_week > 0)) reasons.push("cap_not_set");
   else {
-    if ((await countRecentSends(c, cid, "1 day")) >= settings.cap_per_day) reasons.push("cap_per_day_exceeded");
-    if ((await countRecentSends(c, cid, "7 days")) >= settings.cap_per_week) reasons.push("cap_per_week_exceeded");
+    if ((await countRecentSends(c, cid, "1 day", opts.now)) >= settings.cap_per_day) reasons.push("cap_per_day_exceeded");
+    if ((await countRecentSends(c, cid, "7 days", opts.now)) >= settings.cap_per_week) reasons.push("cap_per_week_exceeded");
   }
 
   // Label-safety ruling.
@@ -653,7 +662,7 @@ async function autoApprove(applicationId, opts = {}) {
   if (!id) throw new HttpError(404, "Not found");
   const run = async (client) => {
     const app = await lockApplication(client, id);
-    const elig = await autoApproveEligibility(app, { client });
+    const elig = await autoApproveEligibility(app, { client, now: opts.now });
     if (!elig.allowed) {
       await audit(client, "system:auto", "application.auto_approve_refused", app.candidate_id, app.id, { reasons: elig.reasons });
       return { approved: false, reasons: elig.reasons, application: present(app) };
@@ -692,7 +701,7 @@ async function approveCvVersion({ user, cvFileId, language }) {
     return r;
   });
   await logAudit({ userId: user.id, action: "jobsearch.cv.approve", tableName: "js_cv_files", recordId: id, newData: { language: lang } });
-  return { id: row.id, candidateId: row.candidate_id, version: row.version, language: row.language, approved: row.approved, sha256: row.sha256 };
+  return { id: row.id, candidateId: row.candidate_id, version: row.version, language: row.language, approved: row.approved, ...(user.role === "Candidate" ? {} : { sha256: row.sha256 }) };
 }
 
 // ---------------------------------------------------------------- list / detail
@@ -818,6 +827,7 @@ async function getApplication({ user, id }) {
       : null,
     notice: NOTICE,
     timeline: tl.map((e) => ({ id: e.id, actor: e.actor, event: e.event, detail: user.role === "Candidate" ? candidateTimelineDetail(e.detail) : e.detail, at: e.created_at })),
+    // Candidates see which documents/versions are in their package, not hashes or which staff member approved.
     documents: docs.map((d) => ({
       id: d.id,
       kind: d.cv_file_id ? "cv" : "document",
@@ -825,11 +835,11 @@ async function getApplication({ user, id }) {
       documentId: d.document_id,
       docType: d.doc_type,
       version: d.version,
-      sha256: d.sha256,
+      ...(user.role === "Candidate" ? {} : { sha256: d.sha256 }),
       language: d.language,
       sensitive: d.sensitive,
       sharingAuthorizationId: d.sharing_authorization_id,
-      approvedBy: d.approved_by,
+      ...(user.role === "Candidate" ? {} : { approvedBy: d.approved_by }),
       approvedAt: d.approved_at,
       addedAt: d.created_at,
       removedAt: d.removed_at,

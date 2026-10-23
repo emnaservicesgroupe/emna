@@ -546,9 +546,9 @@ test("re-entrancy: a concurrent tick is skipped in-process; guardedTick skips wh
   assert.equal([x, y].filter((r) => !r.skipped).length, 1);
   const holder = await pool.connect();
   try {
-    await holder.query("SELECT pg_advisory_lock(19028, 1)");
+    await holder.query("SELECT pg_advisory_lock(hashtext('js_scheduler:' || current_schema()), 1)");
     assert.equal((await scheduler.guardedTick(t0)).skipped, "locked_elsewhere");
-    await holder.query("SELECT pg_advisory_unlock(19028, 1)");
+    await holder.query("SELECT pg_advisory_unlock(hashtext('js_scheduler:' || current_schema()), 1)");
   } finally {
     holder.release();
   }

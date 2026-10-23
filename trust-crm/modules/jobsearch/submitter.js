@@ -38,7 +38,11 @@ const { SYSTEM_GRANT, MANUAL_COMPLETION } = applicationService._internal;
 const { TRANSITIONS } = applicationService;
 
 const SYSTEM_ACTOR = "system:submitter";
-const LOCK_CLASS = 0x4a53; // advisory-lock namespace ("JS") for submission ids
+// Session advisory lock per submission id. The first key is derived from the CURRENT SCHEMA, so two
+// deployments (or two test schemas) sharing one Postgres database never mistake each other's send for
+// "in progress" (submission ids are per schema; a cluster-wide (class, id) key collided across schemas).
+const LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('js_submission:' || current_schema()), $1) AS ok";
+const UNLOCK_SQL = "SELECT pg_advisory_unlock(hashtext('js_submission:' || current_schema()), $1)";
 const MAX_TEXT = 1000;
 
 // Guard code -> what happens to the application at send time.
@@ -50,6 +54,8 @@ const CANCEL_CODES = new Set(["consent_missing", "consent_withdrawn", "user_susp
 const HOLD_CODES = new Set(["candidate_paused", "module_paused", "source_paused"]);
 const DUP_CODES = new Set(["duplicate", "duplicate_submission"]);
 const HANDOFF_REASONS = new Set(guard.HANDOFF_REASONS);
+// Handoffs that mean "this posting cannot be completed by e-mail" (everything but a generic staff review).
+const CHANNEL_HANDOFFS = new Set(guard.HANDOFF_REASONS.filter((r) => r !== "staff_review"));
 // Refusals at queue time that leave a note on the application timeline.
 const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES]);
 const EVIDENCE_KINDS = ["delivery_receipt", "employer_acknowledgement", "manual_confirmation"];
@@ -227,7 +233,16 @@ async function queueSubmission(applicationId, actor, opts = {}) {
       // Timeline keeps neutral fields only; the guard's detail text (may name addresses) goes to the audit log.
       if (NOTE_CODES.has(result.code) || result.handoff) await timeline(client, id, who, "queue_refused", { code: result.code, handoff: result.handoff || null });
       await audit(client, who, "submission.queue_refused", app.candidate_id, id, detail);
-      return { queued: false, reason: result.code, detail: result.detail, ...(result.handoff ? { handoff: result.handoff } : {}), candidateId: app.candidate_id };
+      // Spec §7 handoffs (CAPTCHA, payment, login, legal declaration, custom questions, online-only): the
+      // posting needs a human channel, so - as at send time (blockSubmission) - the application goes to
+      // needs_staff with ONE handoff task for the responsible staff instead of waiting in 'approved'.
+      let taskId = null;
+      if (result.code === "handoff_required" && CHANNEL_HANDOFFS.has(result.handoff)) {
+        const task = await openTask(client, app, locked.cand, result.handoff, `handoff_required: ${result.detail || ""}`);
+        taskId = task.id;
+        await moveIfAllowed(client, app, "needs_staff", who, { reason: `handoff:${result.handoff}`, detail: { code: result.code, handoff: result.handoff, taskId } });
+      }
+      return { queued: false, reason: result.code, detail: result.detail, ...(result.handoff ? { handoff: result.handoff } : {}), ...(taskId ? { taskId } : {}), candidateId: app.candidate_id };
     }
     // A leftover 'queued' row of an earlier, interrupted cycle (e.g. queued -> preparing -> approved).
     for (const s of open) {
@@ -494,7 +509,7 @@ async function handleSubmit(job, deps = {}) {
   let locked = false;
   let destroy = false;
   try {
-    locked = (await conn.query("SELECT pg_try_advisory_lock($1, $2) AS ok", [LOCK_CLASS, submissionId])).rows[0].ok === true;
+    locked = (await conn.query(LOCK_SQL, [submissionId])).rows[0].ok === true;
     if (!locked) return { status: "in_progress", submissionId };
     let plan;
     try {
@@ -522,7 +537,7 @@ async function handleSubmit(job, deps = {}) {
   } finally {
     if (locked) {
       try {
-        await conn.query("SELECT pg_advisory_unlock($1, $2)", [LOCK_CLASS, submissionId]);
+        await conn.query(UNLOCK_SQL, [submissionId]);
       } catch {
         destroy = true; // dropping the session releases the lock
       }

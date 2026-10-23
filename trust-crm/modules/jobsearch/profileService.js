@@ -224,7 +224,8 @@ async function getProfile({ user, candidateId, signTtlSec = 300 }) {
     confirmed_by: row.confirmed_by,
     confirmed_at: row.confirmed_at,
     preferences: prefs.rows[0] || null,
-    cv_files: files.rows.map(({ storage_key, ...f }) => ({ ...f, download_url: storage.signUrl(storage_key, user.id, signTtlSec) })),
+    // Candidates get their files (signed links) but not the integrity hashes (staff-only, like provider ids).
+    cv_files: files.rows.map(({ storage_key, sha256, ...f }) => ({ ...f, ...(user.role === "Candidate" ? {} : { sha256 }), download_url: storage.signUrl(storage_key, user.id, signTtlSec) })),
   };
 }
 

@@ -506,7 +506,11 @@ test("signed file link: owner ok; other candidate, wrong user, expired, tampered
     assert.equal((await call("GET", link, { token: other.token })).status, 404, "other candidate");
     assert.equal((await call("GET", link, { token: staffToken(agentB) })).status, 404, "unassigned staff");
     assert.equal((await call("GET", link, {})).status, 401);
-    assert.equal((await call("GET", link.replace(/sig=[0-9a-f]/, "sig=0"), { token: c.token })).status, 404, "tampered");
+    // Flip the first signature digit to a DIFFERENT one (replacing it with a fixed '0' was a no-op - and the
+    // test flaked - whenever the signature already started with '0', i.e. 1 run in 16).
+    const tampered = link.replace(/sig=([0-9a-f])/, (_m, d) => `sig=${d === "0" ? "1" : "0"}`);
+    assert.notEqual(tampered, link);
+    assert.equal((await call("GET", tampered, { token: c.token })).status, 404, "tampered");
     assert.equal((await call("GET", link.replace(/exp=\d+/, "exp=99999999999"), { token: c.token })).status, 404, "tampered expiry");
 
     const key = decodeURIComponent(link.split("?")[0].split("/").pop());

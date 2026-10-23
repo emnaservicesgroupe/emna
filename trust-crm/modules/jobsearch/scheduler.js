@@ -3,8 +3,9 @@
 //   tick(now, {deps?}) -> TickSummary   one bounded, deterministic pass (injectable clock + adapters).
 //                                       Every step is isolated: a failing step is recorded in
 //                                       summary.errors and never stops later steps; tick never throws.
-//   guardedTick(now, {deps?})           tick under a Postgres session advisory lock (19028, 1) held on a
-//                                       pinned connection, so only one process ticks at a time.
+//   guardedTick(now, {deps?})           tick under a Postgres session advisory lock (key: hashtext of
+//                                       'js_scheduler:' || current_schema(), 1) held on a pinned
+//                                       connection, so only one process ticks per schema at a time.
 //   startJobSearchScheduler()           node-cron every minute -> guardedTick(new Date()); also starts the
 //                                       queue workers. Off when JOBSEARCH_SCHEDULER=off or NODE_ENV=test.
 //
@@ -30,7 +31,9 @@ const db = () => require("../../db");
 
 const ACTOR = "system:scheduler";
 const DEFAULT_SCHEDULE = "0 */6 * * *";
-const LOCK_KEY = [19028, 1];
+// Namespaced by the current schema: deployments/test schemas sharing one database never block each other.
+const LOCK_SQL = "SELECT pg_try_advisory_lock(hashtext('js_scheduler:' || current_schema()), 1) AS ok";
+const UNLOCK_SQL = "SELECT pg_advisory_unlock(hashtext('js_scheduler:' || current_schema()), 1)";
 const STATE_KEY = "scheduler_last_tick";
 const CURSOR_KEY = "scheduler_candidate_cursor";
 const HOUR_MS = 3600 * 1000;
@@ -492,6 +495,11 @@ async function tryQueue(ctx, app, counter) {
     await deferRetry(ctx, app, "queue", r.reason, ctx.L.pauseBackoffHours); // a pause appeared meanwhile
     return false;
   }
+  if (r.taskId) {
+    // channel handoff: the submitter already moved the application to needs_staff with its handoff task
+    ctx.summary.refusals.push({ applicationId: app.id, kind: "queue", code: r.reason, handoff: r.handoff || null });
+    return false;
+  }
   await openAppTask(ctx, app, r.reason, `Automatic queueing refused by the pre-send guard (${r.reason}${r.handoff ? `, handoff: ${r.handoff}` : ""}). ${r.detail || ""}`.trim());
   await deferRetry(ctx, app, "queue", r.reason);
   return false;
@@ -510,10 +518,11 @@ async function autoFlow(ctx, app) {
   let approved = false;
   let reasons;
   try {
-    const elig = await applicationService.autoApproveEligibility(app.id);
+    // One clock: the cap windows are computed from the tick clock (as the pre-send guard does).
+    const elig = await applicationService.autoApproveEligibility(app.id, { now: ctx.now });
     reasons = elig.reasons;
     if (elig.allowed) {
-      const r = await applicationService.autoApprove(app.id);
+      const r = await applicationService.autoApprove(app.id, { now: ctx.now });
       approved = r.approved;
       reasons = r.reasons;
     }
@@ -780,7 +789,7 @@ async function tick(now = new Date(), { deps = {} } = {}) {
   }
 }
 
-/** tick() under the cluster-wide session advisory lock (pinned connection); skips when another process holds it. */
+/** tick() under the per-schema session advisory lock (pinned connection); skips when another process holds it. */
 async function guardedTick(now = new Date(), opts = {}) {
   let conn;
   try {
@@ -791,7 +800,7 @@ async function guardedTick(now = new Date(), opts = {}) {
   let locked = false;
   let destroy = false;
   try {
-    locked = (await conn.query("SELECT pg_try_advisory_lock($1, $2) AS ok", LOCK_KEY)).rows[0].ok === true;
+    locked = (await conn.query(LOCK_SQL)).rows[0].ok === true;
     if (!locked) return { skipped: "locked_elsewhere" };
     return await tick(now, opts);
   } catch (err) {
@@ -799,7 +808,7 @@ async function guardedTick(now = new Date(), opts = {}) {
   } finally {
     if (locked) {
       try {
-        await conn.query("SELECT pg_advisory_unlock($1, $2)", LOCK_KEY);
+        await conn.query(UNLOCK_SQL);
       } catch {
         destroy = true; // closing the session releases the lock
       }

@@ -407,10 +407,12 @@ async function evaluate(client, id, now, recheck, opts) {
     return fail(notes, "document_unapproved", detail); // cv_not_approved, cv_missing, no_cv_in_package, unknown codes
   }
 
-  // 13. Caps (other applications' submissions in the rolling windows; cap 0 = no sends).
+  // 13. Caps (other applications' submissions in the rolling windows; cap 0 = no sends). Rows carry DB-clock
+  // stamps while `now` may be an injected clock: the window starts at LEAST(now, DB now()) - span, so clock
+  // skew can only make a cap count MORE sends (same rule as applicationService.countRecentSends).
   const counts = (await q(
-    `SELECT count(*) FILTER (WHERE COALESCE(s.sent_at, s.created_at) > $3::timestamptz - interval '1 day')::int AS day,
-            count(*) FILTER (WHERE COALESCE(s.sent_at, s.created_at) > $3::timestamptz - interval '7 days')::int AS week
+    `SELECT count(*) FILTER (WHERE COALESCE(s.sent_at, s.created_at) > LEAST($3::timestamptz, now()) - interval '1 day')::int AS day,
+            count(*) FILTER (WHERE COALESCE(s.sent_at, s.created_at) > LEAST($3::timestamptz, now()) - interval '7 days')::int AS week
        FROM js_submissions s JOIN js_applications a ON a.id = s.application_id
       WHERE a.candidate_id = $1 AND s.application_id <> $2 AND s.status = ANY($4::text[])`,
     [cid, app.id, now, COUNTED_SUBMISSIONS]
@@ -471,7 +473,8 @@ async function findDuplicate(client, app, job, now) {
   const emp = jobStore.normalizeEmployer(job.e_name || "");
   const title = jobStore.normalize(job.title);
   const city = jobStore.normalizeCity(job.location);
-  const since = now.getTime() - DUPLICATE_WINDOW_DAYS * DAY_MS;
+  // Same skew rule as the caps: an injected clock ahead of the clock that stamped the rows never shortens the window.
+  const since = Math.min(now.getTime(), Date.now()) - DUPLICATE_WINDOW_DAYS * DAY_MS;
   for (const o of others) {
     if (o.job_id === job.id) return `Application ${o.id} (${o.status}) is for the same job`;
     const theirs = urlsOf(o.job_id, o.url);
