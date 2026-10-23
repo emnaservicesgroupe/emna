@@ -181,7 +181,11 @@ locked account).
 
 - Staff console: `https://<your-address>/vita/admin.html` (the address `setup.sh` printed)
 - Candidate portal: `https://<your-address>/vita/portal.html`
+- Employer portal: `https://<your-address>/vita/employer.html`
+- Agency portal: `https://<your-address>/vita/agency.html`
 - `https://<your-address>/` is the public VITA website (Arabic, English, French) for browsers; it links to the portal and the staff console. The same address still answers the JSON status for API clients.
+
+**Employer and agency portals.** Staff create the organisation in the console (Organisations tab) and invite a person, who signs in at `/vita/employer.html` or `/vita/agency.html` with an e-mail code. The invite and every code are sent by e-mail, so they reach real people only once a real mail provider is configured (until then they land in the sandbox only). Optional limits `EMPLOYER_REQUESTS_PER_DAY` and `AGENCY_CANDIDATES_PER_DAY` are in `.env`. Details: [../vita-employer-agency/SETUP.md](../vita-employer-agency/SETUP.md).
 
 **Public website.** The public website is served at the domain root by the same app (no extra container). Everything about it is optional: the `SITE_*` variables in `.env` (phone, WhatsApp link, e-mail, postal address as `SITE_POSTAL_ADDRESS`, licence text, `SITE_BASE_URL`, `SITE_NAME`, lead limits, consent version) are hidden on the site until you set them, and `setup.sh` generates `SITE_IP_SALT` for you. In `.env`, `SITE_ADDRESS` stays the server host name for Caddy. See [../vita-website-crm/SETUP.md](../vita-website-crm/SETUP.md).
 
