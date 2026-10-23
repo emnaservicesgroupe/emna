@@ -31,6 +31,7 @@ All settings are environment variables — see `.env.example` (no secrets in the
 |---|---|---|
 | `APP_MASTER_KEY` | derives OTP, encryption (MFA secrets, identity numbers), identity-hash and webhook-secret keys | **Required in production.** Losing it makes encrypted values unreadable; rotating it requires a re-encryption job (not built — plan before first real data). Store in a secret manager. |
 | `DATABASE_URL` | Postgres | TLS to the DB in production |
+| `MAIL_SMTP_*`, `MAIL_FROM` | real e-mail through your SMTP account (Hostinger or any provider), `MAIL_PROVIDER=smtp` | Typical Hostinger values are host `smtp.hostinger.com`, port 465 (TLS) or 587 (STARTTLS) — confirm in hPanel → Emails; `MAIL_FROM` must be an address that mailbox may send as. Check with `node scripts/test-mail.js you@example.com` (verifies login, then sends one message). A successful send means the SMTP server *accepted* it, not that it was delivered. |
 | `TRUSTCRM_*` | adapter service account | separate from every user/MCP credential |
 
 ## 4. Deployment (untested here)

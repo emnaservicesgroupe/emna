@@ -97,7 +97,7 @@ Test totals and how they were produced: see §Results at the bottom.
 Modules built: Dashboard (queue counts), Leads, Candidates, Companies (staff-added with *introduced by*, owner, source, last contact, next action), Applications, Recruitment Cases, Staff, Integrations, Audit Log, Settings (policy rows via DB) — **I/T**. Modules not built: Contacts, Jobs (read-only list for staff), Agencies, Documents, Videos, Interviews, Messages, Tasks, Finance, Reports, saved views, bulk actions, response-time targets, overdue/missing-document queues, tourist visa module — **D** Phase 2. Separation of candidates in Albania vs abroad vs other destinations: country fields exist; dedicated workflow views **D**.
 
 ## 12. Messaging, email, notifications
-In-app notifications **T**; transactional e-mail with honest states (`queued → provider_accepted`, never "delivered" without receipt) **T** [auth, workflows]; outreach drafts are stored as `prepared` and cannot send (no send path exists) **I**; e-mail provider **B/M** (dev capture only). Conversations, push, WhatsApp, preferences/quiet hours/unsubscribe, reporting, search — **D** Phase 2.
+In-app notifications **T**; transactional e-mail with honest states (`queued → provider_accepted`, never "delivered" without receipt) **T** [auth, workflows]; outreach drafts are stored as `prepared` and cannot send (no send path exists) **I**; SMTP provider **I/T** [mail] — verified against a local SMTP server (message arrives, localised, code works, failure recorded as `failed`); **a real Hostinger mailbox has not been tested** (needs your SMTP credentials **B**); delivery receipts/bounces **D** (SMTP only proves hand-off). Conversations, push, WhatsApp, preferences/quiet hours/unsubscribe, reporting, search — **D** Phase 2.
 
 ## 13. Finance and commissions — **D** Phase 2 (nothing invented; no prices, rates or commissions exist)
 
@@ -172,13 +172,13 @@ Source + migrations ✔ · architecture/data model ✔ · screen inventory + per
 3. Rate limiting is per process; OTP/login limits are DB-backed and multi-instance safe.
 4. Translations (AR/SQ/FR) are machine-assisted drafts needing native review; legal pages are placeholders.
 5. No assistive-technology accessibility audit and no penetration test have been done.
-6. Dev e-mail capture means no real e-mail is sent until SMTP credentials are configured.
+6. Until `MAIL_PROVIDER=smtp` and the `MAIL_SMTP_*` credentials are set, e-mail goes to a development capture and nothing real is sent. Run `node scripts/test-mail.js you@example.com` to prove the real account works.
 7. trust-crm date handling depends on its server time zone (keep UTC).
 
 ## Results
 
 ## Results (verified 2026-10-23, re-run independently of the agent that wrote the UI)
-* `npm test`: **74 tests, 74 pass** (auth 13, jobs 8, recruitment 12, workflows 9, integration 13 against the real trust-crm app, security 8, backup 1, docs 1, i18n 9).
+* `npm test`: **77 tests, 77 pass** (auth 13, jobs 8, recruitment 12, workflows 9, integration 13 against the real trust-crm app, security 8, backup 1, docs 1, i18n 9, mail 3).
 * `npm run test:e2e` (real Chromium, throw-away DB, synthetic data): **21/21 steps pass**, zero console errors, zero CSP violations. Details and the honest limits: [DEMO.md](DEMO.md).
 * Not covered by any automated check: colour-contrast measurement, screen-reader behaviour, the lead duplicate-merge panel, employer applicant actions and the full job-editor field set in the *browser* (their APIs are tested), webhook subscription forms.
 * Known small API gaps found while building the UI: internal notes cannot be attached to a *lead* (application notes are used); `/api/me` has no profile-completion breakdown for non-candidates; an edit-after-publication reason is a raw code string the UI maps.

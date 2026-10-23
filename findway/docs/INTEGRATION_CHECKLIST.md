@@ -12,7 +12,7 @@ Work continued without these (design, schemas, adapter, local development, tests
 - [ ] A **copy/backup of production data** for a migration *preview* (only after you approve; nothing has been migrated or modified).
 
 **Providers**
-- [ ] **E-mail provider** (SMTP/transactional service) credentials — OTP e-mails currently go to a development capture only. *Blocks: real sign-ups.*
+- [ ] **E-mail (you chose Hostinger SMTP):** the SMTP host/port/user/password and a sender address your Hostinger mailbox may send as. Set them as `MAIL_SMTP_*` + `MAIL_FROM` on the server (see OPERATIONS §3) — **do not paste the password in chat or commit it** — then run `node scripts/test-mail.js your@address`. Also add SPF/DKIM for your domain in hPanel so codes don't land in spam. *Blocks: real sign-ups.*
 - [ ] **File storage** provider (S3-compatible / Azure / GCS) and malware-scanning option. *Blocks: CVs, documents, videos (Phase 2).*
 - [ ] Push / WhatsApp providers (optional). 
 - [ ] Domain name + TLS plan for the public site and API.

@@ -42,7 +42,7 @@ Legend: ✅ done in this delivery · ⬜ not done · 🔒 blocked on input from 
 | B-02 | OpenAPI document generated from the zod schemas |
 | B-03 | Shared rate-limit store (Redis) for multi-instance |
 | B-04 | `APP_MASTER_KEY` rotation / re-encryption job |
-| B-05 | Real mail provider + bounce/delivery webhooks to move messages `provider_accepted → delivered/failed` |
+| B-05 | ✅ SMTP provider done; still open: bounce/delivery webhooks or a provider API to move messages `provider_accepted → delivered/failed` |
 | B-06 | Replace in-process workers by a managed scheduler if load requires |
 | B-07 | Dependency/SAST scanning in CI, container build + scan |
 | B-08 | Accessibility audit with assistive technology (automated checks only so far) and native-speaker review of AR/SQ/FR copy |

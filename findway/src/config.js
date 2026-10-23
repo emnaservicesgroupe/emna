@@ -25,6 +25,14 @@ function load(env = process.env) {
     mail: {
       provider: env.MAIL_PROVIDER || 'dev',            // 'dev' | 'smtp' (smtp awaiting credentials)
       from: env.MAIL_FROM || 'FIND WAY <no-reply@findway.example>',
+      smtp: {
+        host: env.MAIL_SMTP_HOST || '',
+        port: int(env.MAIL_SMTP_PORT, 465),
+        secure: bool(env.MAIL_SMTP_SECURE, int(env.MAIL_SMTP_PORT, 465) === 465),   // true = implicit TLS (465); false = STARTTLS (587)
+        user: env.MAIL_SMTP_USER || '',
+        password: env.MAIL_SMTP_PASSWORD || '',
+        allowInsecure: !production && bool(env.MAIL_SMTP_ALLOW_INSECURE, false),   // tests only: plain, unauthenticated local server
+      },
     },
     trustcrm: {
       baseUrl: env.TRUSTCRM_BASE_URL || '',
