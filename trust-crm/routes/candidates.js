@@ -2,14 +2,31 @@ const express = require("express");
 const candidateModel = require("../models/candidateModel");
 const db = require("../db");
 const { verifyToken } = require("../middleware/auth");
-const { checkPermission } = require("../middleware/role");
+const { checkPermission, PERMISSIONS } = require("../middleware/role");
 const { logAudit } = require("../utils/audit");
 
 const router = express.Router();
 
+// Task 19 (I-2): candidates.assigned_to decides which staff member sees a candidate's job-search data, so
+// only users holding users:write (Admin, SuperAdmin) may set or change it, and only they may delete.
+const ASSIGN_PERMISSION = "users:write";
+function canAssign(user) {
+  const perms = (user && PERMISSIONS[user.role]) || [];
+  return perms.includes("*") || perms.includes(ASSIGN_PERMISSION);
+}
+const ASSIGN_DENIED = "Changing assigned_to requires the users:write permission (Admin or SuperAdmin)";
+const DELETE_DENIED = "Deleting a candidate requires the users:write permission (Admin or SuperAdmin); staff cannot delete candidates";
+function sameUserId(a, b) {
+  return String(a) === String(b);
+}
+
 router.post("/add", verifyToken, checkPermission("candidates:write"), async (req, res) => {
   try {
     const payload = { ...req.body, created_by: req.user.id };
+    // Staff may not assign a new candidate to someone else: a supplied assigned_to is forced to themselves.
+    if (!canAssign(req.user) && payload.assigned_to !== undefined && payload.assigned_to !== null && payload.assigned_to !== "") {
+      payload.assigned_to = req.user.id;
+    }
     const newCandidate = await candidateModel.createCandidate(payload);
 
     await logAudit({
@@ -49,6 +66,11 @@ router.put("/:id", verifyToken, checkPermission("candidates:write"), async (req,
   try {
     const oldCandidate = await candidateModel.getCandidateById(req.params.id);
     if (!oldCandidate) return res.status(404).json({ error: "Candidate not found" });
+    // The model keeps the current value for null/undefined (??), so only a different non-null value is a change.
+    const wanted = req.body ? req.body.assigned_to : undefined;
+    if (wanted !== undefined && wanted !== null && !sameUserId(wanted, oldCandidate.assigned_to) && !canAssign(req.user)) {
+      return res.status(403).json({ error: ASSIGN_DENIED });
+    }
 
     const updated = await candidateModel.updateCandidate(req.params.id, req.body);
 
@@ -68,6 +90,7 @@ router.put("/:id", verifyToken, checkPermission("candidates:write"), async (req,
 });
 
 router.delete("/:id", verifyToken, checkPermission("candidates:write"), async (req, res) => {
+  if (!canAssign(req.user)) return res.status(403).json({ error: DELETE_DENIED });
   try {
     const oldCandidate = await candidateModel.getCandidateById(req.params.id);
     if (!oldCandidate) return res.status(404).json({ error: "Candidate not found" });

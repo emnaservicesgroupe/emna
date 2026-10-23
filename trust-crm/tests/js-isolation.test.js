@@ -489,3 +489,118 @@ test("SSE: a stalled reader (never reads) is closed and unregistered once its un
     delete process.env.JOBSEARCH_SSE_BATCH;
   }
 });
+
+// ---------------------------------------------------------------- Task 19 I-2: assignment is admin-controlled
+
+async function send(method, url, actor, body) {
+  const token = actor && actor !== "unauth" ? tk[actor] : null;
+  const res = await fetch(`${base}${url}`, { method, headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let parsed = text;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    /* text */
+  }
+  return { status: res.status, body: parsed };
+}
+const assignedTo = async (cid) => (await q("SELECT assigned_to FROM candidates WHERE id = $1", [cid])).rows[0].assigned_to;
+
+test("Task 19 I-2: staff X/Y cannot take each other's candidate via PUT /candidates/:id (403, unchanged) and so still cannot read its job-search data; other fields work as before", async () => {
+  const { A, C } = s.cand;
+  const yTakesA = await send("PUT", `/candidates/${A}`, "Y", { assigned_to: s.users.Y });
+  assert.equal(yTakesA.status, 403);
+  assert.match(yTakesA.body.error, /assigned_to requires the users:write permission/);
+  const xTakesC = await send("PUT", `/candidates/${C}`, "X", { assigned_to: s.users.X, nationality: "Ignored" });
+  assert.equal(xTakesC.status, 403);
+  assert.equal((await send("PUT", `/candidates/${C}`, "receptionist", { assigned_to: s.users.receptionist })).status, 403);
+  assert.equal(await assignedTo(A), s.users.X);
+  assert.equal(await assignedTo(C), s.users.Y);
+  assert.notEqual((await q("SELECT nationality FROM candidates WHERE id=$1", [C])).rows[0].nationality, "Ignored", "a refused PUT changes nothing");
+  assert.equal((await get(`/jobsearch/candidates/${A}/matches`, "Y")).status, 404);
+  assert.equal((await get(`/jobsearch/applications/${appOf("A")}`, "Y")).status, 404);
+  assert.equal((await get(`/jobsearch/candidates/${C}/matches`, "X")).status, 404);
+  // every other field behaves as before; resending the same assignee (full-object clients) is fine
+  const ok = await send("PUT", `/candidates/${C}`, "Y", { nationality: "Moroccan", assigned_to: String(s.users.Y) });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.nationality, "Moroccan");
+  assert.equal(ok.body.assigned_to, s.users.Y);
+  assert.equal((await send("PUT", `/candidates/${C}`, "Y", { work_company: "Acme", assigned_to: null })).status, 200, "null keeps the current value (model ??)");
+  assert.equal(await assignedTo(C), s.users.Y);
+});
+
+test("Task 19 I-2: POST /candidates/add by staff forces assigned_to to the caller; admin may assign anyone; absent stays null", async () => {
+  const yAdd = await send("POST", "/candidates/add", "Y", { full_name: "Forced Self", passport_number: "PP-T19-1", assigned_to: s.users.X });
+  assert.equal(yAdd.status, 201, JSON.stringify(yAdd.body));
+  assert.equal(yAdd.body.assigned_to, s.users.Y, "staff cannot plant a candidate on someone else");
+  const xAdd = await send("POST", "/candidates/add", "X", { full_name: "Forced Self 2", passport_number: "PP-T19-2", assigned_to: s.users.Y });
+  assert.equal(xAdd.body.assigned_to, s.users.X);
+  const none = await send("POST", "/candidates/add", "Y", { full_name: "No Assignee", passport_number: "PP-T19-3" });
+  assert.equal(none.status, 201);
+  assert.equal(none.body.assigned_to, null, "unchanged behaviour when assigned_to is not supplied");
+  const adm = await send("POST", "/candidates/add", "admin", { full_name: "Admin Assigned", passport_number: "PP-T19-4", assigned_to: s.users.Y });
+  assert.equal(adm.body.assigned_to, s.users.Y);
+  await q("UPDATE candidates SET is_deleted = true WHERE passport_number LIKE 'PP-T19-%'");
+});
+
+test("Task 19 I-2: DELETE /candidates/:id is Admin/SuperAdmin only (Manager/Agent/Receptionist 403, row untouched)", async () => {
+  const c = await send("POST", "/candidates/add", "admin", { full_name: "Delete Me", passport_number: "PP-T19-DEL", assigned_to: s.users.Y });
+  for (const who of ["X", "Y", "receptionist"]) {
+    const r = await send("DELETE", `/candidates/${c.body.id}`, who);
+    assert.equal(r.status, 403, who);
+    assert.match(r.body.error, /staff cannot delete/);
+  }
+  assert.equal((await q("SELECT is_deleted FROM candidates WHERE id=$1", [c.body.id])).rows[0].is_deleted, false);
+  assert.equal((await send("DELETE", `/candidates/${c.body.id}`, "accountant")).status, 403);
+  assert.equal((await send("DELETE", `/candidates/${c.body.id}`, "admin")).status, 200);
+  assert.equal((await q("SELECT is_deleted FROM candidates WHERE id=$1", [c.body.id])).rows[0].is_deleted, true);
+});
+
+test("Task 19 I-2: admin reassigns C (Y -> X) through PUT /candidates/:id: X gains matches/applications at once, Y loses them; SSE follows after the re-check; reassign back restores", async () => {
+  const { C } = s.cand;
+  const x = await sse("X");
+  const y = await sse("Y");
+  try {
+    const t1 = Date.now();
+    const r = await send("PUT", `/candidates/${C}`, "admin", { assigned_to: s.users.X });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal((await get(`/jobsearch/candidates/${C}/matches`, "X")).status, 200);
+    assert.equal((await get(`/jobsearch/applications/${appOf("C")}`, "X")).status, 200);
+    assert.equal((await get(`/jobsearch/candidates/${C}/matches`, "Y")).status, 404);
+    assert.equal((await get(`/jobsearch/applications/${appOf("C")}`, "Y")).status, 404);
+    assert.ok(!(await get("/jobsearch/applications?pageSize=100", "Y")).body.applications.some((a) => a.candidateId === C));
+    await waitFor(() => rechecked(s.users.X, t1) && rechecked(s.users.Y, t1), 1800, "SSE re-check after reassignment");
+    const ev = await eventsHub.publish(C, "application.status_changed", { applicationId: appOf("C"), from: "r1", to: "r2" });
+    const probeY = await eventsHub.publish(s.cand.A, "application.status_changed", { applicationId: appOf("A"), from: "p", to: "q" });
+    await waitFor(() => x.events.some((e) => e.id === ev.id) && x.events.some((e) => e.id === probeY.id), 1800, "new owner receives C");
+    await sleep(150);
+    assert.ok(!y.events.some((e) => e.id === ev.id), "old owner no longer receives C's events");
+  } finally {
+    assert.equal((await send("PUT", `/candidates/${C}`, "admin", { assigned_to: s.users.Y })).status, 200);
+    x.close();
+    y.close();
+  }
+  assert.equal((await get(`/jobsearch/candidates/${C}/matches`, "Y")).status, 200);
+  assert.equal((await get(`/jobsearch/candidates/${C}/matches`, "X")).status, 404);
+  await waitFor(() => eventsHub.stats().subscribers === 0, 1800, "cleanup");
+});
+
+test("Task 19 I-2: /documents writes are scoped for staff (POST/PUT/DELETE on another staff member's candidate -> 404); admin unchanged", async () => {
+  const { A, C } = s.cand;
+  const yOnA = await send("POST", "/documents", "Y", { candidate_id: A, doc_type: "diploma", file_path: "/crm/t19.pdf" });
+  assert.equal(yOnA.status, 404);
+  const mine = await send("POST", "/documents", "Y", { candidate_id: C, doc_type: "diploma", file_path: "/crm/t19-c.pdf" });
+  assert.equal(mine.status, 201, JSON.stringify(mine.body));
+  const onA = await send("POST", "/documents", "admin", { candidate_id: A, doc_type: "diploma", file_path: "/crm/t19-a.pdf" });
+  assert.equal(onA.status, 201);
+  assert.equal((await send("PUT", `/documents/${onA.body.id}`, "Y", { notes: "hijack" })).status, 404);
+  assert.equal((await send("DELETE", `/documents/${onA.body.id}`, "Y")).status, 404);
+  assert.equal((await send("PUT", `/documents/${onA.body.id}`, "receptionist", { notes: "hijack" })).status, 404);
+  const row = (await q("SELECT notes, is_deleted FROM documents WHERE id=$1", [onA.body.id])).rows[0];
+  assert.equal(row.notes, null);
+  assert.equal(row.is_deleted, false);
+  assert.equal((await send("PUT", `/documents/${onA.body.id}`, "X", { notes: "owner edit" })).status, 200);
+  assert.equal((await send("PUT", `/documents/${mine.body.id}`, "admin", { notes: "admin edit" })).status, 200);
+  assert.equal((await send("DELETE", `/documents/${onA.body.id}`, "admin")).status, 200);
+  assert.equal((await send("DELETE", `/documents/${mine.body.id}`, "Y")).status, 200);
+});
