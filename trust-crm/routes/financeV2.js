@@ -1,5 +1,6 @@
 // Accounting API (stage 4), mounted at /finance AFTER the legacy router (which keeps /dashboard, POST /invoices and
-// POST /payments untouched). Router-level: valid session, never Candidate / Employer / Agency; then per-route permission.
+// POST /payments untouched). Router-level: valid session, never Employer / Agency; Candidate reaches ONLY /me and /me/*
+// (and nobody else reaches those); then per-route permission.
 //   GET   /services ?active&q                       finance:read
 //   POST  /services {code,name_*,default_price,currency}   finance:write (201; 409 duplicate code)
 //   PATCH /services/:id {name_*,default_price,currency,active}   finance:write (deactivate instead of delete)
@@ -13,6 +14,17 @@
 //   POST  /payments/:id/void {reason}                finance:void (409 when already void or refunded)
 //   POST  /payments/:id/refund {amount,reason,reopen?}   finance:refund (400 above the refundable amount)
 //   GET   /payments/:id/receipt ?lang=ar|en|fr       finance:read -> text/html under a strict CSP
+//   GET   /expenses ?category_id&from&to&currency&include_voided&limit&offset   finance:read -> {rows,total}
+//   POST  /expenses {title,amount,currency,spent_on,category_id?,payee?,notes?}   finance:write (201)
+//   POST  /expenses/:id/void {reason}                finance:void (409 when already void)
+//   GET   /expense-categories ?active                finance:read;   POST {name} finance:write (201; 409 duplicate);   PATCH /:id {name?,active?} finance:write
+//   GET   /reports/summary ?from&to                  finance:read -> per-currency invoiced / collected / refunded / expenses / net
+//   GET   /reports/receivables ?asOf&limit&offset    finance:read -> ageing buckets per currency + per-candidate balances
+//   GET   /reports/by-service ?from&to               finance:read;   GET /reports/by-staff ?from&to   finance:read
+//   GET   /reports/candidate/:id                     finance:read -> chronological statement with running balance per currency
+//   GET   /export/{invoices,payments,expenses}.csv ?from&to   finance:export -> text/csv (X-Row-Limit-Hit when cut at the row cap)
+//   GET   /me                                        role Candidate ONLY -> own invoices, payments and totals (no staff data)
+//   GET   /me/invoices/:id/print ?lang=ar|en|fr      role Candidate ONLY, own invoice only (anything else: the same 404)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
 const { checkPermission } = require("../middleware/role");
@@ -20,6 +32,10 @@ const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/er
 const services = require("../modules/finance/services");
 const invoices = require("../modules/finance/invoices");
 const payments = require("../modules/finance/payments");
+const expenses = require("../modules/finance/expenses");
+const reports = require("../modules/finance/reports");
+const exportCsv = require("../modules/finance/exportCsv");
+const candidateView = require("../modules/finance/candidateView");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -30,8 +46,14 @@ router.use((_req, res, next) => {
   next();
 });
 router.use(verifyToken);
+// Candidate carve-out: ONLY /me and /me/* (Express matches paths case-insensitively, so the test is too). Employer and Agency
+// are refused everywhere; staff roles are refused on /me*; a Candidate is refused on everything else.
+const ME_PATH = /^\/me(\/|$)/i;
 router.use((req, res, next) => {
-  if (req.user && (req.user.role === "Candidate" || req.user.role === "Employer" || req.user.role === "Agency")) return res.status(403).json({ error: "Access denied" });
+  const role = req.user && req.user.role;
+  const isMe = ME_PATH.test(req.path);
+  if (role === "Employer" || role === "Agency") return res.status(403).json({ error: "Access denied" });
+  if ((role === "Candidate") !== isMe) return res.status(403).json({ error: "Access denied" });
   return next();
 });
 
@@ -88,6 +110,45 @@ router.get(
   asyncHandler(async (req, res) => {
     const lang = typeof req.query.lang === "string" ? req.query.lang : req.query.lang === undefined ? "en" : null;
     sendHtml(res, await payments.receiptHtml(req.user, req.params.id, { lang }));
+  })
+);
+
+router.get("/expenses", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await expenses.listExpenses(req.user, req.query))));
+router.post("/expenses", checkPermission("finance:write"), asyncHandler(async (req, res) => res.status(201).json(await expenses.createExpense(req.user, body(req)))));
+router.post("/expenses/:id/void", checkPermission("finance:void"), asyncHandler(async (req, res) => res.json(await expenses.voidExpense(req.user, req.params.id, body(req)))));
+router.get("/expense-categories", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await expenses.listCategories(req.user, req.query))));
+router.post("/expense-categories", checkPermission("finance:write"), asyncHandler(async (req, res) => res.status(201).json(await expenses.createCategory(req.user, body(req)))));
+router.patch("/expense-categories/:id", checkPermission("finance:write"), asyncHandler(async (req, res) => res.json(await expenses.updateCategory(req.user, req.params.id, body(req)))));
+
+router.get("/reports/summary", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await reports.summary(req.user, req.query))));
+router.get("/reports/receivables", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await reports.receivables(req.user, req.query))));
+router.get("/reports/by-service", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await reports.byService(req.user, req.query))));
+router.get("/reports/by-staff", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await reports.byStaff(req.user, req.query))));
+router.get("/reports/candidate/:id", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await reports.candidateStatement(req.user, req.params.id))));
+
+for (const kind of ["invoices", "payments", "expenses"]) {
+  router.get(
+    `/export/${kind}.csv`,
+    checkPermission("finance:export"),
+    asyncHandler(async (req, res) => {
+      const out = await exportCsv.exportCsv(req.user, kind, req.query);
+      res.set({
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${out.filename}"`,
+        "X-Content-Type-Options": "nosniff",
+      });
+      if (out.truncated) res.set("X-Row-Limit-Hit", "true");
+      res.send(Buffer.from(out.csv, "utf8"));
+    })
+  );
+}
+
+router.get("/me", asyncHandler(async (req, res) => res.json(await candidateView.me(req.user))));
+router.get(
+  "/me/invoices/:id/print",
+  asyncHandler(async (req, res) => {
+    const lang = typeof req.query.lang === "string" ? req.query.lang : req.query.lang === undefined ? "en" : null;
+    sendHtml(res, await candidateView.printMyInvoice(req.user, req.params.id, { lang }));
   })
 );
 

@@ -46,3 +46,20 @@ A refund **returns money to the candidate and does not reopen the debt**, unless
 - A voided payment cannot be refunded; a payment with refunds cannot be voided (refund first, nothing to void).
 - Ledger: invoice = debit, payment = credit, void of a payment = debit, refund = debit.
   Per invoice: `ledger balance = total - live paid + refunded = remaining_amount + refunds made without reopen`.
+
+## Expenses, reports, CSV export, candidate self-view (Task 4)
+
+- [x] Expenses: `POST /finance/expenses` (amount decimal string > 0, currency in `FIN_CURRENCIES`, `spent_on` not after today+1 UTC) writes a
+      ledger debit (`kind 'expense'`); `POST /finance/expenses/:id/void` (finance:void) keeps the row and posts a ledger credit (`kind 'void'`).
+      Legacy `/finance/dashboard` `total_out` now ignores voided expenses; its totals tie to `/finance/reports/summary` (same rows, summed over currencies).
+- [x] Reports (finance:read), SQL NUMERIC, per currency, no conversion: `summary` (invoiced = non-void invoices by issue date, collected = non-voided
+      payments by `payment_date`, refunded by refund day, expenses non-voided by `spent_on`, net = collected - refunded - expenses),
+      `receivables` (open `remaining_amount`; `current` = due on/after `asOf`, `0-30` = 1-30 days overdue, `31-60`, `61-90`, `90+`, `no_due_date`;
+      `asOf` defaults to today UTC and is injectable), `by-service`, `by-staff`, `candidate/:id` statement.
+- [x] Statement running balance is the ledger balance (invoiced - paid + refunded) per currency; `open` is the invoices' remaining amount. They differ
+      by refunds made without `reopen` (money returned, debt not reopened). Voided invoices and payments are left out of the statement.
+- [x] CSV export (finance:export): BOM, every cell quoted, CRLF, `= + - @ TAB CR` first-character guard, amounts as plain decimals, cap
+      `FIN_EXPORT_MAX_ROWS` (default and maximum 50000) with `X-Row-Limit-Hit: true`; voided rows are exported with their void columns; exports are audited (`EXPORT`).
+- [x] `GET /finance/me` and `GET /finance/me/invoices/:id/print` are Candidate-only (own candidate via `js_candidate_accounts`); the router refuses Candidate
+      everywhere else and refuses every other role on `/me*`. Foreign, draft, deleted and missing invoices answer the same 404; no staff notes, `created_by`,
+      void reasons or payment references are returned or printed.

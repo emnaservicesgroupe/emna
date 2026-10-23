@@ -617,11 +617,12 @@ test("role matrix: Accountant/Admin/SuperAdmin write+void+refund, Manager read o
     assert.equal(d.payments[0].voided_at, null);
     // writers: create + refund succeed, void succeeds (sequential to avoid the refund/void conflict)
     for (const k of ["acct", "admin", "sa"]) {
-      const c1 = await calls(T[k], k).create;
+      // NOT calls(...).create: calls() fires all five requests at once, so its void raced the refund below (flaky 409).
+      const c1 = await pay(i.id, "1.00", { idempotency_key: `role-${k}` }, T[k]);
       assert.equal(c1.status, 201, k);
       const p = c1.body.payment;
       const rf = await http("POST", `/finance/payments/${seed.id}/refund`, T[k], { amount: "1.00", reason: "role test" });
-      assert.equal(rf.status, 201, `${k} refund`);
+      assert.equal(rf.status, 201, `${k} refund ${rf.text}`);
       const vd = await http("POST", `/finance/payments/${p.id}/void`, T[k], { reason: "role test" });
       assert.equal(vd.status, 200, `${k} void`);
       assert.equal((await http("GET", "/finance/payments", T[k])).status, 200);

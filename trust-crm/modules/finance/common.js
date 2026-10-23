@@ -56,6 +56,18 @@ function oneValue(v, label) {
   return v;
 }
 
+/** Optional inclusive ?from&to window (YYYY-MM-DD); empty values are "no bound"; from after to is a 400. */
+function parseRange(query) {
+  const get = (k) => {
+    const v = oneValue(query[k], k);
+    return v === undefined || v === "" ? null : parseDate(v, k);
+  };
+  const from = get("from");
+  const to = get("to");
+  if (from && to && from > to) throw new HttpError(400, "from must not be after to");
+  return { from, to };
+}
+
 function pageParams(query) {
   const num = (raw, label, def, max) => {
     const v = oneValue(raw, label);
@@ -80,4 +92,4 @@ async function nextNumber(client, prefix, counter, nowArg = null) {
   return { number: `${prefix}-${clock.y}-${row.value.padStart(6, "0")}`, ts: clock.ts, year: clock.y };
 }
 
-module.exports = { nextNumber, HttpError, hasPerm, parseId, inTransaction, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, oneValue, pageParams };
+module.exports = { nextNumber, HttpError, hasPerm, parseId, inTransaction, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, parseRange, oneValue, pageParams };

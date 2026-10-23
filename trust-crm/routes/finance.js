@@ -31,7 +31,7 @@ router.get("/dashboard", verifyToken, checkPermission("finance:read"), async (_r
     const result = await db.query(`
       SELECT
         COALESCE((SELECT SUM(amount_paid) FROM payments WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_in,
-        COALESCE((SELECT SUM(amount) FROM expenses WHERE is_deleted=false), 0) AS total_out,
+        COALESCE((SELECT SUM(amount) FROM expenses WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_out,
         COALESCE((SELECT SUM(total_amount) FROM invoices WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_invoiced,
         COALESCE((SELECT SUM(remaining_amount) FROM invoices WHERE is_deleted=false AND voided_at IS NULL), 0) AS total_remaining
     `);
