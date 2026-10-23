@@ -56,6 +56,30 @@ exports.verifyToken = async (req, res, next) => {
 };
 
 /**
+ * Defense in depth for /jobsearch (candidate + staff job-search API): a valid Employer or Agency token never
+ * reaches a /jobsearch handler, so no body validation, scope query or future route there can answer a portal
+ * user with anything but 403. Only the caller's own session echo (GET /auth/me -> {id, role}) and the public OTP
+ * sign-in routes (which ignore the token) pass. Tokens that do not verify fall through to the routes, which
+ * answer them exactly as before (401/400).
+ */
+const PORTAL_JOBSEARCH_OK = new Set(["GET /auth/me", "POST /auth/otp/request", "POST /auth/otp/verify"]);
+exports.rejectPortalTokens = (req, res, next) => {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : header;
+  if (!token) return next();
+  let verified;
+  try {
+    verified = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return next();
+  }
+  if (verified && ORG_ROLES[verified.role] && !PORTAL_JOBSEARCH_OK.has(`${req.method} ${req.path.replace(/\/+$/, "") || "/"}`)) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  return next();
+};
+
+/**
  * Revokes every versioned (`tv`) token of a user by bumping users.token_version.
  * Returns the new version, or null when the user does not exist.
  */

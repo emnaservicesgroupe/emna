@@ -130,8 +130,8 @@ async function pauseCandidate(candidateId, paused, user) {
 
 /** Module-wide kill switch (admin only). */
 async function pauseModule(paused, user) {
+  if (!user || !hasPerm(user, "jobsearch:admin")) throw new HttpError(403, "Administrator access required"); // before validation: never hint at the body shape to non-admins
   if (typeof paused !== "boolean") throw new HttpError(400, "paused must be true or false");
-  if (!user || !hasPerm(user, "jobsearch:admin")) throw new HttpError(403, "Administrator access required");
   await tx(async (client) => {
     await client.query(
       `INSERT INTO js_module_state (key, value) VALUES ('module_paused', $1::jsonb)

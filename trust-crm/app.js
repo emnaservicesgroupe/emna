@@ -26,6 +26,7 @@ const employerPortalRoutes = require("./routes/employerPortal");
 const agencyPortalRoutes = require("./routes/agencyPortal");
 const { mountVita } = require("./routes/vitaStatic");
 const { mountSite, siteHome } = require("./routes/siteStatic");
+const { rejectPortalTokens } = require("./middleware/auth");
 const { trustProxySetting } = require("./utils/trustProxy");
 
 const app = express();
@@ -89,6 +90,8 @@ app.use("/notifications", notificationRoutes);
 app.use("/finance", financeRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
+// Employer / Agency tokens never reach any /jobsearch handler (except GET /auth/me and the OTP routes).
+app.use("/jobsearch", rejectPortalTokens);
 app.use("/jobsearch", jobsearchAuthRoutes);
 app.use("/jobsearch", jobsearchProfileRoutes);
 app.use("/jobsearch", jobsearchConsentRoutes);
