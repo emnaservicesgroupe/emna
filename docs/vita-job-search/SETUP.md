@@ -300,12 +300,16 @@ What each permission allows (always limited to the candidates the user may see):
 - **users:write** (Admin, SuperAdmin) — create staff accounts, **set or change `candidates.assigned_to`**
   and **delete candidates** (Task 19). Because the assignment decides which staff member sees a
   candidate's job-search data, staff can no longer reassign a candidate: `PUT /candidates/:id` with a
-  different `assigned_to` returns 403 for them, and `POST /candidates/add` from a staff member always
-  assigns the new candidate to that staff member. `DELETE /candidates/:id` is admin-only.
+  different `assigned_to` returns 403 for them. `POST /candidates/add` from a staff member assigns the new
+  candidate to **that staff member only when the request sends `assigned_to`** (any value they send is
+  replaced by their own id); when `assigned_to` is not sent the candidate is created **unassigned**, no
+  staff member sees it in the job-search module, and only an admin can assign it later
+  (`PUT /candidates/:id`). `DELETE /candidates/:id` is admin-only.
 
-Outside the module: the original `/candidates` read routes (`GET /candidates/all`, `GET /candidates/:id`),
-`POST /candidates/:id/stage` (`visa:write`: Admin, Manager, Agent) and `/finance` are **not** scoped to
-assigned candidates (see CHECKLIST limitation 2). `/documents` writes (POST/PUT/DELETE) are scoped for
+Outside the module: the original routes `GET /candidates/all`, `GET /candidates/:id`, `PUT /candidates/:id`
+(every field except `assigned_to`), `POST /candidates/:id/stage` (`visa:write`: Admin, Manager, Agent),
+`GET /alerts/expiring`, `GET /notifications/latest` (and `POST /notifications/read/:id`) and `/finance/*` are
+**not** scoped to assigned candidates (see CHECKLIST limitation 2). None of them exposes job-search data. `/documents` writes (POST/PUT/DELETE) are scoped for
 Agent/Manager/Receptionist to their assigned candidates since Task 19.
 
 **Candidates**
@@ -316,8 +320,9 @@ Agent/Manager/Receptionist to their assigned candidates since Task 19.
    POST /candidates/add
    { "full_name": "…", "passport_number": "…", "assigned_to": <staff user id> }
    ```
-   Only an Admin/SuperAdmin can choose `assigned_to` (a staff member who adds a candidate is always
-   assigned themselves); reassign later with `PUT /candidates/:id { "assigned_to": … }` (admin only).
+   Only an Admin/SuperAdmin can choose `assigned_to`. A staff member who sends `assigned_to` is assigned
+   themselves whatever id they send; a staff member who leaves it out creates an **unassigned** candidate
+   that only an admin can assign. Reassign later with `PUT /candidates/:id { "assigned_to": … }` (admin only).
 2. Create the candidate's login, linked to that candidate:
    ```http
    POST /jobsearch/admin/candidate-accounts
