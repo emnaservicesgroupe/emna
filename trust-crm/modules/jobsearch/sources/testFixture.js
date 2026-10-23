@@ -12,7 +12,8 @@ module.exports = {
     state.calls += 1;
     state.searchCalls.push(query);
     if (state.failWith) {
-      if (state.failWith === "429") throw new RateLimited(2000);
+      const m = /^429(?::(\d+))?$/.exec(state.failWith);
+      if (m) throw new RateLimited(m[1] ? Number(m[1]) : 2000);
       throw new Error(state.failWith);
     }
     return state.jobs.map((j) => ({ ...j }));

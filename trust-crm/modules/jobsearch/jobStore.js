@@ -163,7 +163,8 @@ async function upsertJob(raw, sourceId, opts = {}) {
         `UPDATE js_jobs SET last_checked_at = $2,
            employer_id = COALESCE(employer_id, $3), url = COALESCE(url, $4), location = COALESCE(NULLIF(location,''), $5),
            country = COALESCE(NULLIF(country,''), $6), published_at = COALESCE(published_at, $7),
-           closing_at = COALESCE($8, closing_at), description_text = COALESCE(NULLIF(description_text,''), $9)
+           closing_at = COALESCE($8, closing_at), description_text = COALESCE(NULLIF(description_text,''), $9),
+           status = CASE WHEN COALESCE($8, closing_at) < $2 THEN 'expired' ELSE 'open' END
          WHERE id = $1`,
         [jobId, now, employerId, r.url, r.location || null, r.country || null, r.publishedAt, r.closingAt, r.description || null]
       );

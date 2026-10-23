@@ -12,7 +12,7 @@ const SCOPE_KEYS = ["search", "prepare", "submit"];
 const WITHDRAW_KEYS = [...SCOPE_KEYS, "all"];
 const MAX_COUNTRIES = 100;
 // Queue kinds that carry sendable/preparatory work and are cancelled on withdrawal/suspension.
-const CANCELLABLE_QUEUE_KINDS = ["submit", "prepare", "followup"];
+const CANCELLABLE_QUEUE_KINDS = ["submit", "prepare", "followup", "search"];
 
 function actorOf(user) {
   return user.role === "Candidate" ? "candidate" : `staff:${user.id}`;

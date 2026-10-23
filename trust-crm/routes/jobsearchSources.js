@@ -11,7 +11,8 @@ const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/er
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { authorize } = require("../modules/jobsearch/profileService");
 const registry = require("../modules/jobsearch/sources");
-const { runSearch, ensureSources } = require("../modules/jobsearch/searchRunner");
+const { ensureSources, enqueueSearch, runStatus } = require("../modules/jobsearch/searchRunner");
+const consentService = require("../modules/jobsearch/consentService");
 const jobStore = require("../modules/jobsearch/jobStore");
 const { logAudit } = require("../utils/audit");
 
@@ -43,7 +44,7 @@ router.get("/sources", verifyToken, asyncHandler(async (req, res) => {
       last_error: row.last_error,
       last_run_at: row.last_run_at,
       ...adapter.describe(),
-      last_run: last ? { id: last.id, started_at: last.started_at, finished_at: last.finished_at, found: last.found, new_count: last.new_count, status: (last.errors[0] && last.errors[0].status) || "ok", error: (last.errors[0] && last.errors[0].message) || null } : null,
+      last_run: last ? { id: last.id, started_at: last.started_at, finished_at: last.finished_at, found: last.found, new_count: last.new_count, status: runStatus(last).status, error: runStatus(last).message, skipped_invalid: runStatus(last).skipped_invalid } : null,
     });
   }
   res.json(out);
@@ -73,9 +74,16 @@ router.post("/search/run", verifyToken, asyncHandler(async (req, res) => {
   } else {
     need(req.user, "jobsearch:admin"); // a candidate-less refresh is not scoped to anyone
   }
-  const summary = await runSearch({ sourceKey: b.sourceKey, candidateId, manual: true });
-  await logAudit({ userId: req.user.id, action: "jobsearch.search.run", tableName: "js_runs", newData: { candidateId: candidateId || null, sourceKey: b.sourceKey || null, status: summary.status } });
-  res.json(summary);
+  // Authorization, scope and eligibility are checked now AND again when the queue job runs.
+  if (b.sourceKey !== undefined && !registry.getAdapter(b.sourceKey)) throw new HttpError(404, "Not found");
+  if (candidateId !== undefined) {
+    const elig = await consentService.searchEligible(candidateId);
+    if (!elig.eligible) throw new HttpError(403, `Candidate is not eligible for search: ${elig.reasons.join(", ")}`);
+  }
+  await ensureSources();
+  const job = await enqueueSearch({ sourceKey: b.sourceKey, candidateId, requestedBy: req.user.id });
+  await logAudit({ userId: req.user.id, action: "jobsearch.search.run", tableName: "js_queue", recordId: Number(job.id), newData: { candidateId: candidateId || null, sourceKey: b.sourceKey || null } });
+  res.status(202).json({ queued: true, queueId: Number(job.id) });
 }));
 
 router.get("/jobs", verifyToken, asyncHandler(async (req, res) => {
@@ -98,14 +106,15 @@ router.get("/jobs", verifyToken, asyncHandler(async (req, res) => {
   }
   const pageSize = Math.min(Math.max(parseInt(q.pageSize, 10) || 25, 1), 100);
   const page = Math.max(parseInt(q.page, 10) || 1, 1);
+  if (page > 10000) throw new HttpError(400, "page must be at most 10000");
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const total = (await db().query(`SELECT count(*)::int AS n FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id ${w}`, params)).rows[0].n;
   const rows = (await db().query(
     `SELECT j.id, j.title, e.name AS employer, j.location, j.country, j.url, j.status, j.published_at, j.last_checked_at, j.closing_at, j.source_primary,
             (SELECT array_agg(src.key ORDER BY src.key) FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = j.id) AS sources
        FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id ${w}
-      ORDER BY COALESCE(j.published_at, j.created_at) DESC, j.id DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`,
-    params
+      ORDER BY COALESCE(j.published_at, j.created_at) DESC, j.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, pageSize, (page - 1) * pageSize]
   )).rows;
   res.json({ jobs: rows, page, pageSize, total });
 }));

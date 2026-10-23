@@ -25,27 +25,47 @@ function ipv4Private(ip) {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 192 && b === 0 && p[2] === 0) ||
+    (a === 192 && b === 0 && (p[2] === 0 || p[2] === 2)) ||
+    (a === 198 && b === 51 && p[2] === 100) ||
+    (a === 203 && b === 0 && p[2] === 113) ||
     (a === 198 && (b === 18 || b === 19)) ||
     a >= 224
   );
+}
+
+/** Expands an IPv6 literal to eight 16-bit groups, or null if malformed. */
+function expandIpv6(ip) {
+  let s = ip.toLowerCase().split("%")[0];
+  const dotted = s.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const o = dotted[1].split(".").map(Number);
+    if (o.some((x) => x > 255)) return null;
+    s = s.slice(0, -dotted[1].length) + ((o[0] << 8) | o[1]).toString(16) + ":" + ((o[2] << 8) | o[3]).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return null;
+  const all = [...head, ...Array(fill).fill("0"), ...tail].map((x) => parseInt(x, 16));
+  return all.length === 8 && all.every((x) => Number.isInteger(x) && x >= 0 && x <= 0xffff) ? all : null;
 }
 
 function isPrivateAddress(ip) {
   const kind = net.isIP(ip);
   if (kind === 4) return ipv4Private(ip);
   if (kind === 6) {
-    const s = ip.toLowerCase();
-    if (s === "::" || s === "::1") return true;
-    const mapped = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return ipv4Private(mapped[1]);
-    const mappedHex = s.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    if (mappedHex) {
-      const hi = parseInt(mappedHex[1], 16);
-      const lo = parseInt(mappedHex[2], 16);
-      return ipv4Private(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
-    }
-    return /^f[cd]/.test(s) || /^fe[89ab]/.test(s) || /^ff/.test(s);
+    const g = expandIpv6(ip);
+    if (!g) return true;
+    const v4 = (hi, lo) => ipv4Private(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    if (g.slice(0, 6).every((x) => x === 0)) return true; // ::/96 (unspecified, loopback, IPv4-compatible)
+    if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return v4(g[6], g[7]); // ::ffff:a.b.c.d
+    if (g.slice(0, 4).every((x) => x === 0) && g[4] === 0xffff && g[5] === 0) return true; // ::ffff:0:a.b.c.d (SIIT)
+    if (g[0] === 0x64 && g[1] === 0xff9b) return true; // NAT64 64:ff9b::/96 and 64:ff9b:1::/48
+    if (g[0] === 0x2002) return true; // 6to4
+    if (g[0] === 0x2001 && g[1] === 0x0db8) return true; // documentation
+    return (g[0] & 0xfe00) === 0xfc00 || (g[0] & 0xffc0) === 0xfe80 || (g[0] & 0xff00) === 0xff00;
   }
   return true; // unparseable: refuse
 }
@@ -121,7 +141,18 @@ async function readCapped(res, maxBytes) {
  * GET an authorized feed URL. ctx: { fetch, lookup, now(), maxBytes, timeoutMs }.
  * Returns the response text. Errors never include the URL (it may carry a token).
  */
-async function fetchFeedText(rawUrl, ctx = {}) {
+function fetchFeedText(rawUrl, ctx = {}) {
+  // ctx.cache (a Map) memoises the download for one run; failures are not cached.
+  if (!ctx.cache) return fetchFeedTextUncached(rawUrl, ctx);
+  if (!ctx.cache.has(rawUrl)) {
+    const p = fetchFeedTextUncached(rawUrl, ctx);
+    ctx.cache.set(rawUrl, p);
+    p.catch(() => ctx.cache.delete(rawUrl));
+  }
+  return ctx.cache.get(rawUrl);
+}
+
+async function fetchFeedTextUncached(rawUrl, ctx) {
   const doFetch = ctx.fetch || globalThis.fetch;
   const maxBytes = ctx.maxBytes || DEFAULT_MAX_BYTES;
   const timeoutMs = ctx.timeoutMs || DEFAULT_TIMEOUT_MS;

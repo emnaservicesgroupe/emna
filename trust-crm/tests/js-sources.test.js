@@ -15,7 +15,9 @@ const registry = require("../modules/jobsearch/sources");
 const fixture = require("../modules/jobsearch/sources/testFixture");
 const { fetchFeedText, assertSafeFeedUrl } = require("../modules/jobsearch/sources/http");
 const { SourceNotConnected, RateLimited, FeedRejected } = require("../modules/jobsearch/sources/errors");
-const { runSearch } = require("../modules/jobsearch/searchRunner");
+const { runSearch, runStatus, handleSearchJob, handlers } = require("../modules/jobsearch/searchRunner");
+const queue = require("../modules/jobsearch/queue");
+const { isPrivateAddress } = require("../modules/jobsearch/sources/http");
 
 const J = (id, over = {}) => ({ sourceJobId: id, url: `https://jobs.example.com/${id}`, title: `Electrician ${id}`, employerName: "Acme", location: "Doha", country: "Qatar", publishedAt: "2026-10-05T00:00:00Z", closingAt: null, description: "Wire things", ...over });
 const counts = async (pool) => ({
@@ -341,11 +343,13 @@ test("POST /search/run: scope, permissions and eligibility", async () => {
     assert.equal((await run(A, { candidateId: 99999, sourceKey: "test_fixture" })).status, 404);
     assert.equal((await run(A, { candidateId: cid, sourceKey: "nope" })).status, 404);
     const ok = await run(A, { candidateId: cid, sourceKey: "test_fixture" });
-    assert.equal(ok.status, 200);
-    assert.equal(ok.body.status, "ok");
-    assert.equal(ok.body.created, 1);
-    assert.equal((await run(ADM, { candidateId: cid, sourceKey: "jobbank_ca" })).body.status, "requires_setup");
-    assert.equal((await run(ADM, {})).status, 200, "admin may refresh all sources");
+    assert.equal(ok.status, 202);
+    assert.equal(ok.body.queued, true);
+    assert.equal(fixture._state.calls, 0, "nothing runs inside the request");
+    assert.equal(await queue.work(handlers, { loop: true }), 1);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_jobs")).rows[0].n, 1);
+    assert.equal((await run(ADM, { candidateId: cid, sourceKey: "jobbank_ca" })).status, 202);
+    assert.equal((await run(ADM, {})).status, 202, "admin may refresh all sources");
     fixture._reset();
   });
 });
@@ -370,7 +374,8 @@ test("GET /sources reports status, describe() and last run; pause/resume need ad
     assert.equal((await t.call("GET", "/jobsearch/sources", { token: A })).body.find((s) => s.key === "jobbank_ca").paused, true);
     assert.equal((await t.call("POST", "/jobsearch/sources/jobbank_ca/resume", { token: ADM })).body.paused, false);
     assert.equal((await t.call("POST", "/jobsearch/sources/nope/pause", { token: ADM })).status, 404);
-    await t.call("POST", "/jobsearch/search/run", { token: ADM, body: { sourceKey: "jobbank_ca" } });
+    assert.equal((await t.call("POST", "/jobsearch/search/run", { token: ADM, body: { sourceKey: "jobbank_ca" } })).status, 202);
+    await queue.work(handlers, { loop: true });
     const after = (await t.call("GET", "/jobsearch/sources", { token: A })).body.find((s) => s.key === "jobbank_ca");
     assert.equal(after.last_run.status, "requires_setup");
   });
@@ -407,5 +412,164 @@ test("GET /jobs filters and paginates; Candidate is refused; manual import is sa
     const cand = await t.candToken(await t.eligibleCandidate(t.agentA));
     assert.equal((await t.call("GET", "/jobsearch/jobs", { token: cand })).status, 403);
     assert.equal((await t.call("GET", "/jobsearch/jobs")).status, 401);
+  });
+});
+
+// ---------- fix round 1 ----------
+test("POST /search/run enqueues (202), runs nothing inline, dedupes within the minute, and the queue drain runs it", async () => {
+  await withApp(async (t) => {
+    fixture._reset();
+    fixture._set({ jobs: [J("1")] });
+    const cid = await t.eligibleCandidate(t.agentA);
+    const A = t.tok(t.agentA, "Agent");
+    const body = { candidateId: cid, sourceKey: "test_fixture" };
+    const started = Date.now();
+    const r1 = await t.call("POST", "/jobsearch/search/run", { token: A, body });
+    const r2 = await t.call("POST", "/jobsearch/search/run", { token: A, body });
+    assert.ok(Date.now() - started < 2000);
+    assert.equal(r1.status, 202);
+    assert.equal(r2.status, 202);
+    assert.equal(r1.body.queueId, r2.body.queueId, "double click -> one item");
+    assert.equal(fixture._state.calls, 0);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_runs")).rows[0].n, 0);
+    const q = (await t.pool.query("SELECT * FROM js_queue WHERE kind='search'")).rows;
+    assert.equal(q.length, 1);
+    assert.equal(q[0].payload.candidateId, cid);
+    assert.equal(q[0].payload.requestedBy, t.agentA);
+    assert.equal(q[0].payload.manual, true);
+    assert.match(q[0].idempotency_key, /^search:test_fixture:\d+:\d+$/);
+    assert.equal(await queue.work(handlers, { loop: true }), 1);
+    assert.equal(fixture._state.calls, 1);
+    assert.equal((await t.pool.query("SELECT status FROM js_queue WHERE id=$1", [q[0].id])).rows[0].status, "done");
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_jobs")).rows[0].n, 1);
+    fixture._reset();
+  });
+});
+
+test("consent withdrawn between enqueue and execution: the job runs but does nothing for that candidate", async () => {
+  await withApp(async (t) => {
+    fixture._reset();
+    fixture._set({ jobs: [J("1")] });
+    const cid = await t.eligibleCandidate(t.agentA);
+    const r = await t.call("POST", "/jobsearch/search/run", { token: t.tok(t.agentA, "Agent"), body: { candidateId: cid, sourceKey: "test_fixture" } });
+    assert.equal(r.status, 202);
+    await t.pool.query("UPDATE js_consents SET withdrawn_at = now() WHERE candidate_id=$1", [cid]);
+    assert.equal(await queue.work(handlers, { loop: true }), 1);
+    assert.equal(fixture._state.calls, 0);
+    assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_runs")).rows[0].n, 0);
+    assert.equal((await t.pool.query("SELECT status FROM js_queue WHERE id=$1", [r.body.queueId])).rows[0].status, "done");
+    // requester reassigned away: also a no-op
+    await t.pool.query("UPDATE js_consents SET withdrawn_at = NULL WHERE candidate_id=$1", [cid]);
+    await t.pool.query("UPDATE candidates SET assigned_to=$1 WHERE id=$2", [t.agentB, cid]);
+    const job = { payload: { sourceKey: "test_fixture", candidateId: cid, manual: true, requestedBy: t.agentA } };
+    assert.equal((await handleSearchJob(job)).reason, "candidate_out_of_scope");
+    assert.equal(fixture._state.calls, 0);
+    fixture._reset();
+  });
+});
+
+test("queue: idempotent enqueue, claim, fail backs off 2^attempts*30s and ends 'failed' at max_attempts", async () => {
+  await withDb(async (pool) => {
+    const a = await queue.enqueue({ kind: "x", payload: { n: 1 }, idempotencyKey: "k1" });
+    const b = await queue.enqueue({ kind: "x", payload: { n: 2 }, idempotencyKey: "k1" });
+    assert.equal(a.id, b.id);
+    const [c] = await queue.claim(["x"], 5);
+    assert.equal(c.attempts, 1);
+    assert.deepEqual(await queue.claim(["x"], 5), []);
+    await queue.fail(c.id, new Error("boom"));
+    const r = (await pool.query("SELECT status, last_error, run_at - now() AS wait FROM js_queue WHERE id=$1", [c.id])).rows[0];
+    assert.equal(r.status, "pending");
+    assert.equal(r.last_error, "boom");
+    assert.ok(r.wait.seconds >= 55 && r.wait.seconds <= 61 || r.wait.minutes === 1, "2^1*30s");
+    await pool.query("UPDATE js_queue SET attempts = 5, status='running' WHERE id=$1", [c.id]);
+    await queue.fail(c.id, "again");
+    assert.equal((await pool.query("SELECT status FROM js_queue WHERE id=$1", [c.id])).rows[0].status, "failed");
+    const d = await queue.enqueue({ kind: "y", payload: {} });
+    const [cd] = await queue.claim(["y"], 1);
+    await queue.complete(cd.id);
+    assert.equal((await pool.query("SELECT status FROM js_queue WHERE id=$1", [d.id])).rows[0].status, "done");
+  });
+});
+
+test("one invalid feed item is skipped and counted; the run succeeds and the source stays connected", async () => {
+  await withDb(async (pool) => {
+    fixture._reset();
+    fixture._set({ jobs: [J("1"), J("bad", { title: "<script>x</script>" }), J("2")] });
+    const clock = fakeClock();
+    const s = await runSearch({ sourceKey: "test_fixture" }, { now: clock.now, sleep: clock.sleep });
+    assert.equal(s.status, "ok_with_skips");
+    assert.equal(s.created, 2);
+    assert.equal(s.skipped_invalid, 1);
+    assert.equal(fixture._state.calls, 1, "no retry for bad items");
+    assert.equal((await counts(pool)).jobs, 2);
+    assert.equal((await pool.query("SELECT status FROM js_sources WHERE key='test_fixture'")).rows[0].status, "connected");
+    const d = runStatus(await lastRun(pool, "test_fixture"));
+    assert.equal(d.status, "ok_with_skips");
+    assert.equal(d.skipped_invalid, 1);
+    assert.match(d.message, /1 invalid/);
+    assert.deepEqual(runStatus({ errors: [] }), { status: "ok", message: null, attempts: null, skipped_invalid: 0 });
+    fixture._reset();
+  });
+});
+
+test("Retry-After above 30s is not waited for inline: run recorded rate_limited, source not marked unavailable", async () => {
+  await withDb(async (pool) => {
+    fixture._reset();
+    fixture._set({ failWith: "429:120000" });
+    const clock = fakeClock();
+    const s = await runSearch({ sourceKey: "test_fixture" }, { now: clock.now, sleep: clock.sleep });
+    assert.equal(s.status, "rate_limited");
+    assert.deepEqual(clock.sleeps, []);
+    assert.equal(fixture._state.calls, 1);
+    assert.equal(runStatus(await lastRun(pool, "test_fixture")).status, "rate_limited");
+    assert.equal((await pool.query("SELECT status FROM js_sources WHERE key='test_fixture'")).rows[0].status, "connected");
+    fixture._reset();
+  });
+});
+
+test("two simultaneous runs cannot both pass a rate limit of 1/min", async () => {
+  await withDb(async (pool) => {
+    fixture._reset();
+    fixture._set({ jobs: [J("1")] });
+    const { ensureSources } = require("../modules/jobsearch/searchRunner");
+    await ensureSources();
+    await pool.query("UPDATE js_sources SET rate_limit_per_min = 1 WHERE key='test_fixture'");
+    const clock = fakeClock();
+    const deps = { now: clock.now, sleep: clock.sleep };
+    const rs = await Promise.all([runSearch({ sourceKey: "test_fixture" }, deps), runSearch({ sourceKey: "test_fixture" }, deps), runSearch({ sourceKey: "test_fixture" }, deps)]);
+    assert.deepEqual(rs.map((r) => r.status).sort(), ["ok", "rate_limited", "rate_limited"]);
+    assert.equal(fixture._state.calls, 1);
+    fixture._reset();
+  });
+});
+
+test("feed download is memoised per run (and failures are not cached)", async () => {
+  const cache = new Map();
+  const f = fakeFetch(() => json([{ id: 1 }]));
+  await fetchFeedText("https://feeds.example.com/f", { fetch: f, lookup: PUBLIC_LOOKUP, cache });
+  await fetchFeedText("https://feeds.example.com/f", { fetch: f, lookup: PUBLIC_LOOKUP, cache });
+  assert.equal(f.calls.length, 1);
+  const bad = fakeFetch((u, i, n) => (n === 1 ? new Response("x", { status: 500 }) : json([])));
+  const c2 = new Map();
+  await assert.rejects(() => fetchFeedText("https://feeds.example.com/g", { fetch: bad, lookup: PUBLIC_LOOKUP, cache: c2 }));
+  await fetchFeedText("https://feeds.example.com/g", { fetch: bad, lookup: PUBLIC_LOOKUP, cache: c2 });
+  assert.equal(bad.calls.length, 2);
+});
+
+test("IPv6 / IPv4 reserved ranges are blocked", () => {
+  for (const ip of ["::1", "::", "::7f00:1", "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:0:7f00:1", "64:ff9b::7f00:1", "64:ff9b::a00:1", "2002:7f00:1::", "2002:c0a8:1::1", "fe80::1", "fd12::1", "ff02::1", "2001:db8::1", "0.1.2.3", "100.64.0.1", "198.18.0.1", "198.19.255.1", "192.0.2.10", "198.51.100.7", "203.0.113.9", "10.0.0.1", "169.254.169.254"]) {
+    assert.equal(isPrivateAddress(ip), true, ip);
+    assert.throws(() => assertSafeFeedUrl(ip.includes(":") ? `https://[${ip}]/x` : `https://${ip}/x`), FeedRejected, ip);
+  }
+  for (const ip of ["93.184.216.34", "8.8.8.8", "2606:4700:4700::1111", "2a00:1450:4007:80e::200e"]) assert.equal(isPrivateAddress(ip), false, ip);
+});
+
+test("GET /jobs: huge page is 400 (not 500), paging uses bound parameters", async () => {
+  await withApp(async (t) => {
+    const A = t.tok(t.agentA, "Agent");
+    assert.equal((await t.call("GET", "/jobsearch/jobs?page=99999999999999999999", { token: A })).status, 400);
+    assert.equal((await t.call("GET", "/jobsearch/jobs?page=10001", { token: A })).status, 400);
+    assert.equal((await t.call("GET", "/jobsearch/jobs?page=10000", { token: A })).status, 200);
+    assert.equal((await t.call("GET", "/jobsearch/jobs?page=abc&pageSize=-5", { token: A })).status, 200);
   });
 });

@@ -167,3 +167,25 @@ test("concurrent upserts of one vacancy create one row", async () => {
     assert.equal((await pool.query("SELECT count(*)::int n FROM js_jobs")).rows[0].n, 1);
   });
 });
+
+test("upsert recalculates status from the closing date on every sighting", async () => {
+  await withDb(async (pool) => {
+    const ids = await sourceIds(pool);
+    const now = new Date("2026-10-05T10:00:00Z");
+    const later = new Date("2026-10-10T10:00:00Z");
+    const mk = (extra) => ({ ...RAW, url: null, sourceJobId: "S1", ...extra });
+    const first = await jobStore.upsertJob(mk({ closingAt: "2026-10-01T00:00:00Z" }), ids.test_fixture, { now });
+    assert.equal(first.job.status, "expired", "first insert with past closing date");
+    const reopened = await jobStore.upsertJob(mk({ closingAt: "2026-12-01T00:00:00Z" }), ids.test_fixture, { now: later });
+    assert.equal(reopened.job.status, "open", "expired job re-seen with a future closing date");
+    const again = await jobStore.upsertJob(mk({ closingAt: "2026-10-08T00:00:00Z" }), ids.test_fixture, { now: later });
+    assert.equal(again.job.status, "expired", "re-seen with a past closing date");
+    const noDate = await jobStore.upsertJob(mk({ closingAt: null }), ids.test_fixture, { now: later });
+    assert.equal(noDate.job.status, "expired", "missing closing date keeps the stored one");
+    // a job closed by recheck is reopened when a source returns it again
+    const c = (await jobStore.upsertJob(mk({ sourceJobId: "S2", title: "Cook", closingAt: null }), ids.test_fixture, { now })).job;
+    await pool.query("UPDATE js_jobs SET status='closed' WHERE id=$1", [c.id]);
+    const back = await jobStore.upsertJob(mk({ sourceJobId: "S2", title: "Cook", closingAt: null }), ids.test_fixture, { now: later });
+    assert.equal(back.job.status, "open");
+  });
+});
