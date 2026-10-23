@@ -144,17 +144,38 @@ async function matchCandidate(candidateId, opts = {}) {
 }
 
 /**
- * Re-scores EXISTING matches on the given jobs (after a confirmation is recorded or revoked) so the
- * label, score, reasons and notes never go stale. Candidate rows are locked in id order first and the
- * match rows are read after the lock. Never creates or deletes matches; created_at is untouched
- * (pruning below the threshold still happens only in matchCandidate).
+ * Locks (FOR UPDATE, id order) every live candidate that has a match on the given jobs, plus
+ * `extraCandidateIds` (e.g. the candidate of an application a confirmation will reference). Call it
+ * BEFORE touching js_employer_confirmations/js_applications so the lock order is always
+ * candidates -> applications, as in consent/approval paths. Deleted candidates are not locked.
+ * @returns {Promise<number[]>} the locked candidate ids
  */
-async function relabelJobs(client, jobIds) {
+async function lockForRelabel(client, jobIds, extraCandidateIds = []) {
+  const fromMatches = jobIds.length
+    ? (await client.query("SELECT DISTINCT candidate_id FROM js_matches WHERE job_id = ANY($1::int[])", [jobIds])).rows.map((r) => r.candidate_id)
+    : [];
+  const ids = [...new Set([...fromMatches, ...extraCandidateIds.filter((x) => Number.isSafeInteger(x))])];
+  if (!ids.length) return [];
+  return (await client.query("SELECT id FROM candidates WHERE id = ANY($1::int[]) AND is_deleted = false ORDER BY id FOR UPDATE", [ids])).rows.map((r) => r.id);
+}
+
+/**
+ * Re-scores EXISTING matches on the given jobs (after a confirmation is recorded or revoked) so the
+ * label, score, reasons and notes never go stale. Only rows of the candidates locked by
+ * lockForRelabel are touched (rows of deleted or unlocked candidates are skipped); match rows are read
+ * after the lock. Never creates or deletes matches; created_at is untouched (pruning below the
+ * threshold still happens only in matchCandidate).
+ * @param {{now?: Date, candidateIds?: number[]}} [opts] candidateIds: the set returned by lockForRelabel (locked here when omitted)
+ */
+async function relabelJobs(client, jobIds, opts = {}) {
   if (!jobIds.length) return 0;
-  const cands = (await client.query("SELECT DISTINCT candidate_id FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id", [jobIds])).rows.map((r) => r.candidate_id);
-  if (!cands.length) return 0;
-  await client.query("SELECT id FROM candidates WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE", [cands]);
-  const rows = (await client.query("SELECT candidate_id, job_id FROM js_matches WHERE job_id = ANY($1::int[]) ORDER BY candidate_id, job_id", [jobIds])).rows;
+  const locked = opts.candidateIds || (await lockForRelabel(client, jobIds));
+  if (!locked.length) return 0;
+  const rows = (await client.query(
+    "SELECT candidate_id, job_id FROM js_matches WHERE job_id = ANY($1::int[]) AND candidate_id = ANY($2::int[]) ORDER BY candidate_id, job_id",
+    [jobIds, locked]
+  )).rows;
+  if (!rows.length) return 0;
   const confirmationFor = await loadConfirmations(client);
   const jobs = new Map((await client.query("SELECT * FROM js_jobs WHERE id = ANY($1::int[])", [jobIds])).rows.map((j) => [j.id, j]));
   const cache = new Map();
@@ -167,16 +188,16 @@ async function relabelJobs(client, jobIds) {
     }
     const job = jobs.get(jid);
     const { profile, prefs } = cache.get(cid);
-    const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job) });
+    const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job), now: opts.now });
     await client.query(
       `UPDATE js_matches SET score = $3, reasons = $4::jsonb, missing = $5::jsonb, uncertain = $6::jsonb,
          employer_support = $7, employer_support_evidence = $8, employer_support_conflict = $9,
          overseas_accepted = $10, overseas_applicants_evidence = $11
        WHERE candidate_id = $1 AND job_id = $2`,
-      upsertParams(cid, job, r).slice(0)
+      upsertParams(cid, job, r)
     );
   }
   return rows.length;
 }
 
-module.exports = { matchCandidate, relabelJobs, minScore };
+module.exports = { matchCandidate, relabelJobs, lockForRelabel, minScore };

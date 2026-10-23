@@ -10,6 +10,7 @@ const { scoreMatch, detectEmployerSupport, detectOverseas, NOTICE } = require(".
 const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
 const jobStore = require("../modules/jobsearch/jobStore");
 const matchService = require("../modules/jobsearch/matchService");
+const employerSupportModule = require("../modules/jobsearch/matching/employerSupport");
 
 const PROFILE = {
   profession: "Electrician",
@@ -38,7 +39,9 @@ test("employer support: explicit phrases -> stated_in_ad with quoted evidence (E
   const a = detectEmployerSupport("Great team. LMIA approved position. Apply today.");
   assert.equal(a.label, "stated_in_ad");
   assert.equal(a.evidence, "LMIA approved position");
-  for (const t of ["Visa sponsorship available for the right candidate", "We sponsor work permits for qualified workers", "Soutien à l'immigration offert", "Permis de travail fourni par l'employeur"]) {
+  // controller ruling (round 4): "for the right candidate/person" is a condition, not a statement of support
+  assert.equal(detectEmployerSupport("Visa sponsorship available for the right candidate").label, "unknown");
+  for (const t of ["Visa sponsorship available for the successful candidate", "We sponsor work permits for qualified workers", "Soutien à l'immigration offert", "Permis de travail fourni par l'employeur"]) {
     const r = detectEmployerSupport(t);
     assert.equal(r.label, "stated_in_ad", t);
     assert.ok(r.evidence && t.toLowerCase().includes(r.evidence.toLowerCase().slice(0, 12)), t);
@@ -617,7 +620,13 @@ const VETO_CUES = {
   negation: ["not", "no", "never", "cannot", "isn't", "without", "pas", "non", "nope", "excluded"],
   hedge: ["subject to approval", "may", "might", "if possible", "pending", "to be discussed", "TBD", "case by case", "at our discretion", "depending on the profile", "negotiable", "en cours", "pourrait", "selon le profil"],
   time: ["after 6 months", "next year", "after probation", "once you have worked here two years", "in the future", "was approved in 2019", "previously", "expired", "après un an", "eventually"],
-  scope: ["for senior roles only", "for other positions", "elsewhere", "listed separately", "current employees only", "sister company", "internal transfers", "this role does not qualify", "US offices"],
+  scope: ["for senior roles only", "for other positions", "elsewhere", "listed separately", "current employees only", "sister company", "internal transfers", "this role does not qualify", "US offices",
+    "for select roles", "for certain positions", "at our Montreal location", "pour certains postes", "for our Vancouver HQ roles", "(cooks only)", "for eligible roles"],
+  condition: ["for the right candidate", "(conditions apply)", "for exceptional candidates", "sous conditions", "au besoin", "on a case basis", "to those who commit to 3 years", "for returning workers"],
+  past: ["used to", "no longer", "until 2023", "last year", "on hold", "suspended", "auparavant"],
+  whoHolds: ["applicants with an approved LMIA preferred", "bring your approved LMIA", "candidate-supplied LMIA required"],
+  thirdParty: ["through a third-party agency", "via our partner agency", "by an affiliated recruitment firm", "we share a list of lawyers"],
+  cost: ["fees are deducted from your wages", "$25,000", "à vos frais", "contre paiement", "you reimburse the costs"],
   duties: ["for our clients", "you will process LMIA applications", "responsible for the files", "immigration consultant", "for employers", "paralegal"],
   responsibility: ["at your own expense", "candidate pays all fees", "is the candidate's responsibility", "for a fee of $5,000", "at your cost"],
 };
@@ -716,5 +725,182 @@ test("relabel (confirm/revoke) re-scores the match; created_at stays; migration 
     const fixed = (await t.pool.query("SELECT job_id, employer_id FROM js_employer_confirmations WHERE id=$1", [row])).rows[0];
     assert.equal(fixed.job_id, job.id);
     assert.equal(fixed.employer_id, job.employerId);
+  });
+});
+
+// ---------- fix round 4: who-holds-it, scope, cost, overseas place-bound, DoS, lock order ----------
+test("round 4: an LMIA the candidate must already hold is never employer support", () => {
+  for (const t of ["Must have a positive LMIA.", "Must possess an approved LMIA.", "LMIA-approved candidates only.", "Les candidats doivent avoir une EIMT approuvée.", "Les candidats doivent posséder une EIMT approuvée.", "Applicant must hold an approved LMIA."]) {
+    const r = detectEmployerSupport(t);
+    assert.equal(r.label, "unavailable", t);
+    assert.ok(r.evidence, t);
+  }
+  for (const t of ["Approved LMIA applicants preferred.", "Applicants with an approved LMIA are welcome to apply.", "Applicants with an approved LMIA are encouraged to apply.", "Seeking workers with approved LMIA.", "Candidats avec EIMT approuvée bienvenus."]) {
+    assert.equal(detectEmployerSupport(t).label, "unknown", t);
+  }
+  // the same words with the employer as holder stay positive
+  assert.equal(detectEmployerSupport("We have an approved LMIA for this position.").label, "stated_in_ad");
+  // a candidate-held line anywhere blocks an affirmative elsewhere
+  assert.notEqual(detectEmployerSupport("We sponsor work permits.\n\nApproved LMIA applicants preferred.").label, "stated_in_ad");
+});
+
+test("round 4: scope, cost and third-party qualifiers veto stated_in_ad (EN/FR, same or nearby sentence)", () => {
+  for (const t of [
+    "Visa sponsorship available for select roles.", "Visa sponsorship available for eligible roles.", "We sponsor visas for specific positions.", "LMIA approved for cook positions; this posting is for a server.",
+    "Approved LMIA (cooks only). We are hiring a dishwasher.", "Sponsorship available for nursing roles only (this is an admin role).", "Visa sponsorship available for our Vancouver HQ roles. This role is in Halifax.",
+    "EIMT approuvée pour certains postes.", "EIMT approuvée pour d'autres postes.", "Parrainage offert pour certains postes.", "Parrainage disponible pour les postes cadres.", "Visa sponsorship available (conditions apply).",
+    "Visa sponsorship available; sponsorship fees are deducted from your wages.", "LMIA available - $25,000.", "Parrainage offert par une agence tierce à vos frais.", "Sponsorship available through a third-party agency at your cost.",
+    `We sponsor work permits. ${"We value teamwork. ".repeat(8)}Note: sponsorship applies to our Calgary roles only.`,
+  ]) {
+    assert.notEqual(detectEmployerSupport(t).label, "stated_in_ad", t);
+  }
+  // counts and "this role" are not subsets; employer-paid fees are not costs to the worker
+  for (const t of ["We have an approved LMIA for 6 positions.", "LMIA approved for this position.", "EIMT approuvée pour ce poste de boucher.", "We provide full sponsorship for work permits and cover legal fees.", "Employer covers the LMIA processing fee and airfare."]) {
+    assert.equal(detectEmployerSupport(t).label, "stated_in_ad", t);
+  }
+});
+
+test("round 4: 'prendre en charge' and university/college/hospital subjects are affirmative; header sharing a line is a section", () => {
+  for (const t of ["L'employeur prend en charge l'EIMT.", "Nous prenons en charge le permis de travail.", "Les frais d'EIMT sont pris en charge par l'employeur.", "Employer covers all LMIA charges.",
+    "The university will sponsor the work permit for the successful candidate.", "The college will sponsor your work permit.", "Nous accompagnons les candidats dans leurs démarches d'immigration et offrons le parrainage.",
+    "Data Scientist, Vancouver. Perks:\n• Visa sponsorship\n• Extended health", "Engineer. About you: 5+ years Go. What we offer: competitive salary, visa sponsorship, equity.", "Analyste. Avantages : parrainage de visa, assurances collectives."]) {
+    const r = detectEmployerSupport(t);
+    assert.equal(r.label, "stated_in_ad", t);
+    assert.ok(r.evidence, t);
+  }
+  // candidate-side charges remain vetoes
+  for (const t of ["Le permis de travail est à la charge du candidat.", "Visa sponsorship at the candidate's own expense.", "Visa sponsorship offered; candidate pays all fees."]) {
+    assert.notEqual(detectEmployerSupport(t).label, "stated_in_ad", t);
+  }
+});
+
+test("round 4: 'international' applicants who must hold a permit / study / reside here are never accepted:true", () => {
+  for (const t of ["We welcome international candidates who have a valid open work permit.", "International applicants welcome (PGWP holders).", "International students welcome (on-campus work permit holders).",
+    "Open to international students with a valid study permit allowing off-campus work.", "Candidats internationaux bienvenus — résidence au Québec exigée."]) {
+    const r = detectOverseas(t);
+    assert.equal(r.accepted, false, t);
+    assert.ok(r.evidence, t);
+  }
+  for (const t of ["International candidates welcome; Toronto-based.", "We are open to international candidates for our UK office.", "Open to international applicants for other roles.", "Foreign applicants welcome to apply for our Dubai branch.",
+    "We used to welcome overseas applicants.", "We hope to welcome international applicants next year.", "[ ] Open to international applicants", "International applicants welcome. Interviews in person in Toronto only.",
+    "International applicants welcome; you must have a SIN.", "International talent welcome provided you are in the GTA."]) {
+    assert.notEqual(detectOverseas(t).accepted, true, t);
+  }
+  for (const t of ["We welcome international applicants.", "Candidats de l'étranger bienvenus.", "Applicants from outside Canada are encouraged to apply.", "Open to international candidates. We sponsor work permits."]) {
+    assert.equal(detectOverseas(t).accepted, true, t);
+  }
+});
+
+test("round 4: natural positives are still detected (miss rate measured on ads + natural controls)", () => {
+  const ads = corpus.ads.filter((a) => a.support === "stated_in_ad");
+  const natural = corpus.support.filter((r) => r.natural || r.batch === "r4-review" && r.control);
+  const items = [...ads.map((a) => a.text), ...natural.map((r) => r.text)];
+  const hit = items.filter((t) => detectEmployerSupport(t).label === "stated_in_ad").length;
+  assert.ok(items.length >= 70, `natural positives: ${items.length}`);
+  assert.ok(hit / items.length >= 0.85, `natural positive hit rate ${hit}/${items.length}`);
+  assert.ok(corpus.ads.length >= 48);
+  assert.ok(corpus.support.filter((x) => x.expect === "stated_in_ad").length >= 114);
+});
+
+test("round 4: input is capped before NFKC; U+FDFA x20k stays under 50 ms per detector call", () => {
+  const s = "ﷺ".repeat(20000);
+  const times = [];
+  for (let r = 0; r < 5; r += 1) {
+    const x = `${s}${r}`; // distinct inputs: no cache hit
+    let t0 = process.hrtime.bigint();
+    detectEmployerSupport(x);
+    times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+    t0 = process.hrtime.bigint();
+    detectOverseas(`${x}o`);
+    times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+  }
+  times.sort((a, b) => a - b);
+  assert.ok(times[Math.floor(times.length / 2)] < 50, `median ${times[Math.floor(times.length / 2)]}ms`);
+  assert.ok(employerSupportModule.normalizeAd(s).reduce((n, c) => n + c.f.length, 0) <= employerSupportModule.POST_CAP);
+  // beyond the read cap nothing affirmative is claimed (the unread tail could hold a veto)
+  const long = `LMIA approved. International applicants welcome. ${"We are hiring welders. ".repeat(2000)}`;
+  assert.ok(long.length > employerSupportModule.PRE_CAP);
+  assert.notEqual(detectEmployerSupport(long).label, "stated_in_ad");
+  assert.notEqual(detectOverseas(long).accepted, true);
+  for (const x of ["ﷺ".repeat(100000), "ﬃ".repeat(30000), `${"for our Vancouver HQ roles ".repeat(8000)}`, "$5 LMIA ".repeat(25000)]) {
+    const t0 = Date.now();
+    detectEmployerSupport(x);
+    detectOverseas(x);
+    assert.ok(Date.now() - t0 < 500, `slow on ${JSON.stringify(x.slice(0, 20))}`);
+  }
+});
+
+test("round 4: confirmation routes lock candidates BEFORE touching the application (no applications->candidates order)", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const job = await t.addJob();
+    await matchService.matchCandidate(c.cid);
+    const app = (await t.pool.query("INSERT INTO js_applications (candidate_id, job_id, status) VALUES ($1,$2,'preparing') RETURNING id", [c.cid, job.id])).rows[0].id;
+    const holder = await t.pool.connect();
+    await holder.query("BEGIN");
+    await holder.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [c.cid]);
+    const pending = t.call("POST", "/jobsearch/employer-confirmations", { token: t.adminToken, body: { applicationId: app, evidenceNote: "HR letter" } });
+    let waiting = 0;
+    for (let k = 0; k < 50 && !waiting; k += 1) {
+      await new Promise((r) => setTimeout(r, 40));
+      waiting = (await t.pool.query("SELECT count(*)::int n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM candidates%FOR UPDATE%'")).rows[0].n;
+    }
+    assert.equal(waiting, 1, "the POST waits on the candidate lock");
+    // while it waits it holds no lock on the application row (the FK check of the insert has not run yet)
+    const probe = await t.pool.connect();
+    let appLocked = false;
+    try {
+      await probe.query("BEGIN");
+      await probe.query("SET LOCAL lock_timeout = '300ms'");
+      await probe.query("SELECT id FROM js_applications WHERE id = $1 FOR UPDATE", [app]);
+    } catch {
+      appLocked = true;
+    } finally {
+      await probe.query("ROLLBACK").catch(() => {});
+      probe.release();
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    const r = await pending;
+    assert.equal(appLocked, false, "application row was locked before the candidate lock (applications -> candidates order)");
+    assert.equal(r.status, 201);
+    assert.equal((await t.pool.query("SELECT employer_support FROM js_matches WHERE candidate_id=$1", [c.cid])).rows[0].employer_support, "confirmed");
+    // DELETE follows the same order
+    const holder2 = await t.pool.connect();
+    await holder2.query("BEGIN");
+    await holder2.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [c.cid]);
+    const del = t.call("DELETE", `/jobsearch/employer-confirmations/${r.body.id}`, { token: t.adminToken });
+    await new Promise((res) => setTimeout(res, 200));
+    assert.equal((await t.pool.query("SELECT revoked_at FROM js_employer_confirmations WHERE id=$1", [r.body.id])).rows[0].revoked_at, null);
+    await holder2.query("ROLLBACK");
+    holder2.release();
+    assert.equal((await del).status, 200);
+  });
+});
+
+test("round 4: relabel only touches the locked live candidates; deleted candidates' rows are skipped; now is passed through", async () => {
+  await withApp(async (t) => {
+    const a = await t.newCandidate();
+    const b = await t.newCandidate();
+    const job = await t.addJob();
+    await matchService.matchCandidate(a.cid);
+    await matchService.matchCandidate(b.cid);
+    await t.pool.query("UPDATE candidates SET is_deleted = true WHERE id=$1", [b.cid]);
+    const ok = await t.call("POST", "/jobsearch/employer-confirmations", { token: t.adminToken, body: { jobId: job.id, evidenceNote: "Phoned HR" } });
+    assert.equal(ok.status, 201);
+    const rows = Object.fromEntries((await t.pool.query("SELECT candidate_id, employer_support FROM js_matches")).rows.map((r) => [r.candidate_id, r.employer_support]));
+    assert.equal(rows[a.cid], "confirmed");
+    assert.notEqual(rows[b.cid], "confirmed", "deleted candidate's row is not relabelled");
+    const client = await t.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await matchService.lockForRelabel(client, [job.id]);
+      assert.deepEqual(locked, [a.cid]);
+      assert.equal(await matchService.relabelJobs(client, [job.id], { candidateIds: [], now: new Date() }), 0, "an empty locked set touches nothing");
+      assert.equal(await matchService.relabelJobs(client, [job.id], { candidateIds: locked, now: new Date("2026-01-01T00:00:00Z") }), 1);
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
   });
 });

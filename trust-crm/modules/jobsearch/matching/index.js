@@ -3,7 +3,36 @@
 // instructions). A score is a review aid: it never establishes immigration eligibility, employer
 // sponsorship, a work permit or a visa, and unknowns go to `uncertain` and score neutrally.
 const { sanitizeUntrusted } = require("./sanitize");
-const { detectEmployerSupport, detectOverseas, sentences, fold } = require("./employerSupport");
+const { detectEmployerSupport, detectOverseas } = require("./employerSupport");
+
+const MAX_QUOTE = 300;
+
+// Length-preserving fold (accents removed, curly quotes straightened) so indexes map to the original.
+function fold(text) {
+  return String(text)
+    .split("")
+    .map((c) => {
+      if (c === "\u2019" || c === "\u2018") return "'";
+      const d = c.normalize("NFD")[0];
+      return d && d.length === 1 ? d : c;
+    })
+    .join("");
+}
+
+/** Scoring sentences (labels use employerSupport's own canonical pipeline). */
+function sentences(text) {
+  const original = String(text || "");
+  const folded = fold(original);
+  const out = [];
+  const re = /[^.!?;\n\u2022]+/g;
+  let m;
+  while ((m = re.exec(folded))) {
+    const raw = original.slice(m.index, m.index + m[0].length);
+    const quote = raw.replace(/\s+/g, " ").trim();
+    if (quote) out.push({ folded: m[0], quote: quote.length > MAX_QUOTE ? `${quote.slice(0, MAX_QUOTE - 1)}\u2026` : quote });
+  }
+  return out;
+}
 const { normalize } = require("../jobStore");
 
 const WEIGHTS = { profession: 40, experience: 15, language: 15, location: 15, salary: 5, licensing: 5, overseasAuth: 5 };

@@ -11,7 +11,7 @@ const { authorize } = require("../modules/jobsearch/profileService");
 const { isAdmin } = require("../modules/jobsearch/scope");
 const { NOTICE } = require("../modules/jobsearch/matching");
 const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
-const { relabelJobs } = require("../modules/jobsearch/matchService");
+const { relabelJobs, lockForRelabel } = require("../modules/jobsearch/matchService");
 const { logAudit } = require("../utils/audit");
 
 const router = express.Router();
@@ -64,12 +64,14 @@ router.post("/employer-confirmations", verifyToken, asyncHandler(async (req, res
   let employerId = null;
   let applicationId = null;
   let jobId = null;
+  let applicationCandidate = null;
   if (b.applicationId !== undefined) {
     applicationId = posInt(b.applicationId);
     if (!applicationId) throw new HttpError(400, "applicationId must be a positive integer");
-    const a = await db().query("SELECT a.job_id, j.employer_id FROM js_applications a JOIN js_jobs j ON j.id = a.job_id WHERE a.id = $1", [applicationId]);
+    const a = await db().query("SELECT a.job_id, a.candidate_id, j.employer_id FROM js_applications a JOIN js_jobs j ON j.id = a.job_id WHERE a.id = $1", [applicationId]);
     if (!a.rowCount) throw new HttpError(404, "Not found");
     employerId = a.rows[0].employer_id;
+    applicationCandidate = a.rows[0].candidate_id;
     jobId = a.rows[0].job_id;
   } else if (b.jobId !== undefined) {
     jobId = posInt(b.jobId);
@@ -90,12 +92,15 @@ router.post("/employer-confirmations", verifyToken, asyncHandler(async (req, res
   let row;
   try {
     await client.query("BEGIN");
+    // Lock order candidates -> applications (as in consent/approval paths): lock the affected
+    // candidates (and the application's candidate) BEFORE the insert, whose FK check locks the application.
+    const affected = jobId ? [jobId] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [employerId])).rows.map((r) => r.id);
+    const locked = await lockForRelabel(client, affected, applicationCandidate ? [applicationCandidate] : []);
     row = (await client.query(
       "INSERT INTO js_employer_confirmations (employer_id, application_id, job_id, kind, evidence_text, confirmed_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, employer_id, application_id, job_id, kind, evidence_text, created_at",
       [employerId, applicationId, jobId, kind, note, req.user.id]
     )).rows[0];
-    const affected = jobId ? [jobId] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [employerId])).rows.map((r) => r.id);
-    await relabelJobs(client, affected);
+    await relabelJobs(client, affected, { candidateIds: locked, now: new Date() });
     await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'employer.confirmation',$2::jsonb)", [`user:${req.user.id}`, JSON.stringify({ confirmationId: row.id, employerId, applicationId, jobId, scope, kind })]);
     await client.query("COMMIT");
   } catch (err) {
@@ -117,10 +122,15 @@ router.delete("/employer-confirmations/:id", verifyToken, asyncHandler(async (re
   let row;
   try {
     await client.query("BEGIN");
+    // Resolve the scope without locking, lock the affected candidates, then revoke (same order as POST).
+    const target = (await client.query("SELECT job_id, employer_id, application_id FROM js_employer_confirmations WHERE id = $1 AND revoked_at IS NULL", [id])).rows[0];
+    if (!target) throw new HttpError(404, "Not found");
+    const affected = target.job_id ? [target.job_id] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [target.employer_id])).rows.map((r) => r.id);
+    const appCand = target.application_id ? (await client.query("SELECT candidate_id FROM js_applications WHERE id = $1", [target.application_id])).rows.map((r) => r.candidate_id) : [];
+    const locked = await lockForRelabel(client, affected, appCand);
     row = (await client.query("UPDATE js_employer_confirmations SET revoked_at = now(), revoked_by = $2 WHERE id = $1 AND revoked_at IS NULL RETURNING id, employer_id, job_id", [id, req.user.id])).rows[0];
     if (!row) throw new HttpError(404, "Not found");
-    const affected = row.job_id ? [row.job_id] : (await client.query("SELECT id FROM js_jobs WHERE employer_id = $1", [row.employer_id])).rows.map((r) => r.id);
-    await relabelJobs(client, affected);
+    await relabelJobs(client, affected, { candidateIds: locked, now: new Date() });
     await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'employer.confirmation.revoke',$2::jsonb)", [`user:${req.user.id}`, JSON.stringify({ confirmationId: id, employerId: row.employer_id, jobId: row.job_id })]);
     await client.query("COMMIT");
   } catch (err) {
