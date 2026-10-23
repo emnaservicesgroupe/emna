@@ -14,7 +14,7 @@ const HEAD = 20000;
 const TAIL = 20000;
 const WINDOW = 200;
 const MAX_WINDOWS = 400;
-const MIDDLE_CUE_RE = /pay|fee|frais|deposit|acompte|virement|transfer|western|moneygram|mandat|remit|regl|r\u00e8gl|captcha|robot|human|humain|sign|declar|d\u00e9clar|certif|attest|sworn|affidavit|honneur|[$\u20ac\u00a3]/gi;
+const MIDDLE_CUE_RE = /pay|fee|frais|deposit|acompte|virement|transfer|western|moneygram|mandat|remit|regl|r\u00e8gl|purchase|buy|achet|achat|captcha|robot|human|humain|puzzle|sign|declar|d\u00e9clar|certif|attest|sworn|affidavit|honneur|online|en ligne|portal|portail|website|platform|plateforme|form|accept|apply|postul|candidat|log ?in|log ?on|account|compte|connect|regist|inscri|question|quiz|answer|r\u00e9pond|explain|expliqu|[$\u20ac\u00a3]/gi;
 
 /** The parts of the raw ad that are scanned, joined by newlines (never splitting a window mid-sentence matters little: windows are generous). */
 function scannedParts(raw) {
@@ -63,11 +63,11 @@ function sentences(text) {
 const CUR = "(?:usd|cad|eur|gbp|tnd|mad|dzd|aed|sar|qar|chf|dollars?|euros?|dinars?|dirhams?|livres?|pounds?|dt|dh)";
 const AMOUNT_RE = new RegExp(`(?:[$€£¥]\\s?\\d[\\d.,]{0,15})|(?:\\d[\\d.,]{0,15}\\s?(?:[$€£¥]|${CUR}\\b|k\\b))|(?:\\b${CUR}\\s?\\d)`, "g");
 // Words that make an amount a cost to the candidate (not a wage).
-const STRONG_COST_RE = /\b(?:send|sending|envoy\w*|regl\w*|fees?|frais|deposits?|acomptes?|processing|transfers?|transferer|virements?|western union|moneygram|money ?gram|money order|mandats?|wire|remit\w*|upfront|up front|advance|a l avance|avance|caution)\b/g;
+const STRONG_COST_RE = /\b(?:send|sending|envoy\w*|regl\w*|fees?|frais|deposits?|acomptes?|processing|transfers?|transferer|virements?|western union|moneygram|money ?gram|money order|mandats?|wire|remit\w*|upfront|up front|advance|a l avance|avance|caution|purchase|purchases|buy|buys|acheter|achetez|achat)\b/g;
 const GENERIC_COST_RE = /\b(?:payments?|paiements?|costs?|couts?|charges?|tarifs?|prix|price)\b/g;
 const WAGE_CUE_RE = /\b(?:per (?:hour|hr|day|week|month|year|annum)|an hour|hourly|\/ ?(?:h|hr|hour|heure|mois|month|year|an)\b|par (?:heure|jour|semaine|mois|an)|de l heure|weekly|monthly|annual\w*|salary|salaire|wages?|remuneration|gross|net|brut|bonus|prime|overtime)\b/;
 // Negation / "the employer pays" immediately before a hit (same sentence) cancels that hit.
-const NEGATION_BEFORE_RE = /\b(?:no|not|never|without|zero|aucun\w*|jamais|pas de|pas d|sans|ni|free of|nothing)\b(?! later| only| just)[^]*$/;
+const NEGATION_BEFORE_RE = /\b(?:no|not|never|without|zero|aucun\w*|jamais|pas de|pas d|sans|ni|free of|nothing|(?:won|don|doesn|didn|shouldn|wouldn|aren|isn|can|haven|hasn|mustn|needn) t)\b(?! later| only| just)[^]*$/;
 const EMPLOYER_PAYS_BEFORE_RE = /\b(?:we|employer|the employer|the company|company|nous|l employeur|employeur|la societe|l entreprise)\s+(?:will\s+|also\s+|fully\s+|shall\s+|)(?:pay|pays|paid|cover|covers|covering|reimburse\w*|paie|paient|payons|prend|prennent|prenons|rembourse\w*|offre|offrons|offers?)\b[^]*$/;
 const EMPLOYER_PAYS_AFTER_RE = /^\s*(?:\w+\s+)?(?:are |is |will be |)?(?:reimbursed|refunded by|rembourse\w*|covered|pris\w* en charge)\b|^[^]{0,40}?\b(?:(?:paid|covered|borne|provided|offered|reimbursed|refunded|repaid) by (?:the )?(?:employer|company|us|our company)|pris(?:es)? en charge|a la charge de l employeur|aux frais de l employeur|employer paid|company paid|offert\w*|gratuit\w*|free of charge|at no cost|no cost)\b/;
 
@@ -83,18 +83,27 @@ function cancelled(sentence, start, end) {
   return NEGATION_BEFORE_RE.test(before) || EMPLOYER_PAYS_BEFORE_RE.test(before) || EMPLOYER_SUBJECT_END_RE.test(before) || EMPLOYER_PAYS_AFTER_RE.test(after) || NEGATION_AFTER_RE.test(after);
 }
 
+// "candidates do not pay", "applicants should never pay", "vous n avez rien a payer", "you won t pay": the
+// negation sits inside the subject..verb span itself.
+const NEGATION_INSIDE_RE = /\b(?:not|never|no|nothing|neither|nor|won t|don t|doesn t|didn t|shouldn t|wouldn t|aren t|isn t|t need|rien|pas|jamais|aucun\w*|ni|ne)\b|n t\b/;
+// purchasing from the employer / a stated price
+const PAYER_SPAN_RE = /^(?:you|candidates?|applicants?|workers?|the candidate|the applicant|vous|le candidat|la candidate|les candidats|candidat\w*|postulant\w*)\s+((?:\w+\s+){0,4}?)\w+$/;
+
 /** First non-cancelled match of `re` (global) in `s`, or null. */
 function liveMatch(s, re) {
   re.lastIndex = 0;
   for (const m of s.matchAll(re)) {
-    if (!cancelled(s, m.index, m.index + m[0].length)) return m[0];
+    if (cancelled(s, m.index, m.index + m[0].length)) continue;
+    const span = PAYER_SPAN_RE.exec(m[0]);
+    if (span && NEGATION_INSIDE_RE.test(span[1])) continue;
+    return m[0];
   }
   return null;
 }
 
 // ---------------------------------------------------------------- categories
 
-const CAPTCHA_RE = /\b(?:re|h)?captcha\b|\bprove (?:that )?you(?: re| are) (?:a )?human\b|\bverify (?:that )?you(?: re| are) (?:a )?human\b|\bi(?: m| am) not a robot\b|\bje ne suis pas un robot\b|\bprouvez que vous etes (?:un )?humain\b|\bhuman verification\b|\bverification humaine\b|\bnot a robot\b|\bpas (?:un )?robot\b|\bprove (?:that )?you(?: re| are) human\b/g;
+const CAPTCHA_RE = /\b(?:re|h)?captcha\b|\bprove (?:that )?you(?: re| are) (?:a )?human\b|\bverify (?:that )?you(?: re| are) (?:a )?human\b|\bi(?: m| am) not a robot\b|\bje ne suis pas un robot\b|\bprouvez que vous etes (?:un )?humain\b|\bhuman verification\b|\bverification humaine\b|\bnot a robot\b|\bpas (?:un )?robot\b|\bprove (?:that )?you(?: re| are) human\b|\b(?:verify|prove|show|confirm|demonstrate) (?:that )?you(?: re| are) (?:a )?real (?:person|human)\b|\b(?:show|confirm|demonstrate) (?:that )?you(?: re| are) (?:a )?human\b|\b(?:solve|complete|pass) (?:a |the |this |our )?(?:short |quick |simple )?(?:puzzle|challenge|test)\b[^]{0,40}?\b(?:human|robot|bot|real person)\b|\bnot a bot\b|\banti ?(?:robot|bot|spam verification)\b|\bverification anti\b|\bbot (?:check|verification)\b/g;
 
 const PAYMENT_PHRASES = [
   // candidate is the payer
@@ -112,6 +121,8 @@ const PAYMENT_PHRASES = [
   /\b(?:in advance|upfront|up front|a l avance|d avance)\b/g,
   /\bto secure your (?:place|placement|position|job|spot|seat|post|contract|visa|offer)\b|\bpour (?:reserver|securiser|garantir|bloquer) (?:votre|ta) (?:place|poste|contrat|visa|emploi)\b|\breservation de votre (?:poste|place)\b/g,
   /\bwestern union\b|\bmoney ?gram\b|\bmoney order\b|\bmandat (?:cash|postal|minute)\b/g,
+  // buying something FROM the employer/agency ("purchase your own starter kit from us for $199")
+  /\b(?:purchase|purchases|purchasing|buy|buys|buying|acheter|achetez|achete\w*|achat)\b[^]{0,60}?\b(?:from us|from the (?:company|employer|agency|recruiter)|from our (?:company|store|shop|agency|office)|aupres de (?:nous|l entreprise|l employeur|l agence|notre)|chez nous)\b/g,
 ];
 
 function detectPayment(s) {
@@ -144,7 +155,7 @@ function detectPayment(s) {
 const LEGAL_RE = [
   // the APPLICANT signs (duty text such as "sign for deliveries", "sign off statements",
   // "signing contracts with clients", "sign-in sheet", "sign language" is excluded)
-  /\b(?:you|applicants?|candidates?|the applicant|the candidate|all applicants|vous|le candidat|les candidats|candidat\w*|postulant\w*)\s+(?:\w+\s+){0,3}?(?:sign|signer|signez)\b(?!\s+(?:for|off|in|up|on|language|contracts? with|documents? on behalf|on behalf))/g,
+  /\b(?:you|applicants?|candidates?|the applicant|the candidate|all applicants|vous|le candidat|les candidats|candidat\w*|postulant\w*)\s+(?:\w+\s+){0,3}?(?:sign|signer|signez)\b(?!\s+(?:for|off|in|up|on|language|contracts? with|documents? on behalf|on behalf|(?:an?|the|your|their|his|her|un|une|le|leur|son|votre)\s+(?:(?:written|formal|standard|individual|permanent|fixed term)\s+)?(?:(?:employment|work|job|labou?r)\s+(?:agreement|contract)|offer letter|letter of offer|contract of employment|contrat de travail|contrat d embauche|lettre d offre)))/g,
   /\bplease sign\b|\bsign and (?:return|send|attach|submit|enclose)\b|\band sign (?:it|them|the|this|before|and)\b|\b(?:fill in|fill out|complete|remplissez|completez|remplir)\b[^]{0,40}?\b(?:and sign|et signe\w*)\b/g,
   /\b(?:declarations?|forms?|formulaires?|attestations?|statements?|consent)\b[^]{0,50}?\bsign it\b/g,
   /^(?:please\s+|kindly\s+)?sign (?:the |this |a |an |our |your )?(?:attached |enclosed |following |below |required )?(?:declarations?|forms?|oaths?|attestations?|affidavits?|consent|statements?|waivers?|undertakings?)\b|\bsign (?:the |this |a |an |our )(?:attached |enclosed |following |required )?(?:declarations?|oaths?|oath form|attestations?|affidavits?|consent forms?|declaration forms?|waivers?|undertakings?)\b/g,
@@ -161,6 +172,7 @@ const LOGIN_RE = [
   /\bregister (?:on|at|with|via|through|in) (?:our|the) (?:\w+ )?(?:portal|platform|site|website|system|app)\b|\bregister (?:an |your )?account\b/g,
   /\b(?:log ?in|log ?on|sign ?in|login) (?:to|into|on|at|via|through) (?:our |the |your )?(?:\w+ ){0,2}?(?:apply|portal|website|site|platform|account|system|careers|career|page|app)\b/g,
   /\b(?:connectez vous|identifiez vous|se connecter|connexion requise)\b/g,
+  /\b(?:vous |te |se )?connecter (?:a|sur) (?:votre|ton|un|notre|son|leur) (?:\w+ ){0,2}?(?:compte|espace|portail|profil|plateforme)\b|\b(?:espace|compte) (?:candidat|candidats|personnel|recrutement)\b/g,
 ];
 const ONLINE_ONLY_RE = [
   /\bapply (?:via|through|on|at|using|from) (?:our|the) (?:\w+ ){0,2}?(?:portal|website|platform|site|page|system|ats|link|app|form)\b/g,
@@ -172,6 +184,8 @@ const ONLINE_ONLY_RE = [
   /\b(?:do not|don t|does not|will not|cannot|can not)\s+(?:\w+\s+)?accept\w*\s+(?:\w+\s+)?applications? (?:by|via|through|per) (?:e ?mail|courriel)\b|\bapplications? (?:sent |submitted )?(?:by|via) e ?mail (?:are |will )?(?:not|no longer) (?:be )?(?:accepted|considered|reviewed)\b|\b(?:email|e mail) applications? (?:are |will )?(?:not|no longer) (?:be )?(?:considered|reviewed)\b/g,
   /\b(?:through|via|on|using|from) (?:our|the) (?:\w+ ){0,2}?(?:website|site|portal|platform|form|page) only\b|\bexclusively (?:through|via|on) (?:our|the)\b|\b(?:uniquement|seulement|exclusivement) (?:via|par|sur|a travers|depuis) (?:notre |le |la |nos )?(?:\w+ )?(?:site|plateforme|portail|formulaire)\b/g,
   /\bn accept\w* pas (?:les |de )?candidatures? (?:par|via) (?:courriel|e mail|email|mail)\b/g,
+  /\b(?:only|exclusively|solely)\s+accept\w*\s+(?:\w+\s+)?applications?\s+(?:through|via|on|using|from|at)\s+(?:our|the)\b|\baccept\w*\s+(?:\w+\s+)?applications?\s+(?:only|exclusively|solely)\s+(?:through|via|on|using|from|at)\b|\bapplications?\s+(?:are\s+|will be\s+)?accepted\s+(?:only|exclusively|solely)\s+(?:through|via|on|using|from|at)\b/g,
+  /\b(?:acceptons|accepte|acceptent)\s+(?:uniquement|seulement|exclusivement)\s+(?:les\s+)?candidatures?\s+(?:via|par|sur|depuis|a travers)\b|\bcandidatures?\s+(?:acceptees?|recues?)\s+(?:uniquement|seulement|exclusivement)\s+(?:via|par|sur|depuis)\b/g,
   /\bcandidatures? (?:envoyees? )?par (?:courriel|e mail|email|mail|courrier electronique) ne (?:sont|seront) pas (?:acceptees?|traitees?|considerees?)\b|\bn envoyez pas (?:votre |vos )?(?:cv|candidature)/g,
 ];
 const QUESTIONS_RE = [

@@ -991,3 +991,75 @@ test("attachment_unscanned: a CV with scan_status 'scan_unavailable' blocks the 
     else process.env.ALLOW_UNSCANNED_ATTACHMENTS = saved;
   }
 });
+
+// ---------------------------------------------------------------- Task 18: handoff detector minors
+
+test("Task 18 handoff: new positives (captcha variants, purchase from the employer, portal-only, FR candidate-account login)", () => {
+  const POS = [
+    ["Please verify you are a real person before applying.", "captcha"],
+    ["Solve a puzzle to show you are human.", "captcha"],
+    ["Complete the challenge to prove you are not a bot.", "captcha"],
+    ["Vérification anti-robot obligatoire avant l'envoi.", "captcha"],
+    ["Show that you are a real human by ticking the box.", "captcha"],
+    ["You must purchase your own starter kit from us for $199.", "payment"],
+    ["New hires buy the uniform package from the company (CAD 150).", "payment"],
+    ["Achetez votre kit de démarrage auprès de nous pour 120 €.", "payment"],
+    ["We only accept applications through our online portal.", "unsupported_channel"],
+    ["Applications are accepted only through our careers website.", "unsupported_channel"],
+    ["Nous acceptons uniquement les candidatures via notre site carrières.", "unsupported_channel"],
+    ["Vous devez vous connecter à votre compte candidat pour postuler.", "login"],
+    ["Connectez-vous à votre espace candidat pour finaliser la candidature.", "login"],
+  ];
+  const bad = POS.filter(([t, want]) => { const r = guard.detectHandoff({ description_text: t }, {}); return !r || r.reason !== want; }).map(([t, want]) => `${want}: ${t} -> ${JSON.stringify(guard.detectHandoff({ description_text: t }, {}))}`);
+  assert.deepEqual(bad, []);
+});
+
+test("Task 18 handoff: anti-scam disclaimers and post-hire agreements are not handoffs (>= 25 negatives)", () => {
+  const NEG = [
+    "Candidates do not pay any fee.",
+    "Applicants should never pay money to get a job.",
+    "You will not pay a deposit.",
+    "Vous n'avez rien à payer.",
+    "Candidates never pay recruitment fees at any stage.",
+    "You do not have to pay anything to apply.",
+    "Applicants will never be asked to pay for an interview.",
+    "We will never ask you to send money.",
+    "Workers don't pay for housing or transport.",
+    "Les candidats ne paient aucun frais.",
+    "Vous ne payez jamais de frais de recrutement.",
+    "Aucun candidat ne doit payer pour postuler.",
+    "Beware of scams: genuine employers never ask candidates to pay a fee.",
+    "You won't pay for your training.",
+    "Candidates do not need to buy any equipment.",
+    "The successful candidate will sign an employment agreement.",
+    "The successful candidate will sign an employment contract before starting.",
+    "Selected applicants will sign a contract of employment on the first day.",
+    "Le candidat retenu signera un contrat de travail.",
+    "You will sign your offer letter after the interview.",
+    "Please send your CV and cover letter to jobs@acme.example.",
+    "We pay $25 per hour plus overtime.",
+    "Apply by email to hr@acme.example; we also accept applications through our website.",
+    "Our portal is down, so please email your CV to hr@acme.example.",
+    "We are a real person-centred care home.",
+    "Puzzle-solving skills are an asset for this maintenance role.",
+    "You will connect cables to the control panel.",
+    "Bring your own tools; we buy the materials.",
+  ];
+  const flagged = NEG.map((t) => [t, guard.detectHandoff({ description_text: t }, {})]).filter(([, r]) => r).map(([t, r]) => `${t} -> ${r.reason} ${r.source}`);
+  assert.ok(NEG.length >= 25);
+  assert.deepEqual(flagged, []);
+});
+
+test("Task 18 handoff: the middle of ads longer than 40k chars is scanned for channel / question / login phrases too", () => {
+  const filler = "Industrial electrician wiring conduit PLC maintenance. ".repeat(900); // > 40k chars on each side
+  for (const [mid, want] of [
+    ["We only accept applications through our online portal.", "unsupported_channel"],
+    ["Answer the following screening questions in your application.", "custom_questions"],
+    ["Log in to our careers portal to apply.", "login"],
+  ]) {
+    const text = `${filler}\n${mid}\n${filler}`;
+    assert.ok(text.length > 90000);
+    const r = guard.detectHandoff({ description_text: text }, {});
+    assert.equal(r && r.reason, want, mid);
+  }
+});
