@@ -38,11 +38,6 @@ function requirePerms(user) {
   if (!hasPerm(user, "candidates:write")) throw new HttpError(403, "Permission denied: candidates:write");
 }
 
-async function getCandidate(client, id) {
-  const r = await client.query(`SELECT ${CANDIDATE_COLUMNS} FROM candidates WHERE id = $1`, [id]);
-  return r.rows[0] || null;
-}
-
 async function convertLead(user, rawLeadId, input) {
   const leadId = parseId(rawLeadId);
   const body = input && typeof input === "object" && !Array.isArray(input) ? input : {};
@@ -58,13 +53,17 @@ async function convertLead(user, rawLeadId, input) {
     requirePerms(user);
 
     if (lead.status === "converted" && lead.candidate_id) {
-      const existing = await getCandidate(client, lead.candidate_id);
-      if (existing) return { candidate: existing, created: false };
+      // Same checks as a first convert (permissions above, candidate scope here); only a minimal answer is returned.
+      await assertCandidateAccess(user, lead.candidate_id);
+      const existing = await client.query("SELECT id, full_name, crm_stage FROM candidates WHERE id = $1", [lead.candidate_id]);
+      if (existing.rowCount === 0) throw new HttpError(404, "Not found");
+      return { candidate: existing.rows[0], created: false };
     }
     if (lead.kind !== "candidate") throw new HttpError(400, "Only candidate leads can be converted");
     if (lead.status === "spam") throw new HttpError(409, "A spam lead cannot be converted");
 
-    const passport = text(body.passport_number, "passport_number", { max: 64, required: true });
+    const passportRaw = text(body.passport_number, "passport_number", { max: 64, required: true });
+    const passport = passportRaw.toUpperCase();
     const fullName = text(body.full_name, "full_name", { max: 200 }) || lead.name;
     const nationality = text(body.nationality, "nationality", { max: 100 });
 
@@ -75,7 +74,7 @@ async function convertLead(user, rawLeadId, input) {
     }
 
     // Pre-check (the UNIQUE constraint remains the backstop, handled below).
-    const dup = await client.query("SELECT 1 FROM candidates WHERE passport_number = $1", [passport]);
+    const dup = await client.query("SELECT 1 FROM candidates WHERE upper(btrim(passport_number)) = $1", [passport]);
     if (dup.rowCount > 0) throw new HttpError(409, "A candidate with this passport number already exists");
 
     let userId = null;

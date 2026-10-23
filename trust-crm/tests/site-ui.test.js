@@ -99,9 +99,14 @@ test("forms: honeypot is hidden from assistive tech and tab order; consent is a 
     const hp = html.match(/<div class="hp"[^>]*>[\s\S]*?<\/div>/);
     assert.ok(hp, `${page}: honeypot container`);
     assert.match(hp[0], /aria-hidden="true"/);
-    assert.match(hp[0], /name="website"/);
+    assert.match(hp[0], /name="hp_url"/);
     assert.match(hp[0], /tabindex="-1"/);
     assert.match(hp[0], /autocomplete="off"/);
+    assert.doesNotMatch(hp[0], /style=/, `${page}: honeypot is hidden by the .hp CSS class, not inline style`);
+    assert.doesNotMatch(hp[0], /name="(website|url|email|name|phone|address)"/, `${page}: honeypot name must not be autofillable`);
+    assert.match(read("site.css"), /\.hp\s*\{[^}]*(position:\s*absolute|display:\s*none)/, "the .hp class hides the honeypot");
+    assert.match(read("site.js"), /payload\.hp_url\s*=/, "site.js sends hp_url");
+    assert.doesNotMatch(read("site.js"), /\bwebsite\b\s*[:=]|values\.website|payload\.website/, "site.js no longer sends the old field");
     if (kind !== "contact") assert.match(html, /<input[^>]*type="checkbox"[^>]*name="consent"[^>]*required|<input[^>]*name="consent"[^>]*type="checkbox"[^>]*required/, `${page}: consent`);
   }
   assert.match(read("register.html"), /data-i18n="form\.consent\.candidate"/);
@@ -312,13 +317,81 @@ test("http: with SITE_* unset /public/config exposes no contact facts and the pa
 test("http: the lead form payload the site sends is accepted by /public/leads (candidate, employer, contact)", async () => {
   await withServer(async ({ base, pool }) => {
     const post = (b) => fetch(`${base}/public/leads`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
-    const r1 = await post({ kind: "candidate", lang: "ar", name: "محمد <b>x</b>", email: "site.c@example.test", phone: "+216 20 000 000", country: "تونس", profession: "لحام", message: "مرحبا", consent: true, website: "" });
+    const r1 = await post({ kind: "candidate", lang: "ar", name: "محمد <b>x</b>", email: "site.c@example.test", phone: "+216 20 000 000", country: "تونس", profession: "لحام", message: "مرحبا", consent: true, hp_url: "" });
     assert.deepEqual(await r1.json(), { ok: true });
-    const r2 = await post({ kind: "employer", lang: "en", name: "Boss", company: "Acme", email: "site.e@example.test", consent: true, website: "" });
+    const r2 = await post({ kind: "employer", lang: "en", name: "Boss", company: "Acme", email: "site.e@example.test", consent: true, hp_url: "" });
     assert.equal(r2.status, 200);
-    const r3 = await post({ kind: "contact", lang: "fr", name: "Claire", email: "site.f@example.test", message: "Bonjour", website: "" });
+    const r3 = await post({ kind: "contact", lang: "fr", name: "Claire", email: "site.f@example.test", message: "Bonjour", hp_url: "" });
     assert.equal(r3.status, 200);
     const rows = (await pool.query("SELECT kind, status, lang, consent_at IS NOT NULL AS consent FROM crm_leads ORDER BY id")).rows;
     assert.deepEqual(rows.map((r) => [r.kind, r.status, r.lang, r.consent]), [["candidate", "new", "ar", true], ["employer", "new", "en", true], ["contact", "new", "fr", false]]);
   });
+});
+
+// ---------------------------------------------------------------- review round 1 (honest wording)
+
+test("review 8: no promise to get in touch / contact the visitor, and no timing promise (ar/en/fr)", () => {
+  const { dictionaries } = I18N();
+  const en = dictionaries.en;
+  for (const k of ["home.next.p", "how.s2.p", "employers.p1", "register.lead"]) {
+    assert.doesNotMatch(en[k], /\bwill (get in touch|contact|call|reply|respond)\b|\bcontacts you\b|\bwe contact you\b/i, `${k}: ${en[k]}`);
+    assert.match(en[k], /\bmay contact you\b|\bmay get in touch\b/i, `${k} says 'may contact you'`);
+  }
+  assert.doesNotMatch(en["how.s2.h"], /^2\. We contact you$/);
+  assert.match(en["contact.lead"], /we aim to reply/i);
+  assert.doesNotMatch(en["contact.lead"], /as soon as|within|hours|days|will reply/i);
+  assert.doesNotMatch(dictionaries.fr["home.next.p"] + dictionaries.fr["register.lead"] + dictionaries.fr["employers.p1"] + dictionaries.fr["how.s2.p"], /vous contactera|vous contacte pour/);
+  assert.match(dictionaries.fr["register.lead"], /pourrait vous contacter|peut vous contacter/);
+  assert.match(dictionaries.fr["contact.lead"], /nous visons|nous nous efforçons/i);
+  assert.doesNotMatch(dictionaries.fr["contact.lead"], /dès que possible/);
+  assert.doesNotMatch(dictionaries.ar["register.lead"] + dictionaries.ar["home.next.p"] + dictionaries.ar["employers.p1"] + dictionaries.ar["how.s2.p"], /سيتصل بك|سيتواصل معك|ويتصل بك/);
+  assert.doesNotMatch(dictionaries.ar["contact.lead"], /في أقرب وقت ممكن/);
+});
+
+test("review 8: offers are described as entered by staff with a source note, not as verified; candidates must verify and never pay", () => {
+  const { dictionaries } = I18N();
+  for (const lang of ["en", "fr", "ar"]) {
+    const all = [dictionaries[lang]["home.p1.p"], dictionaries[lang]["jobs.lead"]].join(" ");
+    assert.doesNotMatch(all, /checked against|verified against|vérifié la source|après vérification de leur source|التحقق من مصدرها|تحقق(?:وا)? موظفونا من مصدرها|source checked/i, `${lang}: ${all}`);
+  }
+  const p1 = dictionaries.en["home.p1.p"];
+  assert.match(p1, /entered by our staff/i);
+  assert.match(p1, /where (each|the) offer came from|note of where/i);
+  assert.match(p1, /verify/i);
+  assert.match(p1, /never pay/i);
+  assert.match(dictionaries.fr["home.p1.p"], /saisies? par notre personnel/);
+  assert.match(dictionaries.fr["home.p1.p"], /ne payez jamais|ne versez jamais/i);
+  assert.match(dictionaries.ar["home.p1.p"], /لا تدفع/);
+  assert.match(dictionaries.en["jobs.lead"], /entered by our staff/i);
+  assert.match(dictionaries.en["jobs.lead"], /verify/i);
+});
+
+test("review 5: privacy page says a salted one-way hash of the IP is stored, never 'we do not store your IP address'", () => {
+  const { dictionaries } = I18N();
+  for (const lang of ["en", "fr", "ar"]) {
+    const v = dictionaries[lang]["privacy.s4.p"];
+    assert.doesNotMatch(v, /do not store your IP|ne conservons pas votre adresse IP|لا نحفظ عنوان IP/i, lang);
+  }
+  assert.match(dictionaries.en["privacy.s4.p"], /salted/i);
+  assert.match(dictionaries.en["privacy.s4.p"], /one-way hash/i);
+  assert.match(dictionaries.en["privacy.s4.p"], /not the address itself/i);
+  assert.match(dictionaries.fr["privacy.s4.p"], /salée|salé/);
+  assert.match(dictionaries.fr["privacy.s4.p"], /pas l'adresse elle-même/);
+  assert.match(dictionaries.ar["privacy.s4.p"], /ملح/);
+});
+
+test("review 8: English fallback text in the markup equals the en dictionary for every plain data-i18n element", () => {
+  const { dictionaries } = I18N();
+  const checked = [];
+  for (const p of PAGES) {
+    const html = read(`${p}.html`);
+    for (const m of html.matchAll(/<(\w+)\b[^>]*\sdata-i18n="([^"]+)"[^>]*>([^<]*)<\/\1>/g)) {
+      const [, , key, text] = m;
+      if (!(key in dictionaries.en)) continue;
+      const decoded = text.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+      assert.equal(decoded, dictionaries.en[key], `${p}.html [${key}] fallback differs from the en dictionary`);
+      checked.push(key);
+    }
+  }
+  for (const k of ["home.p1.p", "home.next.p", "how.s2.p", "jobs.lead", "register.lead", "employers.p1", "privacy.s4.p", "contact.lead"]) assert.ok(checked.includes(k), `${k} checked`);
 });

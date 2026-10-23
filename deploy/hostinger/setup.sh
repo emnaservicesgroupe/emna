@@ -144,6 +144,11 @@ get_env() {
   local key="$1"
   grep -E "^${key}=" .env 2> /dev/null | tail -n 1 | cut -d= -f2- || true
 }
+# ensure_env KEY VALUE: add KEY=VALUE only when .env has no KEY= line at all; an existing value is never overwritten.
+ensure_env() {
+  local key="$1" value="$2"
+  grep -qE "^${key}=" .env 2> /dev/null || set_env .env "$key" "$value"
+}
 
 detect_site_address() {
   local ip=""
@@ -176,12 +181,15 @@ if [ -f .env ]; then
     set_env .env SITE_IP_SALT "$(openssl rand -hex 32)"
     say "SITE_IP_SALT was empty or missing; generated (not shown)."
   fi
+  # Caddy is one proxy hop: without TRUST_PROXY=1 every visitor shares Caddy's address and the per-IP limits break.
+  ensure_env TRUST_PROXY 1
 else
   cp .env.production.example .env
   chmod 600 .env
   for key in JWT_SECRET STORAGE_URL_SECRET JOBSEARCH_REPLY_SECRET DB_PASSWORD SITE_IP_SALT; do
     set_env .env "$key" "$(openssl rand -hex 32)"
   done
+  ensure_env TRUST_PROXY 1
   if [ -n "$DOMAIN" ]; then
     SITE="$DOMAIN"
   else

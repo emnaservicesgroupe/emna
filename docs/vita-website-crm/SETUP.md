@@ -25,9 +25,10 @@ All are optional except the salt in production. On the Hostinger kit they go in 
 | `SITE_ADDRESS` | Postal address shown on the site. **On the Hostinger kit use `SITE_POSTAL_ADDRESS` instead**: in that kit `SITE_ADDRESS` is the server host name for Caddy, and `docker-compose.yml` hands `SITE_POSTAL_ADDRESS` to the app as `SITE_ADDRESS`. |
 | `SITE_LICENCE_TEXT` | Licence wording exactly as issued by the authority. Leave empty until you have it. Never invent one. |
 | `SITE_BASE_URL` | `https://your-domain` without a trailing slash. Needed for the absolute URLs in `/sitemap.xml` and `/robots.txt`; without it the sitemap has relative paths only. |
-| `SITE_IP_SALT` | Secret salt for the one-way hashes behind the lead rate limits. **Required in production**: without it the app logs a warning and falls back to an insecure built-in salt. Generate with `openssl rand -hex 32`. `deploy/hostinger/setup.sh` generates it for you (also for an older `.env` that lacks it). Changing it only resets the rate-limit counters. |
-| `SITE_LEAD_IP_PER_HOUR` | Lead submissions allowed per IP per hour (default 5). |
+| `SITE_IP_SALT` | Secret salt for the one-way hashes behind the lead rate limits. **Required in production**: without it the app logs a warning and uses a random salt per process (hashes and rate-limit counters then reset on every restart). Generate with `openssl rand -hex 32`. `deploy/hostinger/setup.sh` generates it for you (also for an older `.env` that lacks it). Changing it only resets the rate-limit counters. |
+| `SITE_LEAD_IP_PER_HOUR` | Lead submissions allowed per client per hour (default 5). IPv6 addresses are counted per /64 network, IPv4-mapped IPv6 as IPv4. |
 | `SITE_LEAD_EMAIL_PER_DAY` | Lead submissions allowed per e-mail or phone per day (default 3). |
+| `SITE_LEAD_GLOBAL_PER_DAY` | Global cap on all public lead submissions per day, honeypot hits included (default 2000). Over the cap the form answers 429 with `Retry-After` until the next UTC day. |
 | `SITE_CONSENT_VERSION` | Label of the consent wording stored with each lead (default `2026-10-v1`). Change it whenever the consent or privacy wording changes. |
 
 A fact that is empty is not shown at all (no empty labels). After changing `.env`: `docker compose up -d`.

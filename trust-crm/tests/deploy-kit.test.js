@@ -313,3 +313,49 @@ test(".dockerignore excludes .env, tests, node_modules, .storage, .git and docs;
   assert.ok(gi.includes(".env.tmp.*"));
   assert.ok(gi.includes("backups/"));
 });
+
+// ---------------------------------------------------------------- review round 1
+
+function runEnsureEnv(initialEnv) {
+  const s = read(path.join(KIT, "setup.sh"));
+  const set = /\nset_env\(\) \{[\s\S]*?\n\}\n/.exec(s);
+  const get = /\nget_env\(\) \{[\s\S]*?\n\}\n/.exec(s);
+  const ens = /\nensure_env\(\) \{[\s\S]*?\n\}\n/.exec(s);
+  assert.ok(set && get && ens, "set_env, get_env and ensure_env are defined in setup.sh");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vita-ensure-"));
+  try {
+    if (initialEnv !== null) fs.writeFileSync(path.join(dir, ".env"), initialEnv);
+    else fs.writeFileSync(path.join(dir, ".env"), "");
+    const r = spawnSync("bash", ["-c", `set -euo pipefail\n${set[0]}\n${get[0]}\n${ens[0]}\nensure_env TRUST_PROXY 1\nensure_env TRUST_PROXY 1`], { cwd: dir, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return fs.readFileSync(path.join(dir, ".env"), "utf8");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("review 7: setup.sh adds TRUST_PROXY=1 when missing (once) and never overwrites an existing value", () => {
+  assert.equal(runEnsureEnv("A=1\nB=2\n"), "A=1\nB=2\nTRUST_PROXY=1\n");
+  assert.equal(runEnsureEnv("A=1\nTRUST_PROXY=2\n"), "A=1\nTRUST_PROXY=2\n");
+  assert.equal(runEnsureEnv("TRUST_PROXY=0\nA=1\n"), "TRUST_PROXY=0\nA=1\n");
+  assert.equal(runEnsureEnv("TRUST_PROXY=\n"), "TRUST_PROXY=\n", "an existing line, even empty, is the owner's choice");
+  assert.equal(runEnsureEnv("# TRUST_PROXY=1\nA=1\n"), "# TRUST_PROXY=1\nA=1\nTRUST_PROXY=1\n", "a comment is not a value");
+});
+
+test("review 7: setup.sh calls ensure_env TRUST_PROXY for a new and for an existing .env", () => {
+  const s = read(path.join(KIT, "setup.sh"));
+  const calls = s.match(/ensure_env TRUST_PROXY 1/g) || [];
+  assert.ok(calls.length >= 2, "called in both the existing-.env and the new-.env branch");
+  const existing = s.slice(s.indexOf("if [ -f .env ]; then"), s.indexOf("else\n  cp .env.production.example .env"));
+  assert.match(existing, /ensure_env TRUST_PROXY 1/);
+  const created = s.slice(s.indexOf("cp .env.production.example .env"), s.indexOf("# Postgres SUPERUSER"));
+  assert.match(created, /ensure_env TRUST_PROXY 1/);
+});
+
+test("review 7: SITE_LEAD_GLOBAL_PER_DAY is documented in .env.production.example, trust-crm/.env.example and SETUP.md", () => {
+  assert.match(read(path.join(KIT, ".env.production.example")), /^# SITE_LEAD_GLOBAL_PER_DAY=2000$/m);
+  assert.match(read(path.join(ROOT, ".env.example")), /^# SITE_LEAD_GLOBAL_PER_DAY=2000$/m);
+  assert.match(read(path.join(ROOT, "..", "docs", "vita-website-crm", "SETUP.md")), /`SITE_LEAD_GLOBAL_PER_DAY`/);
+  const salt = read(path.join(ROOT, "..", "docs", "vita-website-crm", "SETUP.md"));
+  assert.doesNotMatch(salt, /insecure built-in salt/, "the fixed development salt no longer exists");
+});

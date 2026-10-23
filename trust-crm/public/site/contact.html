@@ -19,7 +19,7 @@
 <nav class="main-nav" data-i18n-label="nav.label" aria-label="Main navigation"><ul><li><a href="/" data-i18n="nav.home">Home</a></li><li><a href="/site/services.html" data-i18n="nav.services">Services</a></li><li><a href="/site/destinations.html" data-i18n="nav.destinations">Destinations</a></li><li><a href="/site/how-it-works.html" data-i18n="nav.how">How it works</a></li><li><a href="/site/jobs.html" data-i18n="nav.jobs">Job offers</a></li><li><a href="/site/employers.html" data-i18n="nav.employers">For employers</a></li><li><a href="/site/register.html" data-i18n="nav.register">Register as a candidate</a></li><li><a href="/site/contact.html" aria-current="page" data-i18n="nav.contact">Contact</a></li></ul></nav>
 </div></header>
 <main id="main" tabindex="-1">
-<div class="page-head"><h1 data-i18n="contact.h1">Contact</h1><p class="lead" data-i18n="contact.lead">Send us a message and we will reply as soon as we can.</p></div>
+<div class="page-head"><h1 data-i18n="contact.h1">Contact</h1><p class="lead" data-i18n="contact.lead">Send us a message and we aim to reply. We cannot promise a reply time.</p></div>
 <section class="card" aria-labelledby="facts-h"><h2 id="facts-h" data-i18n="contact.facts.h">Our details</h2><ul class="facts" data-site-facts hidden></ul></section>
 <section class="card form-card" aria-labelledby="form-h"><h2 id="form-h" data-i18n="contact.form.h">Send a message</h2><p class="hint" data-i18n="common.required">Fields marked * are required.</p>
 <form data-lead-form data-kind="contact" novalidate>
@@ -27,7 +27,7 @@
 <div class="field"><label for="f-email" data-i18n="form.email">Email</label><input id="f-email" name="email" type="email" autocomplete="email" maxlength="254" aria-describedby="f-email-h"><span class="hint" id="f-email-h" data-i18n="form.contactHint">Give an email address, a phone number, or both.</span></div>
 <div class="field"><label for="f-phone" data-i18n="form.phone">Phone</label><input id="f-phone" name="phone" type="tel" autocomplete="tel" maxlength="32"></div>
 <div class="field"><label for="f-message" class="req" data-i18n="form.message.contact">Your message</label><textarea id="f-message" name="message" maxlength="4000" required></textarea></div>
-<div class="hp" aria-hidden="true"><label for="f-website">Website</label><input id="f-website" name="website" type="text" tabindex="-1" autocomplete="off"></div>
+<div class="hp" aria-hidden="true"><label for="f-hp-url">Leave this field empty</label><input id="f-hp-url" name="hp_url" type="text" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-form-type="other"></div>
 <button class="btn" type="submit" data-i18n="form.submit">Send</button>
 <p class="form-status" data-form-status role="status" aria-live="polite"></p>
 </form></section>

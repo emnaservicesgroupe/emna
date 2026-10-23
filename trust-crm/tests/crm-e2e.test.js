@@ -57,7 +57,7 @@ test.after(async () => {
 });
 
 const submit = (over = {}) =>
-  w.http("POST", "/public/leads", null, { kind: "candidate", name: "Visitor", email: "visitor@test.invalid", consent: true, lang: "en", website: "", ...over });
+  w.http("POST", "/public/leads", null, { kind: "candidate", name: "Visitor", email: "visitor@test.invalid", consent: true, lang: "en", hp_url: "", ...over });
 const leadsList = async (key, qs = "") => (await w.http("GET", `/crm/leads${qs}`, w.tokens[key])).body;
 const findLead = async (key, email, qs = "") => (await leadsList(key, qs)).rows.find((l) => l.email === email);
 
@@ -181,7 +181,7 @@ test("B: employer and contact leads are stored, never create a candidate and can
 });
 
 test("C: honeypot lead is acknowledged but stored as spam and hidden from the default list", async () => {
-  const r = await submit({ name: "Bot", email: "bot@test.invalid", website: "http://spam.invalid" });
+  const r = await submit({ name: "Bot", email: "bot@test.invalid", hp_url: "http://spam.invalid" });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body, { ok: true }, "same answer as a real submission");
   const row = await w.one("SELECT * FROM crm_leads WHERE name = 'Bot'");
@@ -315,11 +315,11 @@ test("G: per-IP and per-identity rate limits answer 429 with Retry-After; duplic
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
     assert.equal(await w.count("SELECT count(*) AS n FROM crm_leads WHERE email = 'dup@test.invalid'"), 1, "duplicate within 24h updates, not duplicates");
-    assert.equal((await w.one("SELECT message FROM crm_leads WHERE email = 'dup@test.invalid'")).message, "second");
+    assert.equal((await w.one("SELECT message FROM crm_leads WHERE email = 'dup@test.invalid'")).message, "first", "an existing message is kept");
     const third = await submit({ name: "Dup One", email: "dup@test.invalid", message: "third" });
     assert.equal(third.status, 429, JSON.stringify(third.body));
     assert.ok(Number(third.headers.get("retry-after")) >= 1);
-    assert.equal((await w.one("SELECT message FROM crm_leads WHERE email = 'dup@test.invalid'")).message, "second");
+    assert.equal((await w.one("SELECT message FROM crm_leads WHERE email = 'dup@test.invalid'")).message, "first");
     // another identity is unaffected
     assert.equal((await submit({ name: "Fresh", email: "fresh@test.invalid" })).status, 200);
   } finally {
@@ -337,7 +337,7 @@ test("G: per-IP and per-identity rate limits answer 429 with Retry-After; duplic
     assert.ok(Number(blocked.headers.get("retry-after")) >= 1);
     assert.equal(await w.count("SELECT count(*) AS n FROM crm_leads WHERE email = 'ip3@test.invalid'"), 0);
     // honeypot hits count against the IP too, so a bot cannot flood the table
-    assert.equal((await submit({ name: "Bot2", email: "bot2@test.invalid", website: "x" })).status, 429);
+    assert.equal((await submit({ name: "Bot2", email: "bot2@test.invalid", hp_url: "x" })).status, 429);
   } finally {
     process.env.SITE_LEAD_IP_PER_HOUR = "1000";
   }

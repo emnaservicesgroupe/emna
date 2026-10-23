@@ -219,6 +219,25 @@ test("assigned_to: Admin only, existing active staff user or null", async () => 
   });
 });
 
+test("review 6: assigned_to must be an active user with one of the /crm/staff roles (Accountant/HR/Candidate: 400)", async () => {
+  await withWorld(async (w) => {
+    const id = await w.lead();
+    const staff = (await w.http("GET", "/crm/staff", w.T.admin)).body.rows.map((r) => r.id);
+    for (const k of ["acct", "hr", "cand"]) {
+      assert.ok(!staff.includes(w.ids[k]), `${k} is not offered by /crm/staff`);
+      const r = await w.http("PATCH", `/crm/leads/${id}`, w.T.admin, { assigned_to: w.ids[k] });
+      assert.equal(r.status, 400, k);
+    }
+    assert.equal((await w.q("SELECT assigned_to FROM crm_leads WHERE id=$1", [id])).rows[0].assigned_to, null);
+    for (const k of ["admin", "mgr", "rec", "agentA"]) {
+      assert.ok(staff.includes(w.ids[k]), k);
+      assert.equal((await w.http("PATCH", `/crm/leads/${id}`, w.T.admin, { assigned_to: w.ids[k] })).status, 200, k);
+    }
+    const { STAFF_ROLES } = require("../modules/crm/leadsAdmin");
+    assert.deepEqual([...STAFF_ROLES].sort(), ["Admin", "Agent", "Manager", "Receptionist", "SuperAdmin"]);
+  });
+});
+
 test("notes: stored with timeline + audit, 4000-char cap, validation, unicode/html kept as text", async () => {
   await withWorld(async (w) => {
     const id = await w.lead();

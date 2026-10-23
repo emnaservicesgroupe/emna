@@ -19,9 +19,20 @@ const COLUMNS = [
 const SELECT = COLUMNS.join(", ");
 const LIVE = "status = 'published' AND (closes_at IS NULL OR closes_at > now())";
 
+const MAX_OFFSET = 100000;
+
+/** Parses a paging value: only plain digit strings or safe integers count; anything else falls back to `dflt`. */
+function pageInt(v, dflt) {
+  let n;
+  if (typeof v === "number") n = v;
+  else if (typeof v === "string" && /^\d{1,15}$/.test(v)) n = Number(v);
+  else return dflt;
+  return Number.isSafeInteger(n) && n >= 0 ? n : dflt;
+}
+
 async function listPublishedJobs(pool, { country, category, limit, offset } = {}) {
-  const lim = Math.min(50, Math.max(1, Number.isFinite(Number(limit)) ? Math.floor(Number(limit)) : 20));
-  const off = Math.max(0, Number.isFinite(Number(offset)) ? Math.floor(Number(offset)) : 0);
+  const lim = Math.min(50, Math.max(1, pageInt(limit, 20)));
+  const off = Math.min(MAX_OFFSET, pageInt(offset, 0));
   const params = [];
   let where = LIVE;
   if (typeof country === "string" && country.trim()) {

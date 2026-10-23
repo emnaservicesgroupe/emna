@@ -20,7 +20,7 @@
 </div></header>
 <main id="main" tabindex="-1">
 <div class="page-head"><h1 data-i18n="employers.h1">For employers</h1><p class="lead" data-i18n="employers.lead">Tell us about the people you are looking for.</p></div>
-<section class="card"><p data-i18n="employers.p1">If you are hiring from abroad, send us a short description of your company and the profiles you need. A member of our team will contact you to discuss it.</p><p data-i18n="employers.p2">We introduce candidates whose profiles match your request. We do not decide on hiring, and we cannot promise a particular number or timing of candidates.</p></section>
+<section class="card"><p data-i18n="employers.p1">If you are hiring from abroad, send us a short description of your company and the profiles you need. A member of our team may contact you to discuss it.</p><p data-i18n="employers.p2">We introduce candidates whose profiles match your request. We do not decide on hiring, and we cannot promise a particular number or timing of candidates.</p></section>
 <section class="card form-card" aria-labelledby="form-h"><h2 id="form-h" data-i18n="employers.form.h">Send an inquiry</h2><p class="hint" data-i18n="common.required">Fields marked * are required.</p>
 <form data-lead-form data-kind="employer" novalidate>
 <div class="field"><label for="f-name" class="req" data-i18n="form.name">Full name</label><input id="f-name" name="name" type="text" required autocomplete="name" maxlength="120"></div>
@@ -30,7 +30,7 @@
 <div class="field"><label for="f-country" data-i18n="form.country">Country</label><input id="f-country" name="country" type="text" autocomplete="country-name" maxlength="80"></div>
 <div class="field"><label for="f-message" data-i18n="form.message.employer">Which profiles do you need? How many?</label><textarea id="f-message" name="message" maxlength="4000"></textarea></div>
 <div class="field check"><input id="f-consent" name="consent" type="checkbox" required><label for="f-consent" data-i18n="form.consent.employer">I agree that VITA stores and uses the details I send to contact me about my request and to manage our business relationship. I can ask for them to be corrected or deleted at any time.</label></div>
-<div class="hp" aria-hidden="true"><label for="f-website">Website</label><input id="f-website" name="website" type="text" tabindex="-1" autocomplete="off"></div>
+<div class="hp" aria-hidden="true"><label for="f-hp-url">Leave this field empty</label><input id="f-hp-url" name="hp_url" type="text" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-form-type="other"></div>
 <button class="btn" type="submit" data-i18n="form.submit">Send</button>
 <p class="form-status" data-form-status role="status" aria-live="polite"></p>
 </form></section>

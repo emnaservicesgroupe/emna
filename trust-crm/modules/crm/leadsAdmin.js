@@ -9,6 +9,8 @@ const db = () => require("../../db");
 const STATUSES = ["new", "contacted", "qualified", "converted", "rejected", "spam"];
 const SETTABLE_STATUSES = ["new", "contacted", "qualified", "rejected", "spam"]; // 'converted' only via Task 4's convert
 const KINDS = ["candidate", "employer", "contact"];
+// Roles that can work leads: the /crm/staff select offers exactly these, and assigned_to accepts only these.
+const STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"];
 const NOTE_MAX = 4000;
 const COLUMNS = `l.id, l.kind, l.status, l.name, l.email, l.phone, l.country, l.profession, l.company, l.message, l.lang,
   l.consent_at, l.consent_text_version, l.source, l.assigned_to, l.candidate_id, l.created_at, l.updated_at`;
@@ -106,7 +108,8 @@ async function loadScoped(client, user, id, { lock = false } = {}) {
 /** Active staff who can work leads, for the assign-to select (id, name, role only; users:write at the route). */
 async function listStaff() {
   const r = await db().query(
-    "SELECT id, full_name, role FROM users WHERE is_active = true AND role IN ('SuperAdmin','Admin','Manager','Receptionist','Agent') ORDER BY full_name, id LIMIT 500"
+    "SELECT id, full_name, role FROM users WHERE is_active = true AND role = ANY($1::text[]) ORDER BY full_name, id LIMIT 500",
+    [STAFF_ROLES]
   );
   return { rows: r.rows };
 }
@@ -163,7 +166,7 @@ async function updateLead(user, rawId, input) {
       let target = null;
       if (body.assigned_to !== null) {
         target = posInt(body.assigned_to, "assigned_to");
-        const u = await client.query("SELECT 1 FROM users WHERE id = $1 AND is_active = true AND role <> 'Candidate'", [target]);
+        const u = await client.query("SELECT 1 FROM users WHERE id = $1 AND is_active = true AND role = ANY($2::text[])", [target, STAFF_ROLES]);
         if (u.rowCount === 0) throw new HttpError(400, "assigned_to must be an active staff user");
       }
       if (target !== lead.assigned_to) {
@@ -224,4 +227,4 @@ async function addNote(user, rawId, text) {
   });
 }
 
-module.exports = { listLeads, listStaff, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX, parseId, loadScoped, inTransaction, hasPerm };
+module.exports = { listLeads, listStaff, getLead, updateLead, addNote, STATUSES, SETTABLE_STATUSES, NOTE_MAX, parseId, loadScoped, inTransaction, hasPerm, STAFF_ROLES };

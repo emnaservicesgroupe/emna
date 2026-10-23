@@ -276,7 +276,7 @@
 
   function readValues(form) {
     var v = {};
-    ["name", "email", "phone", "country", "profession", "company", "message", "website"].forEach(function (n) {
+    ["name", "email", "phone", "country", "profession", "company", "message", "hp_url"].forEach(function (n) {
       var f = form.elements[n];
       if (f) v[n] = String(f.value || "").trim();
     });
@@ -306,7 +306,7 @@
     var payload = { kind: kind, lang: lang };
     ["name", "email", "phone", "country", "profession", "company", "message"].forEach(function (n) { if (values[n]) payload[n] = values[n]; });
     if (values.consent !== undefined) payload.consent = values.consent;
-    payload.website = values.website || "";
+    payload.hp_url = values.hp_url || "";
 
     form._busy = true;
     var submit = form.querySelector("button[type=submit]");

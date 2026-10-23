@@ -2,7 +2,10 @@
 //   GET  /config      set SITE_* facts only
 //   GET  /jobs        staff-published, not-expired offers (allowlisted fields)
 //   GET  /jobs/:id
-//   POST /leads       candidate / employer / contact form
+//   POST /leads       candidate / employer / contact form. Honeypot field: `hp_url` (any non-blank value => stored as
+//                     spam, still answered ok). Limits: per client (IPv6 by /64) per hour, per e-mail/phone per day and
+//                     SITE_LEAD_GLOBAL_PER_DAY overall; all answer 429 + Retry-After. A same-email resubmission within
+//                     24h only fills gaps of a new/contacted/qualified lead; converted/rejected leads are never written.
 const express = require("express");
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { asyncHandler } = require("../modules/jobsearch/errorHandler");

@@ -146,6 +146,8 @@ test("second convert is idempotent: same candidate, 200, no writes", async () =>
     assert.equal(second.status, 200, JSON.stringify(second.body));
     assert.equal(second.body.created, false);
     assert.equal(second.body.candidate.id, first.body.candidate.id);
+    assert.deepEqual(Object.keys(second.body).sort(), ["candidate", "created"], "re-convert returns no portal/invite data");
+    assert.deepEqual(Object.keys(second.body.candidate).sort(), ["crm_stage", "full_name", "id"], "only id, full_name, crm_stage");
     assert.deepEqual(await w.counts(), before);
   });
 });
@@ -304,5 +306,59 @@ test("a Candidate token is denied on every /crm route", async () => {
       ["GET", "/crm/candidates/1/timeline"],
     ];
     for (const [m, u, b] of routes) assert.equal((await w.http(m, u, w.T.cand, b)).status, 403, `${m} ${u}`);
+  });
+});
+
+test("review 2b: re-convert applies the candidate scope (staff out of scope: 404) and permissions, and leaks no candidate details", async () => {
+  await withWorld(async (w) => {
+    const id = await w.lead({ assignedTo: w.ids.agentB, email: "scope@test.invalid", phone: "+21655599999" });
+    const first = await w.http("POST", `/crm/leads/${id}/convert`, w.T.admin, { passport_number: "SC-1", createPortalLogin: false });
+    assert.equal(first.status, 201);
+    assert.equal(first.body.candidate.assigned_to, w.ids.agentB);
+    const before = await w.counts();
+    // Manager holds leads:write + candidates:write but the candidate belongs to agentB: outside the staff scope.
+    const m = await w.http("POST", `/crm/leads/${id}/convert`, w.T.mgr, { passport_number: "SC-1" });
+    assert.equal(m.status, 404, JSON.stringify(m.body));
+    assert.ok(!JSON.stringify(m.body).includes("SC-1") && !JSON.stringify(m.body).includes("scope@test.invalid"));
+    // Without the write permissions the answer stays a permission error / not found, never the candidate.
+    const a = await w.http("POST", `/crm/leads/${id}/convert`, w.T.agentA, { passport_number: "SC-1" });
+    assert.ok([403, 404].includes(a.status));
+    assert.ok(!JSON.stringify(a.body).includes("SC-1"));
+    for (const k of ["acct", "hr", "cand"]) assert.equal((await w.http("POST", `/crm/leads/${id}/convert`, w.T[k], { passport_number: "SC-1" })).status, 403, k);
+    // Admin sees the minimal shape; a soft-deleted candidate is not returned.
+    const ad = await w.http("POST", `/crm/leads/${id}/convert`, w.T.admin, { passport_number: "SC-1" });
+    assert.equal(ad.status, 200);
+    assert.deepEqual(Object.keys(ad.body.candidate).sort(), ["crm_stage", "full_name", "id"]);
+    assert.ok(!JSON.stringify(ad.body).includes("SC-1"));
+    await w.q("UPDATE candidates SET is_deleted=true WHERE id=$1", [first.body.candidate.id]);
+    assert.equal((await w.http("POST", `/crm/leads/${id}/convert`, w.T.admin, { passport_number: "SC-1" })).status, 404);
+    assert.deepEqual(await w.counts(), before);
+    // A manager whose own candidate it is gets the minimal answer.
+    const mine = await w.lead({ assignedTo: w.ids.mgr });
+    assert.equal((await w.http("POST", `/crm/leads/${mine}/convert`, w.T.mgr, { passport_number: "SC-2", createPortalLogin: false })).status, 201);
+    const again = await w.http("POST", `/crm/leads/${mine}/convert`, w.T.mgr, { passport_number: "SC-2" });
+    assert.equal(again.status, 200);
+    assert.deepEqual(Object.keys(again.body.candidate).sort(), ["crm_stage", "full_name", "id"]);
+  });
+});
+
+test("review 2a: passport duplicates are case/whitespace-insensitive; stored trimmed and uppercased; message stays generic", async () => {
+  await withWorld(async (w) => {
+    await w.one("INSERT INTO candidates (full_name, passport_number) VALUES ('Existing','ab 123x') RETURNING id");
+    await w.one("INSERT INTO candidates (full_name, passport_number) VALUES ('Existing2','  zz999  ') RETURNING id");
+    const id = await w.lead();
+    const before = await w.counts();
+    for (const p of ["AB 123X", " ab 123x ", "Ab 123x", "ZZ999", "zz999", "  Zz999 "]) {
+      const r = await w.http("POST", `/crm/leads/${id}/convert`, w.T.admin, { passport_number: p, createPortalLogin: false });
+      assert.equal(r.status, 409, p);
+      assert.equal(r.body.error, "A candidate with this passport number already exists");
+      assert.deepEqual(await w.counts(), before);
+    }
+    const ok = await w.http("POST", `/crm/leads/${id}/convert`, w.T.admin, { passport_number: "  tn-77 ab  ", createPortalLogin: false });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.equal(ok.body.candidate.passport_number, "TN-77 AB");
+    assert.equal((await w.one("SELECT passport_number FROM candidates WHERE id=$1", [ok.body.candidate.id])).passport_number, "TN-77 AB");
+    const id2 = await w.lead();
+    assert.equal((await w.http("POST", `/crm/leads/${id2}/convert`, w.T.admin, { passport_number: "tn-77 ab", createPortalLogin: false })).status, 409);
   });
 });

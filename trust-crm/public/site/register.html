@@ -19,7 +19,7 @@
 <nav class="main-nav" data-i18n-label="nav.label" aria-label="Main navigation"><ul><li><a href="/" data-i18n="nav.home">Home</a></li><li><a href="/site/services.html" data-i18n="nav.services">Services</a></li><li><a href="/site/destinations.html" data-i18n="nav.destinations">Destinations</a></li><li><a href="/site/how-it-works.html" data-i18n="nav.how">How it works</a></li><li><a href="/site/jobs.html" data-i18n="nav.jobs">Job offers</a></li><li><a href="/site/employers.html" data-i18n="nav.employers">For employers</a></li><li><a href="/site/register.html" aria-current="page" data-i18n="nav.register">Register as a candidate</a></li><li><a href="/site/contact.html" data-i18n="nav.contact">Contact</a></li></ul></nav>
 </div></header>
 <main id="main" tabindex="-1">
-<div class="page-head"><h1 data-i18n="register.h1">Register as a candidate</h1><p class="lead" data-i18n="register.lead">Send your details and our team will contact you. Registering does not guarantee any offer.</p></div>
+<div class="page-head"><h1 data-i18n="register.h1">Register as a candidate</h1><p class="lead" data-i18n="register.lead">Send your details and our team may contact you. Registering does not guarantee any offer.</p></div>
 <section class="card form-card" aria-labelledby="form-h"><h2 id="form-h" data-i18n="register.form.h">Your details</h2><p class="hint" data-i18n="common.required">Fields marked * are required.</p>
 <form data-lead-form data-kind="candidate" novalidate>
 <div class="field"><label for="f-name" class="req" data-i18n="form.name">Full name</label><input id="f-name" name="name" type="text" required autocomplete="name" maxlength="120"></div>
@@ -29,7 +29,7 @@
 <div class="field"><label for="f-profession" data-i18n="form.profession">Profession</label><input id="f-profession" name="profession" type="text" maxlength="120"></div>
 <div class="field"><label for="f-message" data-i18n="form.message.candidate">Tell us about your experience and what you are looking for (optional)</label><textarea id="f-message" name="message" maxlength="4000"></textarea></div>
 <div class="field check"><input id="f-consent" name="consent" type="checkbox" required><label for="f-consent" data-i18n="form.consent.candidate">I agree that VITA stores and uses the details I send to contact me about job opportunities and to manage my registration. I can ask for them to be corrected or deleted at any time.</label></div>
-<div class="hp" aria-hidden="true"><label for="f-website">Website</label><input id="f-website" name="website" type="text" tabindex="-1" autocomplete="off"></div>
+<div class="hp" aria-hidden="true"><label for="f-hp-url">Leave this field empty</label><input id="f-hp-url" name="hp_url" type="text" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-form-type="other"></div>
 <button class="btn" type="submit" data-i18n="form.submit">Send</button>
 <p class="form-status" data-form-status role="status" aria-live="polite"></p>
 </form></section>
