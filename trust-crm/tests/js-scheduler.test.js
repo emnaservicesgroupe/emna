@@ -401,6 +401,33 @@ for (const variant of ["candidate", "source", "module"]) {
   });
 }
 
+test("Task 19: a system:auto approval survives a pause hold and is re-queued as system-approved (no human approval, no task), sent once", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "automatic" });
+  const t0 = T0();
+  await tick(t0, { onStep: async (name) => { if (name === "send") await settingsService.pauseCandidate(c.id, true); } });
+  let [a] = await appsOf(c.id);
+  assert.equal(a.status, "approved", "held");
+  const approvals = async () => (await q("SELECT actor, event FROM js_timeline WHERE application_id=$1 AND detail->>'to' IN ('approved','queued') ORDER BY id", [a.id])).rows;
+  assert.deepEqual((await approvals()).map((r) => `${r.actor}/${r.event}`), ["system:auto/status_changed", "system:submitter/status_changed", "system:submitter/held_paused"]);
+  await settingsService.pauseCandidate(c.id, false);
+  const s = await tick(new Date(t0.getTime() + HOUR));
+  assert.deepEqual(s.errors, []);
+  assert.equal(s.heldRequeued, 1);
+  [a] = await appsOf(c.id);
+  assert.equal(a.status, "sent");
+  assert.equal(await mails(), 1);
+  const rows = await approvals();
+  assert.ok(rows.every((r) => r.actor.startsWith("system:")), `only system actors approve/queue: ${JSON.stringify(rows)}`);
+  assert.equal(rows.filter((r) => r.event === "status_changed" && r.actor === "system:auto").length, 1, "approved once, by system:auto");
+  assert.equal(await count("SELECT count(*) AS n FROM js_timeline WHERE application_id=$1 AND actor LIKE 'staff:%'", [a.id]), 0, "no human touched it");
+  assert.equal(await count("SELECT count(*) AS n FROM js_tasks WHERE application_id=$1", [a.id]), 0, "no needs_human_approval task");
+  const sent = (await q("SELECT evidence FROM js_submissions WHERE application_id=$1 AND status='sent'", [a.id])).rows[0];
+  assert.equal(sent.evidence.approval && sent.evidence.approval.actor, "system:auto", JSON.stringify(sent.evidence.approval));
+});
+
 test("pause held by the background worker (module paused while the worker drains), then scheduler re-queues once", async () => {
   const w = await world();
   const emp = await employer(w, { confirmed: true });

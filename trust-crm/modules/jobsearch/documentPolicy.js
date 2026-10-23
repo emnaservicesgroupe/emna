@@ -12,7 +12,6 @@ const { HttpError } = require("./httpError");
 
 const db = () => require("../../db");
 
-const SENSITIVE_TYPES = ["passport", "national_id", "police_certificate", "medical"];
 
 /**
  * Unscanned CVs (scan_status 'scan_unavailable': no malware scanner was configured or reachable) are NOT
@@ -67,20 +66,30 @@ const SENSITIVE_RULES = [
   ["photo", /\b(?:photo|photos|picture|selfie)\b|صورة/],
 ];
 
+// Every class sensitiveType() can return (Task 19: was only the first four). Kept in sync by construction.
+const SENSITIVE_TYPES = Object.freeze([...SENSITIVE_RULES.map(([type]) => type), "unclassified"]);
+
 // Layer 2: SAFE only if EVERY token is a safe term or a harmless tail, AND the name contains a
 // recognised document-kind anchor. Anything else (including blank) is 'unclassified' (fail-closed).
-const SAFE_TERMS = new Set(["cv", "resume", "curriculum", "vitae", "lebenslauf", "cover", "letter", "lettre", "motivation", "diploma", "diplome", "degree", "master", "masters", "bachelor", "transcript", "releve", "notes", "training", "professional", "certificate", "certificat", "formation", "portfolio", "red", "seal", "trade", "language", "test", "result", "results", "ielts", "toefl", "tcf", "tef", "celpip", "delf", "dalf", "goethe"]);
+const SAFE_TERMS = new Set(["cv", "resume", "curriculum", "vitae", "lebenslauf", "cover", "letter", "lettre", "motivation", "diploma", "diplome", "degree", "master", "masters", "bachelor", "transcript", "releve", "notes", "training", "professional", "certificate", "certificat", "formation", "portfolio", "red", "seal", "trade", "language", "ielts", "toefl", "tcf", "tef", "celpip", "delf", "dalf", "goethe"]);
 const TAIL_TERMS = new Set(["final", "draft", "version", "pdf", "docx", "doc", "copy", "scan", "scanned", "signed", "updated", "new", "old", "eng", "english", "fr", "french", "ar", "arabic", "en", "de", "es", "it", "ro", "sq", "albanian", "romanian", "italian", "spanish", "german", "and", "et", "of", "du", "la", "le", "the", "for", "pour"]);
 const ANCHOR_RE = /\b(?:cv|resume|curriculum vitae|curriculum|lebenslauf|cover letter|lettre de motivation|motivation letter|diploma|diplome|degree|master|masters|bachelor|transcript|releve de notes|portfolio|ielts|toefl|tcf|tef|celpip|delf|dalf|goethe|language test|trade licen[cs]e|professional licen[cs]e|red seal|red seal licen[cs]e|training certificate|professional certificate|certificat de formation)\b/;
 // Tiny Arabic allowlist (exact phrases), mapped to a Latin anchor before tokenising.
 const ARABIC_SAFE = [["السيرة الذاتية", "cv"], ["سيرة ذاتية", "cv"], ["شهادة جامعية", "diploma"], ["دبلوم", "diploma"]];
+
+// "test" / "result(s)" are safe only in a language-test context ("IELTS results", "language test"); on
+// their own ("CV + test results") they could be a medical or background test, so the name fails closed.
+const LANG_TEST_TERMS = new Set(["test", "result", "results"]);
+const LANG_TEST_CONTEXT_RE = /\b(?:language test|ielts|toefl|tcf|tef|celpip|delf|dalf|goethe)\b/;
 
 function isSafe(t) {
   let x = ` ${t} `;
   for (const [ar, latin] of ARABIC_SAFE) x = x.split(` ${normDocType(ar)} `).join(` ${latin} `);
   const toks = x.trim().split(" ").filter(Boolean);
   if (!toks.length || !ANCHOR_RE.test(toks.join(" "))) return false;
+  const langTest = LANG_TEST_CONTEXT_RE.test(toks.join(" "));
   return toks.every((tok, i) => {
+    if (LANG_TEST_TERMS.has(tok)) return langTest;
     if (SAFE_TERMS.has(tok) || TAIL_TERMS.has(tok) || /^v\d{1,3}$/.test(tok) || /^\d{1,4}$/.test(tok)) return true;
     // 'licence'/'license' is safe ONLY right after trade / professional / red seal.
     if (tok === "licence" || tok === "license") return ["trade", "professional", "seal"].includes(toks[i - 1]);

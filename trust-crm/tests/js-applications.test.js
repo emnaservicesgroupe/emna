@@ -872,6 +872,20 @@ test("cover letter: hostile job title cannot inject a claim; Arabic letter token
   assert.ok(letter.includes("كهربائي صناعي") && letter.includes("Karim Benali") && letter.includes("2016"));
 });
 
+test("Task 19 SHOULD-FIX b: SENSITIVE_TYPES lists every class sensitiveType() returns; test/result words are safe only in a language-test context", () => {
+  const { SENSITIVE_TYPES, sensitiveType } = documentPolicy;
+  assert.deepEqual([...SENSITIVE_TYPES].sort(), ["civil_status", "financial", "identity_other", "immigration", "medical", "national_id", "passport", "photo", "police_certificate", "reference", "unclassified"]);
+  assert.ok(Object.isFrozen(SENSITIVE_TYPES));
+  const samples = ["Passport", "CIN", "Casier judiciaire", "Medical report", "Work permit", "Birth certificate", "Bank statement", "Carte grise", "Reference letter", "Photo", "random thing", "", "CV + test results", "cv test result", "test results", "Results", "CV results", "Diploma test"];
+  for (const x of samples) {
+    const t = sensitiveType(x);
+    assert.ok(t === null || SENSITIVE_TYPES.includes(t), `${x} -> ${t}`);
+  }
+  for (const bad of ["CV + test results", "cv test result", "CV results", "Diploma test", "test results", "Transcript and test results"]) assert.equal(sensitiveType(bad), "unclassified", bad);
+  for (const ok of ["IELTS test results", "TOEFL results", "Language test results", "language test", "CV", "Cover letter", "DELF result", "TCF test result 2024"]) assert.equal(sensitiveType(ok), null, ok);
+  assert.equal(sensitiveType("Drug test results"), "medical");
+});
+
 test("Task 19 M-1: a CRM document whose file_path is another candidate's storage key is blocked (document_not_owned) at packaging and at re-validation", async () => {
   await withApp(async (t) => {
     const a = await t.newCandidate();
