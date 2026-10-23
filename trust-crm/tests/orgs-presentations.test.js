@@ -408,3 +408,84 @@ test("role matrix: staff routes deny Agent/Accountant/HR/Candidate/Agency/Employ
     }
   });
 });
+
+test("presentation-preview: returns the exact summary POST stores, never writes, honours consent/scope/roles", async () => {
+  await withWorld(async (w) => {
+    const emp = await createEmployerUser(w.pool);
+    const rid = await w.mkReq(emp.orgId);
+    const cand = await w.mkCand();
+    const bare = await w.mkCand(w.ids.agentA, { profile: false });
+    const prev = (q, tok = "admin", id = rid) => w.http("GET", `/crm/employer-requests/${id}/presentation-preview?${q}`, w.T[tok]);
+    const counts = async () => [(await w.q("SELECT 1 FROM employer_presentations")).rowCount, (await w.q("SELECT 1 FROM audit_logs")).rowCount, (await w.q("SELECT 1 FROM crm_timeline")).rowCount];
+
+    // no consent yet: the preview still shows what WOULD be shared, flagged as not presentable
+    const p0 = await prev(`candidate_id=${cand}&staff_note_for_employer=${encodeURIComponent("Strong welder")}`);
+    assert.equal(p0.status, 200, p0.text);
+    assert.equal(p0.body.consent_active, false);
+    assert.equal(p0.body.presentable, false);
+    assert.equal(p0.body.already_presented, false);
+    assert.equal(p0.body.needs_summary, false);
+    assert.deepEqual(Object.keys(p0.body.summary).sort(), KEYS);
+    for (const s of SECRETS.concat(["SecretCorp", "MIG", "INTERNAL"])) assert.ok(!p0.text.includes(s), `preview leaks ${s}`);
+
+    await consent(w, cand, emp.orgId);
+    const before = await counts();
+    const p1 = await prev(`candidate_id=${cand}&staff_note_for_employer=${encodeURIComponent("Strong welder")}`);
+    assert.equal(p1.body.consent_active, true);
+    assert.equal(p1.body.presentable, true);
+    assert.deepEqual(p1.body.summary, p0.body.summary);
+    assert.deepEqual(await counts(), before, "a preview never writes (no presentation, audit or timeline row)");
+
+    // identical to what the POST stores
+    const posted = await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, { candidate_id: cand, staff_note_for_employer: "Strong welder" });
+    assert.equal(posted.status, 201, posted.text);
+    assert.deepEqual(posted.body.summary, p1.body.summary);
+    assert.equal((await prev(`candidate_id=${cand}`)).body.already_presented, true);
+    assert.equal((await prev(`candidate_id=${cand}`)).body.presentable, false);
+
+    // no confirmed profile: needs_summary until staff supply fields (same validation and merge as POST)
+    await consent(w, bare, emp.orgId);
+    const n = await prev(`candidate_id=${bare}`);
+    assert.equal(n.status, 200);
+    assert.equal(n.body.needs_summary, true);
+    assert.equal(n.body.summary, null);
+    assert.equal(n.body.presentable, false);
+    const f = await prev(`candidate_id=${bare}&profession=Plumber&years_experience=7&languages=${encodeURIComponent("Arabic, French")}&country_of_residence=Tunisia&availability=immediately&staff_note_for_employer=ok`);
+    assert.equal(f.status, 200, f.text);
+    assert.deepEqual(f.body.summary, { profession: "Plumber", years_experience: 7, languages: ["Arabic", "French"], country_of_residence: "Tunisia", availability: "immediately", staff_note_for_employer: "ok" });
+    assert.equal(f.body.presentable, true);
+    const posted2 = await w.http("POST", `/crm/employer-requests/${rid}/presentations`, w.T.admin, {
+      candidate_id: bare, staff_note_for_employer: "ok",
+      summary: { profession: "Plumber", years_experience: 7, languages: ["Arabic", "French"], country_of_residence: "Tunisia", availability: "immediately" },
+    });
+    assert.deepEqual(posted2.body.summary, f.body.summary);
+
+    // validation: unknown/duplicate params, bad values, bad ids
+    for (const q of [`candidate_id=${cand}&x=1`, `candidate_id=${cand}&candidate_id=${cand}`, `candidate_id=abc`, ``, `candidate_id=${bare}&years_experience=99999`, `candidate_id=${bare}&years_experience=-1`, `candidate_id=${bare}&profession=${"x".repeat(121)}`, `candidate_id=${bare}&languages=${encodeURIComponent(Array(11).fill("a").join(","))}`, `candidate_id=${cand}&staff_note_for_employer=${"x".repeat(1001)}`]) {
+      assert.equal((await prev(q)).status, 400, q);
+    }
+    assert.equal((await prev(`candidate_id=999999`)).status, 404);
+    assert.equal((await prev(`candidate_id=${cand}`, "admin", 999999)).status, 404);
+    assert.equal((await prev(`candidate_id=${cand}`, "admin", "abc")).status, 400);
+
+    // request status gate is reported, not thrown
+    const sub = await w.mkReq(emp.orgId, "submitted");
+    const s = await prev(`candidate_id=${cand}`, "admin", sub);
+    assert.equal(s.status, 200);
+    assert.equal(s.body.presentable, false);
+    assert.equal(s.body.request_status, "submitted");
+
+    // consent for a different employer does not count
+    const other = await createEmployerUser(w.pool);
+    const orid = await w.mkReq(other.orgId);
+    assert.equal((await prev(`candidate_id=${cand}`, "admin", orid)).body.consent_active, false);
+
+    // scope and roles
+    const owned = await w.mkCand(w.ids.agentA);
+    assert.equal((await prev(`candidate_id=${owned}`, "agentB")).status, 403, "agents lack orgs:write");
+    assert.equal((await prev(`candidate_id=${owned}`, "mgr")).status, 404, "manager sees only assigned candidates");
+    for (const k of ["rec", "agentA", "acct", "hr", "cand"]) assert.equal((await prev(`candidate_id=${owned}`, k)).status, 403, k);
+    assert.equal((await w.http("GET", `/crm/employer-requests/${rid}/presentation-preview?candidate_id=${owned}`, emp.token)).status, 403);
+    assert.equal((await w.http("GET", `/crm/employer-requests/${rid}/presentation-preview?candidate_id=${owned}`)).status, 401);
+  });
+});

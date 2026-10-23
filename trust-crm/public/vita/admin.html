@@ -15,6 +15,10 @@
   <script src="crm-candidate.js" defer></script>
   <script src="crm-leads.js" defer></script>
   <script src="crm-sitejobs.js" defer></script>
+  <script src="orgs-util.js" defer></script>
+  <script src="orgs-common.js" defer></script>
+  <script src="crm-orgs.js" defer></script>
+  <script src="crm-requests.js" defer></script>
 </head>
 <body data-page="admin" data-title-key="admin.title">
   <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
@@ -66,6 +70,8 @@
         <button type="button" role="tab" id="tab-dashboard" aria-controls="panel-dashboard" data-tab="dashboard" data-i18n="tab.dashboard">Dashboard</button>
         <button type="button" role="tab" id="tab-leads" aria-controls="panel-leads" data-tab="leads" data-i18n="tab.leads">Leads</button>
         <button type="button" role="tab" id="tab-sitejobs" aria-controls="panel-sitejobs" data-tab="sitejobs" data-i18n="tab.siteJobs">Site jobs</button>
+        <button type="button" role="tab" id="tab-orgs" aria-controls="panel-orgs" data-tab="orgs" data-i18n="tab.orgs">Organisations</button>
+        <button type="button" role="tab" id="tab-employerRequests" aria-controls="panel-employerRequests" data-tab="employerRequests" data-i18n="tab.employerRequests">Employer requests</button>
         <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
         <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
         <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
@@ -161,6 +167,65 @@
         <div class="card" id="sj-card" hidden tabindex="-1">
           <div class="card-head"><h2 id="sj-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="sj-close" data-i18n="common.close">Close</button></div>
           <div id="sj-body"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- organisations -->
+      <section id="panel-orgs" role="tabpanel" aria-labelledby="tab-orgs" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2 data-i18n="crm.org.title">Organisations</h2><span class="spacer"></span>
+            <button type="button" class="btn small" id="org-new" data-i18n="crm.org.new">New organisation</button>
+            <button type="button" class="btn secondary small" id="org-refresh" data-i18n="common.refresh">Refresh</button>
+          </div>
+          <p class="notice info small" data-i18n="crm.org.hint">Employers and partner agencies. Inviting a person creates a portal login: they sign in with an e-mail code. Suspending an organisation signs its users out at once.</p>
+          <div class="btn-row" role="group" data-i18n-aria-label="crm.org.types">
+            <button type="button" class="btn secondary small" id="org-type-employer" aria-pressed="true" data-i18n="crm.org.employers">Employers</button>
+            <button type="button" class="btn secondary small" id="org-type-agency" aria-pressed="false" data-i18n="crm.org.agencies">Agencies</button>
+          </div>
+          <form id="org-filters" class="filters" novalidate>
+            <div class="field"><label for="org-f-status" data-i18n="crm.org.filterStatus">Status</label><select id="org-f-status" name="status"></select></div>
+            <div class="field"><label for="org-f-q" data-i18n="crm.org.search">Search by name, contact, e-mail or phone</label><input id="org-f-q" name="q" type="search" maxlength="100" autocomplete="off"></div>
+            <div class="field btn-row">
+              <button type="submit" class="btn" data-i18n="filter.apply">Apply filters</button>
+              <button type="reset" class="btn secondary" data-i18n="filter.reset">Reset</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <p class="small muted" id="org-summary" aria-live="polite"></p>
+          <div id="org-table"></div>
+          <div class="pager" id="org-pager"></div>
+        </div>
+        <div class="card" id="org-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="org-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="org-close" data-i18n="common.close">Close</button></div>
+          <div id="org-body"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- employer requests -->
+      <section id="panel-employerRequests" role="tabpanel" aria-labelledby="tab-employerRequests" tabindex="-1" hidden>
+        <div class="card">
+          <div class="card-head"><h2 data-i18n="crm.req.title">Employer requests</h2><span class="spacer"></span><button type="button" class="btn secondary small" id="rq-refresh" data-i18n="common.refresh">Refresh</button></div>
+          <p class="notice info small" data-i18n="crm.req.hint">Requests sent by employers through their portal. Employers see only a limited candidate summary, and only for candidates who agreed to share it with that employer. VITA does not guarantee employment or visas.</p>
+          <form id="rq-filters" class="filters" novalidate>
+            <div class="field"><label for="rq-f-status" data-i18n="crm.req.filterStatus">Status</label><select id="rq-f-status" name="status"></select></div>
+            <div class="field"><label for="rq-f-employer" data-i18n="crm.req.filterEmployer">Employer</label><select id="rq-f-employer" name="employer_id"></select></div>
+            <div class="field"><label for="rq-f-q" data-i18n="crm.req.search">Search by title or employer</label><input id="rq-f-q" name="q" type="search" maxlength="100" autocomplete="off"></div>
+            <div class="field btn-row">
+              <button type="submit" class="btn" data-i18n="filter.apply">Apply filters</button>
+              <button type="reset" class="btn secondary" data-i18n="filter.reset">Reset</button>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <p class="small muted" id="rq-summary" aria-live="polite"></p>
+          <div id="rq-table"></div>
+          <div class="pager" id="rq-pager"></div>
+        </div>
+        <div class="card" id="rq-card" hidden tabindex="-1">
+          <div class="card-head"><h2 id="rq-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="rq-close" data-i18n="common.close">Close</button></div>
+          <div id="rq-body"></div>
         </div>
       </section>
 

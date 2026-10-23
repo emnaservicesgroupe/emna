@@ -223,4 +223,4 @@ async function get(agencyId, rawId) {
   return shape(r.rows[0]);
 }
 
-module.exports = { getOrg, create, list, get, dailyCap, STATUS_TEXT };
+module.exports = { getOrg, create, list, get, dailyCap, STATUS_TEXT, CAPS };

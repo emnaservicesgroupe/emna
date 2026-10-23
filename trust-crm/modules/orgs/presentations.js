@@ -265,7 +265,9 @@ async function buildSummary(client, candidateId, staffSummary, staffNote) {
     summary[k] = fromProfile[k] !== null ? fromProfile[k] : staffSummary[k] !== undefined ? staffSummary[k] : null;
   }
   if (Object.values(summary).every((v) => v === null)) {
-    throw new HttpError(400, "No confirmed profile data for this candidate; supply a summary object (profession, years_experience, languages, country_of_residence, availability)");
+    const e = new HttpError(400, "No confirmed profile data for this candidate; supply a summary object (profession, years_experience, languages, country_of_residence, availability)");
+    e.code = "no_profile_data";
+    throw e;
   }
   summary.staff_note_for_employer = staffNote;
   return summary;
@@ -305,6 +307,67 @@ async function present(user, rawRequestId, input) {
     const row = await client.query(`SELECT ${PRES_COLS} FROM employer_presentations p JOIN employer_requests r ON r.id = p.request_id JOIN candidates c ON c.id = p.candidate_id WHERE p.id = $1`, [pid]);
     return row.rows[0];
   });
+}
+
+const PREVIEW_PARAMS = ["candidate_id", "staff_note_for_employer", "profession", "years_experience", "languages", "country_of_residence", "availability"];
+
+/** Query-string form of the staff-supplied fallback summary (languages comma separated); blanks are absent. */
+function staffSummaryFromQuery(q) {
+  const raw = {};
+  for (const k of ["profession", "country_of_residence", "availability"]) {
+    const v = oneParam(q[k], k);
+    if (v !== undefined && v.trim() !== "") raw[k] = v;
+  }
+  const yrs = oneParam(q.years_experience, "years_experience");
+  if (yrs !== undefined && yrs.trim() !== "") {
+    if (!/^-?\d{1,6}$/.test(yrs.trim())) throw new HttpError(400, "summary.years_experience must be an integer 0..70");
+    raw.years_experience = Number(yrs.trim());
+  }
+  const langs = oneParam(q.languages, "languages");
+  if (langs !== undefined && langs.trim() !== "") raw.languages = langs.split(",").map((l) => l.trim()).filter((l) => l !== "");
+  return validateStaffSummary(raw);
+}
+
+/**
+ * Read-only: the exact summary present() would freeze for this request + candidate (same builder, same validation),
+ * plus the facts that decide whether presenting is possible now. Writes nothing.
+ */
+async function previewPresentation(user, rawRequestId, query = {}) {
+  if (!hasPerm(user, "orgs:write") || !hasPerm(user, "candidates:read")) throw new HttpError(403, "Permission denied");
+  const requestId = parseId(rawRequestId);
+  if (!isObj(query)) throw new HttpError(400, "invalid query");
+  for (const k of Object.keys(query)) if (!PREVIEW_PARAMS.includes(k)) throw new HttpError(400, `Unknown parameter: ${k.slice(0, 40)}`);
+  const rawCand = oneParam(query.candidate_id, "candidate_id");
+  if (rawCand === undefined) throw new HttpError(400, "candidate_id is required");
+  const candidateId = parseId(rawCand);
+  const noteRaw = oneParam(query.staff_note_for_employer, "staff_note_for_employer");
+  const note = noteRaw === undefined ? null : cleanText(noteRaw, "staff_note_for_employer", EMPLOYER_NOTE_MAX);
+  const staffSummary = staffSummaryFromQuery(query);
+  await assertCandidateAccess(user, candidateId);
+  const req = await loadRequest(db(), requestId);
+  const consent = await db().query("SELECT 1 FROM candidate_share_consents WHERE candidate_id = $1 AND employer_id = $2 AND withdrawn_at IS NULL", [candidateId, req.employer_id]);
+  const dup = await db().query("SELECT 1 FROM employer_presentations WHERE request_id = $1 AND candidate_id = $2", [String(requestId), candidateId]);
+  let summary = null;
+  let needsSummary = false;
+  try {
+    summary = await buildSummary(db(), candidateId, staffSummary, note);
+  } catch (err) {
+    if (err && err.code === "no_profile_data") needsSummary = true;
+    else throw err;
+  }
+  const statusOk = PRESENT_STATUSES.includes(req.status);
+  return {
+    request_id: req.id,
+    employer_id: req.employer_id,
+    employer_name: req.employer_name,
+    candidate_id: candidateId,
+    request_status: req.status,
+    consent_active: consent.rowCount > 0,
+    already_presented: dup.rowCount > 0,
+    needs_summary: needsSummary,
+    summary,
+    presentable: statusOk && consent.rowCount > 0 && dup.rowCount === 0 && summary !== null,
+  };
 }
 
 async function listPresentations(user, query = {}) {
@@ -433,6 +496,7 @@ module.exports = {
   patchRequest,
   createSiteJobFromRequest,
   present,
+  previewPresentation,
   listPresentations,
   withdrawPresentation,
   employerList,

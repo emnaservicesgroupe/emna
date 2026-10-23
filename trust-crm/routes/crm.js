@@ -20,6 +20,8 @@
 //   PATCH /employer-requests/:id {status?, staff_note?, employer_visible_note?}   orgs:write (validated status transitions)
 //   POST  /employer-requests/:id/create-site-job                   orgs:write + sitejobs:write (DRAFT only, never published)
 //   POST  /employer-requests/:id/presentations {candidate_id, staff_note_for_employer?, summary?}   orgs:write + candidates:read + candidate scope + ACTIVE share consent
+//   GET   /employer-requests/:id/presentation-preview ?candidate_id&staff_note_for_employer&profession&years_experience&languages&country_of_residence&availability
+//         orgs:write + candidates:read + candidate scope; read-only: the exact summary POST would freeze + {consent_active, presentable, needs_summary, already_presented}
 //   GET   /presentations ?status&request_id&employer_id            orgs:read (candidate scope); PATCH /presentations/:id/withdraw  orgs:write
 //   GET   /staff                                                   users:write  -> {rows:[{id,full_name,role}]} (assign-to select)
 //   GET   /candidates/:id/timeline                                 candidates:read (+ CRM staff), same scope
@@ -121,6 +123,7 @@ router.get("/employer-requests/:id", OR, asyncHandler(async (req, res) => res.js
 router.patch("/employer-requests/:id", OW, asyncHandler(async (req, res) => res.json(await presentations.patchRequest(req.user, req.params.id, body(req)))));
 router.post("/employer-requests/:id/create-site-job", OW, asyncHandler(async (req, res) => res.status(201).json(await presentations.createSiteJobFromRequest(req.user, req.params.id))));
 router.post("/employer-requests/:id/presentations", OW, CR, asyncHandler(async (req, res) => res.status(201).json(await presentations.present(req.user, req.params.id, body(req)))));
+router.get("/employer-requests/:id/presentation-preview", OW, CR, asyncHandler(async (req, res) => res.json(await presentations.previewPresentation(req.user, req.params.id, req.query))));
 router.get("/presentations", OR, asyncHandler(async (req, res) => res.json(await presentations.listPresentations(req.user, req.query))));
 router.patch("/presentations/:id/withdraw", OW, asyncHandler(async (req, res) => res.json(await presentations.withdrawPresentation(req.user, req.params.id))));
 

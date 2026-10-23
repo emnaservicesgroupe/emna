@@ -19,9 +19,9 @@
   // Mirror of the permissions that matter to this UI (middleware/role.js; tests compare the two).
   var PERMS = {
     SuperAdmin: ["*"],
-    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write"],
-    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write"],
-    Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write"],
+    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write"],
+    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write"],
+    Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read"],
     Agent: ["candidates:read", "candidates:write", "leads:read"],
   };
   function can(role, perm) {
@@ -31,6 +31,13 @@
   function canConvert(role) { return can(role, "leads:write") && can(role, "candidates:write"); }
   function canAssign(role) { return can(role, "users:write"); }
   function canSiteJobs(role) { return can(role, "sitejobs:write"); }
+  // Organisations and employer requests (Receptionist reads only). Presenting also needs to read the candidate;
+  // recording/withdrawing a share consent is a candidate write (the server also checks the candidate scope).
+  function canOrgsRead(role) { return can(role, "orgs:read"); }
+  function canOrgsWrite(role) { return can(role, "orgs:write"); }
+  function canPresent(role) { return can(role, "orgs:write") && can(role, "candidates:read"); }
+  function canRecordConsent(role) { return can(role, "candidates:write"); }
+  function canCreateSiteJob(role) { return can(role, "orgs:write") && can(role, "sitejobs:write"); }
 
   function str(v) { return v === null || v === undefined ? "" : String(v); }
   function trimmed(v) { return str(v).trim(); }
@@ -206,6 +213,7 @@
     LEAD_STATUSES: LEAD_STATUSES, LEAD_SETTABLE: LEAD_SETTABLE, LEAD_KINDS: LEAD_KINDS, STAGES: STAGES, SITE_STATUSES: SITE_STATUSES,
     APPLY_MODES: APPLY_MODES, NOTE_MAX: NOTE_MAX, PUBLISH_REQUIRED: PUBLISH_REQUIRED,
     can: can, canConvert: canConvert, canAssign: canAssign, canSiteJobs: canSiteJobs,
+    canOrgsRead: canOrgsRead, canOrgsWrite: canOrgsWrite, canPresent: canPresent, canRecordConsent: canRecordConsent, canCreateSiteJob: canCreateSiteJob,
     parseApplyMode: parseApplyMode, buildApplyMode: buildApplyMode, toLocalInput: toLocalInput, fromLocalInput: fromLocalInput,
     siteJobPayload: siteJobPayload, diffPayload: diffPayload, publishBlockers: publishBlockers,
     leadQuery: leadQuery, leadCanConvert: leadCanConvert, convertPayload: convertPayload,

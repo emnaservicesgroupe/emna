@@ -193,7 +193,12 @@
     "terms.s5.h": "Be careful",
     "terms.s5.p": "Do not pay money to anyone who promises you a job, a permit or a visa.",
     "terms.s6.h": "Changes",
-    "terms.s6.p": "We may update this website and these terms. The version on this page is the current one."
+    "terms.s6.p": "We may update this website and these terms. The version on this page is the current one.",
+    "employers.portal.h": "Already working with VITA?",
+    "employers.portal.p": "Employers invited by VITA can sign in with an e-mail code to send recruitment requests and review candidate summaries. Candidate details are limited, and VITA does not guarantee employment, sponsorship, a work permit or a visa.",
+    "employers.portal.link": "Employer portal",
+    "employers.agency.p": "Partner agencies invited by VITA can register their candidates and follow their status.",
+    "employers.agency.link": "Agency portal"
   };
 
   var ar = {
@@ -386,7 +391,12 @@
     "terms.s5.h": "كن حذرًا",
     "terms.s5.p": "لا تدفع مالًا لأي شخص يَعِدك بعمل أو تصريح أو تأشيرة.",
     "terms.s6.h": "التغييرات",
-    "terms.s6.p": "قد نحدّث هذا الموقع وهذه الشروط. النسخة المعروضة في هذه الصفحة هي النسخة الحالية."
+    "terms.s6.p": "قد نحدّث هذا الموقع وهذه الشروط. النسخة المعروضة في هذه الصفحة هي النسخة الحالية.",
+    "employers.portal.h": "هل تتعامل مع فيتا بالفعل؟",
+    "employers.portal.p": "يمكن لأصحاب العمل الذين دعتهم فيتا تسجيل الدخول برمز يصلهم بالبريد الإلكتروني لإرسال طلبات التوظيف والاطلاع على ملخصات المرشحين. بيانات المرشحين محدودة، وفيتا لا تضمن الحصول على عمل أو كفالة أو تصريح عمل أو تأشيرة.",
+    "employers.portal.link": "بوابة أصحاب العمل",
+    "employers.agency.p": "يمكن للوكالات الشريكة التي دعتها فيتا تسجيل مرشحيها ومتابعة حالتهم.",
+    "employers.agency.link": "بوابة الوكالات"
   };
 
   var fr = {
@@ -579,7 +589,12 @@
     "terms.s5.h": "Soyez prudent",
     "terms.s5.p": "Ne versez pas d'argent à quiconque vous promet un emploi, un permis ou un visa.",
     "terms.s6.h": "Modifications",
-    "terms.s6.p": "Nous pouvons mettre à jour ce site et ces conditions. La version affichée sur cette page est la version en vigueur."
+    "terms.s6.p": "Nous pouvons mettre à jour ce site et ces conditions. La version affichée sur cette page est la version en vigueur.",
+    "employers.portal.h": "Vous travaillez déjà avec VITA ?",
+    "employers.portal.p": "Les employeurs invités par VITA peuvent se connecter avec un code reçu par e-mail pour envoyer des demandes de recrutement et consulter des résumés de candidats. Les informations sur les candidats sont limitées et VITA ne garantit ni un emploi, ni un parrainage, ni un permis de travail, ni un visa.",
+    "employers.portal.link": "Portail des employeurs",
+    "employers.agency.p": "Les agences partenaires invitées par VITA peuvent enregistrer leurs candidats et suivre leur statut.",
+    "employers.agency.link": "Portail des agences"
   };
 
   var api = {
