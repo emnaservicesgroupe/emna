@@ -1510,17 +1510,20 @@
     var domain = h("input", { id: p + "domain", type: "text", value: e.domain || "", attrs: { maxlength: "255", autocomplete: "off", placeholder: "employer.com" } });
     var contact = h("input", { id: p + "contact", type: "email", value: e.verifiedContactEmail || "", attrs: { maxlength: "254", autocomplete: "off" } });
     var save = h("button", { type: "submit", class: "btn small", text: t("common.save") });
+    // Task 19: the verified domain/contact decide where automatic sends go - administrators only.
+    if (!isAdmin()) { domain.disabled = true; contact.disabled = true; }
     var form = h("form", { class: "notice info", attrs: { novalidate: true } },
       field(p + "name", "dir.name", name),
       field(p + "domain", "dir.domain", domain, "dir.domainHint"),
       field(p + "contact", "dir.contact", contact, "dir.contactHint"),
+      isAdmin() ? null : h("p", { class: "small muted", text: t("dir.adminOnlyFields") }),
       save);
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var patch = {};
       if (name.value.trim() !== e.name) patch.name = name.value.trim();
-      if (domain.value.trim() !== (e.domain || "")) patch.domain = domain.value.trim();
-      if (contact.value.trim() !== (e.verifiedContactEmail || "")) patch.verifiedContactEmail = contact.value.trim();
+      if (isAdmin() && domain.value.trim() !== (e.domain || "")) patch.domain = domain.value.trim();
+      if (isAdmin() && contact.value.trim() !== (e.verifiedContactEmail || "")) patch.verifiedContactEmail = contact.value.trim();
       if (!Object.keys(patch).length) { V.toast(t("dir.noChange"), "bad"); return; }
       V.confirmDialog(t("dir.saveConfirm", { name: e.name }), t("common.save")).then(function (ok) {
         if (!ok) return;

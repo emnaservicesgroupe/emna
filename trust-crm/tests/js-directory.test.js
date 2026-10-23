@@ -111,9 +111,10 @@ test("PUT /jobsearch/employers/:id: admin or in-scope Manager; domain normalised
     assert.equal((await put(w.T.admin, { unknownField: 1 })).status, 400, "unknown fields refused");
     assert.equal((await put(w.T.admin, {})).status, 400, "nothing to change");
 
-    // Manager: only employers in scope
-    assert.equal((await put(w.T.mgrA, { domain: "acme-welding.example" })).status, 200);
-    assert.equal((await put(w.T.mgrB, { domain: "evil.example" })).status, 404, "out-of-scope manager");
+    // Manager: only employers in scope, and (Task 19 I-3) the name only - domain/contact are admin-only
+    assert.equal((await put(w.T.mgrA, { domain: "acme-welding.example" })).status, 403, "Task 19: managers cannot set the verified domain");
+    assert.equal((await put(w.T.admin, { domain: "acme-welding.example" })).status, 200);
+    assert.equal((await put(w.T.mgrB, { name: "Evil Rename" })).status, 404, "out-of-scope manager");
     assert.equal((await put(w.T.agentA, { domain: "evil.example" })).status, 403, "agents cannot edit the directory");
     assert.equal((await put(w.T.admin, { domain: "x.example" }, 999999)).status, 404);
 
@@ -134,6 +135,34 @@ test("PUT /jobsearch/employers/:id: admin or in-scope Manager; domain normalised
     assert.equal(audits[0].actor, `user:${w.ids.admin}`);
     assert.deepEqual(audits[0].detail.after, { domain: "acme.example", verifiedContactEmail: "hr@acme.example" });
     assert.equal((await w.q("SELECT count(*)::int n FROM audit_logs WHERE table_name='js_employers'")).rows[0].n, audits.length);
+  });
+});
+
+test("Task 19 I-3: PUT /jobsearch/employers/:id - domain and verifiedContactEmail need jobsearch:admin; a Manager may rename an in-scope employer only; refusals change nothing and are not audited", async () => {
+  await withWorld(async (w) => {
+    const e = await w.employer("Acme Welding", "acme.example");
+    const cA = await w.candidate(w.ids.mgrA);
+    await w.application(cA, await w.job(e));
+    const put = (tok, body) => w.http("PUT", `/jobsearch/employers/${e}`, tok, body);
+    for (const body of [{ domain: "evil.example" }, { verifiedContactEmail: "attacker@evil.example" }, { domain: null }, { verifiedContactEmail: null }, { name: "Acme Two", domain: "evil.example" }]) {
+      const r = await put(w.T.mgrA, body);
+      assert.equal(r.status, 403, JSON.stringify(body));
+      assert.match(r.body.error, /administrator.*domain and verifiedContactEmail/i);
+    }
+    const row = await w.one("SELECT name, domain, verified_contact_email FROM js_employers WHERE id=$1", [e]);
+    assert.deepEqual([row.name, row.domain, row.verified_contact_email], ["Acme Welding", "acme.example", null]);
+    assert.equal((await w.q("SELECT count(*)::int n FROM js_audit_events WHERE action='employer.update'")).rows[0].n, 0);
+    const ren = await put(w.T.mgrA, { name: "Acme Welding Inc" });
+    assert.equal(ren.status, 200, JSON.stringify(ren.body));
+    assert.equal(ren.body.name, "Acme Welding Inc");
+    assert.equal(ren.body.domain, "acme.example");
+    assert.equal((await put(w.T.mgrB, { name: "Other" })).status, 404, "out-of-scope manager");
+    assert.equal((await put(w.T.agentA, { name: "Other" })).status, 403);
+    const adm = await put(w.T.admin, { domain: "acme-welding.example", verifiedContactEmail: "jobs@acme-welding.example" });
+    assert.equal(adm.status, 200);
+    const audits = (await w.q("SELECT actor, detail FROM js_audit_events WHERE action='employer.update' ORDER BY id")).rows;
+    assert.deepEqual(audits.map((a) => a.actor), [`user:${w.ids.mgrA}`, `user:${w.ids.admin}`]);
+    assert.deepEqual(audits[1].detail, { employerId: e, before: { domain: "acme.example", verifiedContactEmail: null }, after: { domain: "acme-welding.example", verifiedContactEmail: "jobs@acme-welding.example" } });
   });
 });
 
