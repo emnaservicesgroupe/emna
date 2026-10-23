@@ -711,6 +711,37 @@ test("rate limits (I2 round 2): after 24 reschedules the item completes as rate_
   assert.equal(a[0].detail.reschedules, 24);
 });
 
+test("rate limits (round 3): Retry-After is taken from the structured retryAfterMs, not the message wording", async () => {
+  const w = await world();
+  await candidate(w, { mode: "search_only" });
+  const runner = require("../modules/jobsearch/searchRunner");
+  // runner level: the structured value is on the run result and in js_runs.errors[0] (runStatus)
+  fixture._set({ jobs: [], failWith: "429:120000" });
+  const r = await runner.runSearch({ sourceKey: "test_fixture" }, { now: () => T0(), sleep: NO_SLEEP });
+  assert.equal(r.runs[0].status, "rate_limited");
+  assert.equal(r.runs[0].retryAfterMs, 120000);
+  const row = (await q("SELECT * FROM js_runs WHERE id=$1", [r.runs[0].runId])).rows[0];
+  assert.equal(runner.runStatus(row).retryAfterMs, 120000);
+  assert.equal(runner.runStatus({ errors: [] }).retryAfterMs, undefined);
+  fixture._set({ failWith: null });
+
+  // scheduler level: unusual wording, structured 3 h value -> back-off from the structured value
+  let calls = 0;
+  const handleSearchJob = async () => {
+    calls += 1;
+    return { status: "rate_limited", found: 0, created: 0, runs: [{ sourceKey: "test_fixture", status: "rate_limited", attempts: 1, error: "Quota exhausted, slow down", retryAfterMs: 3 * HOUR }] };
+  };
+  const t0 = new Date(T0().getTime() + 7 * HOUR); // past the manual run above, so the source is due again
+  await tick(t0, { handleSearchJob });
+  assert.equal(calls, 1);
+  const st = (await q("SELECT value FROM js_module_state WHERE key='source_backoff:test_fixture'")).rows[0].value;
+  assert.equal(new Date(st.until).getTime(), t0.getTime() + 3 * HOUR);
+  for (const m of [1, 60, 120, 179]) await tick(new Date(t0.getTime() + m * 60000), { handleSearchJob });
+  assert.equal(calls, 1, "not called while the structured back-off runs");
+  await tick(new Date(t0.getTime() + 3 * HOUR + 60000), { handleSearchJob });
+  assert.equal(calls, 2, "called again once it passed");
+});
+
 test("stranded approvals (I3a): a job whose only source is paused is NOT auto-approved (stays ready_for_review, caps untouched); after resume it is sent exactly once", async () => {
   const w = await world();
   const emp = await employer(w, { confirmed: true });

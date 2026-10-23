@@ -311,10 +311,17 @@ async function sourceBackoffUntil(sourceKey, now) {
   return until && until.getTime() > now.getTime() ? until : null;
 }
 
-/** "Source asked to wait 3600s (Retry-After)" -> ms (the runner records Retry-After only in its message). */
+/**
+ * Upstream Retry-After in ms: the structured value the runner exposes (result.retryAfterMs, or each run's
+ * retryAfterMs as stored in js_runs.errors[0]) first; the "wait Ns" message text only as a fallback.
+ */
 function retryAfterMsOf(r) {
-  for (const x of (r && r.runs) || []) {
-    const m = x.status === "rate_limited" && /wait (\d+)s/.exec(String(x.error || ""));
+  const ok = (v) => Number.isFinite(v) && v > 0;
+  if (r && ok(r.retryAfterMs)) return r.retryAfterMs;
+  const runs = ((r && r.runs) || []).filter((x) => x.status === "rate_limited");
+  for (const x of runs) if (ok(x.retryAfterMs)) return x.retryAfterMs;
+  for (const x of runs) {
+    const m = /wait (\d+)s/.exec(String(x.error || ""));
     if (m) return Number(m[1]) * 1000;
   }
   return null;

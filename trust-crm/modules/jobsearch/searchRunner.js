@@ -63,7 +63,9 @@ async function buildCandidateQuery(candidateId) {
 function runStatus(row) {
   const e = row && Array.isArray(row.errors) ? row.errors[0] : null;
   if (!e) return { status: "ok", message: null, attempts: null, skipped_invalid: 0 };
-  return { status: e.status || "failed", message: e.message || null, attempts: e.attempts === undefined ? null : e.attempts, skipped_invalid: e.skipped_invalid || 0 };
+  const out = { status: e.status || "failed", message: e.message || null, attempts: e.attempts === undefined ? null : e.attempts, skipped_invalid: e.skipped_invalid || 0 };
+  if (Number.isFinite(e.retryAfterMs) && e.retryAfterMs > 0) out.retryAfterMs = e.retryAfterMs; // upstream Retry-After (structured)
+  return out;
 }
 
 /**
@@ -111,7 +113,7 @@ async function runSource(source, adapter, query, deps, run) {
   const out = { sourceKey: source.key, runId: run, status: "ok", found: 0, created: 0, attempts: 0, skipped_invalid: 0 };
   const done = async (status, extra = {}) => {
     Object.assign(out, { status }, extra);
-    const errors = status === "ok" ? [] : [{ status, message: out.error || null, attempts: out.attempts, ...(out.skipped_invalid ? { skipped_invalid: out.skipped_invalid } : {}) }];
+    const errors = status === "ok" ? [] : [{ status, message: out.error || null, attempts: out.attempts, ...(out.skipped_invalid ? { skipped_invalid: out.skipped_invalid } : {}), ...(out.retryAfterMs ? { retryAfterMs: out.retryAfterMs } : {}) }];
     await finishRun(run, deps.now(), { found: out.found, created: out.created, errors });
     return out;
   };
@@ -157,7 +159,7 @@ async function runSource(source, adapter, query, deps, run) {
       if (err && err.retryAfterMs > MAX_INLINE_WAIT_MS) {
         const message = `Source asked to wait ${Math.round(err.retryAfterMs / 1000)}s (Retry-After); will retry later`;
         await db().query("UPDATE js_sources SET last_error = $2, last_run_at = $3 WHERE id = $1", [source.id, message, deps.now()]);
-        return done("rate_limited", { error: message });
+        return done("rate_limited", { error: message, retryAfterMs: Math.round(err.retryAfterMs) });
       }
       if (attempt < MAX_ATTEMPTS) {
         const backoff = BASE_BACKOFF_MS * 2 ** (attempt - 1);
