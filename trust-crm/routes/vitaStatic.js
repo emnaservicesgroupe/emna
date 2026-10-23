@@ -57,4 +57,4 @@ function mountVita(app) {
   app.use("/vita", router);
 }
 
-module.exports = { mountVita, CSP, PUBLIC_DIR };
+module.exports = { mountVita, CSP, PUBLIC_DIR, securityHeaders };

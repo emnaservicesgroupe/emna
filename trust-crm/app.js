@@ -23,6 +23,7 @@ const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler"
 const publicRoutes = require("./routes/public");
 const crmRoutes = require("./routes/crm");
 const { mountVita } = require("./routes/vitaStatic");
+const { mountSite, siteHome } = require("./routes/siteStatic");
 const { trustProxySetting } = require("./utils/trustProxy");
 
 const app = express();
@@ -63,7 +64,8 @@ app.get("/healthz", async (_req, res) => {
   }
 });
 
-app.get("/", (_req, res) => {
+// Browsers (Accept names text/html) get the public website; API clients keep the JSON status.
+app.get("/", siteHome, (_req, res) => {
   res.json({
     system: "EMNA Services CRM",
     status: "Running",
@@ -95,6 +97,8 @@ app.use("/jobsearch", jobsearchDirectoryRoutes);
 
 // VITA web UI (static, strict CSP): GET /vita -> /vita/
 mountVita(app);
+// Public website (static, same strict CSP): /site/*, /robots.txt, /sitemap.xml
+mountSite(app);
 
 app.use((err, _req, res, _next) => {
   console.error("Unhandled error:", err);

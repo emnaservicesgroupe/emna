@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="/site/logo.webp" type="image/webp">
+<title>For employers - VITA</title>
+<link rel="stylesheet" href="/site/site.css">
+<script src="/site/i18n-site.js" defer></script>
+<script src="/site/site.js" defer></script>
+</head>
+<body data-page="employers" data-title-key="employers.title">
+<a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
+<header class="site-header"><div class="header-inner">
+<a class="brand" href="/"><img src="/site/logo.webp" alt="VITA" width="132" height="44"></a>
+<div class="lang-tools"><label for="lang-switch" data-i18n="common.language">Language</label>
+<select id="lang-switch" data-lang-switch><option value="ar" lang="ar">العربية</option><option value="en" lang="en">English</option><option value="fr" lang="fr">Français</option></select></div>
+<nav class="main-nav" data-i18n-label="nav.label" aria-label="Main navigation"><ul><li><a href="/" data-i18n="nav.home">Home</a></li><li><a href="/site/services.html" data-i18n="nav.services">Services</a></li><li><a href="/site/destinations.html" data-i18n="nav.destinations">Destinations</a></li><li><a href="/site/how-it-works.html" data-i18n="nav.how">How it works</a></li><li><a href="/site/jobs.html" data-i18n="nav.jobs">Job offers</a></li><li><a href="/site/employers.html" aria-current="page" data-i18n="nav.employers">For employers</a></li><li><a href="/site/register.html" data-i18n="nav.register">Register as a candidate</a></li><li><a href="/site/contact.html" data-i18n="nav.contact">Contact</a></li></ul></nav>
+</div></header>
+<main id="main" tabindex="-1">
+<div class="page-head"><h1 data-i18n="employers.h1">For employers</h1><p class="lead" data-i18n="employers.lead">Tell us about the people you are looking for.</p></div>
+<section class="card"><p data-i18n="employers.p1">If you are hiring from abroad, send us a short description of your company and the profiles you need. A member of our team will contact you to discuss it.</p><p data-i18n="employers.p2">We introduce candidates whose profiles match your request. We do not decide on hiring, and we cannot promise a particular number or timing of candidates.</p></section>
+<section class="card form-card" aria-labelledby="form-h"><h2 id="form-h" data-i18n="employers.form.h">Send an inquiry</h2><p class="hint" data-i18n="common.required">Fields marked * are required.</p>
+<form data-lead-form data-kind="employer" novalidate>
+<div class="field"><label for="f-name" class="req" data-i18n="form.name">Full name</label><input id="f-name" name="name" type="text" required autocomplete="name" maxlength="120"></div>
+<div class="field"><label for="f-company" data-i18n="form.company">Company</label><input id="f-company" name="company" type="text" autocomplete="organization" maxlength="160"></div>
+<div class="field"><label for="f-email" data-i18n="form.email">Email</label><input id="f-email" name="email" type="email" autocomplete="email" maxlength="254" aria-describedby="f-email-h"><span class="hint" id="f-email-h" data-i18n="form.contactHint">Give an email address, a phone number, or both.</span></div>
+<div class="field"><label for="f-phone" data-i18n="form.phone">Phone</label><input id="f-phone" name="phone" type="tel" autocomplete="tel" maxlength="32"></div>
+<div class="field"><label for="f-country" data-i18n="form.country">Country</label><input id="f-country" name="country" type="text" autocomplete="country-name" maxlength="80"></div>
+<div class="field"><label for="f-message" data-i18n="form.message.employer">Which profiles do you need? How many?</label><textarea id="f-message" name="message" maxlength="4000"></textarea></div>
+<div class="field check"><input id="f-consent" name="consent" type="checkbox" required><label for="f-consent" data-i18n="form.consent.employer">I agree that VITA stores and uses the details I send to contact me about my request and to manage our business relationship. I can ask for them to be corrected or deleted at any time.</label></div>
+<div class="hp" aria-hidden="true"><label for="f-website">Website</label><input id="f-website" name="website" type="text" tabindex="-1" autocomplete="off"></div>
+<button class="btn" type="submit" data-i18n="form.submit">Send</button>
+<p class="form-status" data-form-status role="status" aria-live="polite"></p>
+</form></section>
+<section class="disclaimer" aria-labelledby="disc-h"><h2 id="disc-h" data-i18n="disclaimer.title">Important notice</h2><p data-i18n="disclaimer">This service helps you search and apply for job opportunities. It does not guarantee employment, employer sponsorship, a work permit or a visa.</p></section>
+</main>
+<footer class="site-footer"><div class="footer-inner">
+<div><p class="footer-name" data-site-name>VITA</p><p data-i18n="footer.about">VITA helps candidates search and apply for job opportunities abroad.</p><ul class="facts" data-site-facts hidden></ul></div>
+<nav data-i18n-label="footer.label" aria-label="Footer links"><ul>
+<li><a href="/vita/portal.html" data-i18n="footer.candidatePortal">Candidate portal</a></li>
+<li><a href="/vita/" data-i18n="footer.staff">Staff sign-in</a></li>
+</ul></nav>
+<nav data-i18n-label="footer.label" aria-label="Footer links"><ul>
+<li><a href="/site/privacy.html" data-i18n="footer.privacy">Privacy</a></li>
+<li><a href="/site/terms.html" data-i18n="footer.terms">Terms of use</a></li>
+</ul></nav>
+</div></footer>
+</body>
+</html>
