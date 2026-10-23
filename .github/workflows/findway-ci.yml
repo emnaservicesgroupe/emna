@@ -19,6 +19,9 @@ jobs:
       - name: Install trust-crm (tests run its real code)
         run: npm ci
         working-directory: trust-crm
+      - name: trust-crm tests (Node test runner; they are CommonJS and cannot run under Deno)
+        run: npm test
+        working-directory: trust-crm
       - name: Install FIND WAY
         run: npm ci
         working-directory: findway
