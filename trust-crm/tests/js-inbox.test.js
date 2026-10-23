@@ -809,6 +809,7 @@ test("minor (a)(b): object From stored as plain address + display name (drafts w
 });
 
 test("bounce (round 2): a plausible DSN only opens a staff task + staff event; never changes status, never candidate-visible", async () => {
+  process.env.INBOUND_BOUNCE_DOMAINS = "northwind-relay.example";
   const w = await world();
   const tl0 = (await timelineOf(w.appId)).length;
   const ev0 = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n;
@@ -842,6 +843,7 @@ test("bounce (round 2): a plausible DSN only opens a staff task + staff event; n
   const soft = await inbox.ingest({ messageId: newId(), from: "postmaster@vita.test.invalid", subject: "Delivery delayed", text: `Status: 4.4.1 deferred\n${w2.providerId}` });
   assert.equal(soft.reason, "bounce");
   assert.equal((await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1", [w2.appId])).rows[0].n, 0);
+  delete process.env.INBOUND_BOUNCE_DOMAINS;
 });
 
 test("bounce (round 2): forged DSNs (attacker, DKIM fail, MAILER-DAEMON elsewhere, employer spoof) change nothing; a real employer reply with a DSN subject is a normal message", async () => {
@@ -1217,4 +1219,408 @@ test("I3 round 2: deadlock retry (3x with jitter then 409 try_again); concurrenc
   const final = (await q("SELECT status FROM js_appointments WHERE id=$1", [a3.id])).rows[0].status;
   const events = (await q("SELECT event FROM js_timeline WHERE application_id=$1 AND detail->>'appointmentId'=$2 AND event IN ('interview_confirmed','interview_rescheduled') ORDER BY id", [w1.appId, String(a3.id)])).rows.map((x) => x.event);
   assert.equal(final, events[events.length - 1] === "interview_confirmed" ? "confirmed" : "tentative", `final status follows the last committed step: ${events}`);
+});
+
+// Reviewer round-2 probes (t13r2/probe.js NEG 84 + POS 25, cls2.js 36) and 37 cases written after the round-3 implementation.
+const PROBE2_NEG = [
+ "Thank you for applying. We appreciate your interest; at this time we are pursuing other candidates.",
+ "Your CV was received, though we need a work-permit copy to proceed.",
+ "Application received. Next step: complete the assessment.",
+ "Thank you for your application. Your application is on hold pending budget approval.",
+ "We received your application, which is under review but missing transcripts.",
+ "Thanks for applying. We will contact you only if your profile is selected for an interview.",
+ "We have received your application. Please complete our online form at the link below.",
+ "Thank you for applying. Kindly attach your diploma.",
+ "We received your application. Could you tell us your salary expectations?",
+ "Thank you for your application. We would like to schedule a call on Tuesday at 10am.",
+ "Thank you for applying. We will be in touch regarding an interview.",
+ "Application received. You are required to submit a police clearance within 5 days.",
+ "Thank you for applying. After careful consideration we decided to pursue other applicants.",
+ "Thanks for your application. Your profile does not match our current requirements.",
+ "Thank you for applying. The vacancy has now been closed.",
+ "Thank you for applying. This role requires Canadian citizenship, which you indicated you lack.",
+ "Merci pour votre candidature. Nous poursuivons avec d'autres profils.",
+ "Nous avons bien reçu votre candidature. Votre profil ne correspond pas à nos besoins actuels.",
+ "Accusé de réception. Nous vous prions de joindre votre diplôme.",
+ "Votre candidature a été reçue mais elle est suspendue.",
+ "Nous avons bien reçu votre dossier. Il manque votre lettre de motivation.",
+ "Nous avons bien reçu votre candidature. Nous vous invitons à un entretien jeudi.",
+ "Thank you for applying. We unfortunately lack capacity to review all applications, so only shortlisted candidates will be notified.",
+ "Thank you for applying. Your application was received twice; please confirm which one is current.",
+ "We got your application but it will not be considered; the deadline passed on 1 March.",
+ "Thank you for your application. Your visa status disqualifies you from this role.",
+ "Thank you for applying. Application received, but your references are outstanding.",
+ "Thank you for applying. We've received your application; the offer is attached.",
+ "Thank you for your application. We are delighted to offer you the position.",
+ "Thank you for applying. Reply with your availability.",
+ "Thank you for applying. Send your portfolio.",
+ "Thank you for applying. Submit the attached form.",
+ "Thank you for applying. Application received - a background check is required before we continue.",
+ "Thank you for applying. The team lacks headcount; hiring has been frozen.",
+ "Thank you for applying. We have received your application. Sadly the role was cancelled.",
+ "Thank you for applying. Your application is on hold.",
+ "Thank you for applying. We're afraid we've gone in a different direction.",
+ "Thank you for applying. Application received. Complete the video interview within 48 hours.",
+ "Thank you for applying. We have filled the role internally.",
+ "Thank you for applying. Your application has been withdrawn.",
+ "Thank you for applying. Application received. Your application status: declined.",
+ "Thank you for applying. Application received. Candidates were chosen; yours was passed over.",
+ "Thank you for applying. Please be advised the position has been awarded.",
+ "Thank you for applying. The position is on hold.",
+ "Thank you for applying. We regret that we cannot offer.",
+ "Thank you for applying. We will keep your CV on file for future openings.",
+ "Thank you for applying. Application received. Fill in the attached questionnaire.",
+ "Thank you for applying. Application received. Watch for an email requesting documents.",
+ "Thanks for applying. We have received your application. Employment will be conditional on a medical.",
+ "Thank you for applying. We have received your application, which lacks a cover letter.",
+ "Thank you for applying. We have received your application, which lacks a cover letter",
+ "Thank you for applying. We have received your application; ineligible.",
+ "Thank you for applying. We have received your application; you are ineligible for this role.",
+ "Thank you for applying. We have received your application. Requirements: 5 years experience, which you lack.",
+ "Thank you for applying. We received your application. Wrong address.",
+ "Thank you for applying. We received your application and are sorry to say it is a no.",
+ "Thank you for applying. We received your application. Result: negative.",
+ "Thank you for applying. Application received. Status: closed-lost.",
+ "Thank you for applying. Application received. Status: not suitable.",
+ "Thank you for applying. Application received. Candidate is unsuitable.",
+ "Thank you for applying. Application received. You were unsuccessful.",
+ "Thank you for applying. Application received. You have been unsuccessful on this occasion.",
+ "Thank you for applying. Application received. Regrettably...",
+ "Thank you for applying. Application received. Not this time.",
+ "Thank you for applying. Application received. Position no more available.",
+ "Thank you for applying. Application received. Role discontinued.",
+ "Thank you for applying. Application received. Role abolished.",
+ "Thank you for applying. Application received. Vacancy withdrawn.",
+ "Thank you for applying. Application received. Search suspended.",
+ "Thank you for applying. Application received. We have hired someone.",
+ "Thank you for applying. Application received. Role has been taken.",
+ "Thank you for applying. Application received. Role was awarded to someone else.",
+ "Thank you for applying. Application received. Candidates selected.",
+ "Thank you for applying. Application received. Proceeding with others.",
+ "Thank you for applying. Application received. Accepting no more applicants.",
+ "Thank you for applying. Application received. Mismatch.",
+ "Thank you for applying. Application received. Overqualified.",
+ "Thank you for applying. Application received. Underqualified.",
+ "Nous avons bien reçu votre candidature. Poste attribué.",
+ "Nous avons bien reçu votre candidature. Le poste est clos.",
+ "Nous avons bien reçu votre candidature. Veuillez nous faire parvenir votre CV.",
+ "Nous avons bien reçu votre candidature. Hélas, nous allons un autre chemin.",
+ "Nous avons bien reçu votre candidature. Elle est refusée.",
+ "Nous avons bien reçu votre candidature. Votre candidature est écartée."
+];
+const PROBE2_POS = [
+ "Thank you for applying. We have received your application.",
+ "Thank you for your application. Your application has been received and is being processed.",
+ "Thanks for applying to Northwind. Our recruitment team will review your application.",
+ "We have received your application for the Electrician position. Our hiring team is reviewing applications and will be in touch if your profile is a fit.",
+ "Hello Karim, thank you for applying! Your application was successfully received.",
+ "Application received. Thank you for your interest in Northwind.",
+ "Thank you for applying. This is an automated confirmation. Please do not reply to this email.",
+ "We received your application. We will contact you within 10 business days.",
+ "Thank you for applying. Your application is under review.",
+ "Dear Karim, we confirm we have received your application. Best regards, HR",
+ "Thank you for applying. We will get back to you no later than 15 November.",
+ "Thank you for applying. No action is required on your part.",
+ "Nous avons bien reçu votre candidature. Merci pour votre intérêt.",
+ "Accusé de réception de votre candidature. Cordialement, l'équipe RH.",
+ "Bonjour, nous avons bien reçu votre dossier de candidature. Nous reviendrons vers vous prochainement.",
+ "Merci pour votre candidature. Aucune action n'est requise de votre part.",
+ "Thank you for applying. We have received your application and will review it carefully.",
+ "Thank you for your application. We will review your application and respond soon.",
+ "Thanks! We received your application. Our team is excited to review it.",
+ "Thank you for applying! We have received your application. Good luck!",
+ "Thank you for applying. Your application has been received.",
+ "Thank you for applying. We have received your application and our team will review it. Kind regards, Recruitment",
+ "Hi Karim, we have received your application and will review it shortly.",
+ "Thank you for applying to the Electrician role. We have received your application. Regards.",
+ "Thank you for your application. We have received it and our recruiters will review it."
+];
+const CLS2 = [
+ "We appreciate your interest; at this time we are pursuing other candidates.",
+ "Thank you for applying. We appreciate your interest; at this time we are pursuing other candidates.",
+ "Your CV was received, though we need a work-permit copy to proceed.",
+ "We received your application, though we need a work-permit copy to proceed.",
+ "Application received. Next step: complete the assessment.",
+ "Thank you for applying. Next step: complete the assessment.",
+ "Thank you for applying. Your application is on hold.",
+ "Thank you for applying. We will contact you if we require more information.",
+ "We have received your application, but your application is under review and missing transcripts.",
+ "We have received your application. Under review, missing transcripts.",
+ "We have received your application and it is under review. Transcripts needed.",
+ "Thank you for applying. Transcripts needed.",
+ "Thank you for applying. Your passport copy is needed.",
+ "Thank you for applying. We require your passport copy.",
+ "Thank you for applying. Provide your references.",
+ "Thank you for applying. Share your references with us.",
+ "Thank you for applying. Attach a cover letter.",
+ "Thank you for applying. We need a cover letter.",
+ "Thank you for applying. Interview scheduled for Monday.",
+ "Thank you for applying. Please see the attached offer.",
+ "Thank you for applying. We'll pass.",
+ "Thank you for applying. Position is no longer open.",
+ "Thank you for applying. We have received your application. Position filled.",
+ "We have received your application; the vacancy is closed.",
+ "We have received your application; the vacancy has been filled.",
+ "We have received your application. We have gone with an internal candidate.",
+ "We have received your application. We will not be pursuing it.",
+ "We have received your application. Your application was declined.",
+ "We have received your application. Application denied.",
+ "We have received your application. Your application has been rejected.",
+ "We have received your application. We have chosen someone else.",
+ "We have received your application. We hired someone else.",
+ "We have received your application. The position was taken.",
+ "We have received your application. Role closed.",
+ "We have received your application. Job cancelled.",
+ "We have received your application. Hiring is frozen."
+];
+const ROUND3_NEW = [
+ [
+  false,
+  "Thank you for applying. We will be moving ahead with candidates whose experience more closely matches."
+ ],
+ [
+  false,
+  "We have received your application. The hiring manager has decided to close this requisition."
+ ],
+ [
+  false,
+  "Thank you for applying. We have decided not to progress your application."
+ ],
+ [
+  false,
+  "Thanks for applying. Your application was not shortlisted."
+ ],
+ [
+  false,
+  "We have received your application. We have identified a stronger match."
+ ],
+ [
+  false,
+  "Thank you for your application. We wish you every success in your future job search."
+ ],
+ [
+  false,
+  "We have received your application. Recruitment is paused until next quarter."
+ ],
+ [
+  false,
+  "Thank you for applying. The role is temporarily on ice."
+ ],
+ [
+  false,
+  "We have received your application. Click the link below to verify your email."
+ ],
+ [
+  false,
+  "Thank you for applying. Upload your diploma to the portal."
+ ],
+ [
+  false,
+  "We have received your application. Call us to book a slot."
+ ],
+ [
+  false,
+  "Thank you for applying. Tell us your earliest start date."
+ ],
+ [
+  false,
+  "We have received your application. Log in to track your status and confirm your details."
+ ],
+ [
+  false,
+  "Thank you for applying. A valid driving licence is mandatory for this role."
+ ],
+ [
+  false,
+  "We have received your application. Proof of right to work is essential."
+ ],
+ [
+  false,
+  "Thank you for applying. Applicants must hold a trade certificate."
+ ],
+ [
+  false,
+  "We have received your application. Are you free on Monday at 9?"
+ ],
+ [
+  false,
+  "Thank you for applying. We would love to meet you next week."
+ ],
+ [
+  false,
+  "We have received your application. Congratulations, you got the job."
+ ],
+ [
+  false,
+  "Thank you for applying. Your start date would be 1 December."
+ ],
+ [
+  false,
+  "We have received your application. It has been forwarded to another department."
+ ],
+ [
+  false,
+  "Thank you for applying. Your application has been archived."
+ ],
+ [
+  false,
+  "We have received your application. It was flagged as a duplicate."
+ ],
+ [
+  false,
+  "Thank you for applying. Your application expired."
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Nous ne donnerons pas suite."
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Le recrutement est gelé."
+ ],
+ [
+  false,
+  "Merci pour votre candidature. Cliquez sur le lien pour compléter votre profil."
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Le permis de conduire est obligatoire."
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Êtes-vous disponible lundi ?"
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Nous avons choisi un autre profil."
+ ],
+ [
+  false,
+  "Nous avons bien reçu votre candidature. Félicitations, vous êtes retenu."
+ ],
+ [
+  false,
+  "Thank you for your interest. Your application lacked the required documents."
+ ],
+ [
+  false,
+  "Thank you for applying. The attachment appears damaged."
+ ],
+ [
+  false,
+  "Merci pour votre candidature. Le document envoyé est endommagé."
+ ],
+ [
+  false,
+  "We have received your application. Regards. PS the position was given to an internal applicant."
+ ],
+ [
+  true,
+  "Dear applicant, we have received your application. Our recruitment team will review it carefully. Kind regards, Northwind HR"
+ ],
+ [
+  true,
+  "Bonjour Karim, nous avons bien reçu votre candidature. Notre équipe RH l'examinera attentivement. Cordialement"
+ ]
+];
+test("I1 round 3 (allowlist): classifier tables - reviewer NEG/POS/cls2 + own round-3 cases + earlier tables: 0 false accepts, 0 false rejects", () => {
+  const all = [
+    ...PROBE2_NEG.map((t) => [false, t, "probe NEG"]),
+    ...PROBE2_POS.map((t) => [true, t, "probe POS"]),
+    ...CLS2.map((t) => [false, t, "cls2"]),
+    ...ROUND3_NEW.map(([e, t]) => [e, t, "round3"]),
+    ...CLS_CASES.map(([e, t]) => [e, t, "earlier"]),
+  ];
+  const fa = [];
+  const fr = [];
+  for (const [exp, text, src] of all) {
+    const got = replyMatcher.classifyReply(text).acknowledgement;
+    if (got && !exp) fa.push(`${src}: ${text}`);
+    if (!got && exp) fr.push(`${src}: ${text}`);
+  }
+  assert.deepEqual(fa, [], "false accepts");
+  assert.deepEqual(fr, [], "false rejects");
+  assert.ok(ROUND3_NEW.filter(([e]) => !e).length >= 30);
+  // signature blocks are ignored only when they look like signatures
+  assert.equal(replyMatcher.classifyReply("We have received your application. Kind regards,\nJane Doe\nHR Manager\nNorthwind Energy\n+1 555-123-4567\nwww.northwind.example").acknowledgement, true);
+  assert.equal(replyMatcher.classifyReply("We have received your application. Regards,\nJane\nPS we filled the role").acknowledgement, false);
+  // quoted original message below the reply is ignored
+  assert.equal(replyMatcher.classifyReply("We have received your application.\n\nOn Mon, 3 Nov 2026, VITA wrote:\n> I am not available on Mondays, please call me").acknowledgement, true);
+  assert.equal(replyMatcher.classifyReply("We have received your application.\n> quoted\nUnfortunately the role is filled.").acknowledgement, false);
+});
+
+test("I1 round 3: end-to-end evidence over the reviewer's 109 probe items (aligned DKIM pass): 0 false accepts, 0 false rejects", async () => {
+  const fa = [];
+  const fr = [];
+  for (const [exp, text] of [...PROBE2_NEG.map((t) => [false, t]), ...PROBE2_POS.map((t) => [true, t])]) {
+    const w = await world();
+    const r = await inbox.ingest(reply(w, { text, authResults: authOk(w) }));
+    const confirmed = (await subStatus(w.sub.id)) === "confirmed_submitted";
+    if (confirmed && !exp) fa.push(`${text} -> ${JSON.stringify(r.evidence)}`);
+    if (!confirmed && exp) fr.push(`${text} -> ${JSON.stringify(r.evidence)}`);
+  }
+  assert.deepEqual(fa, []);
+  assert.deepEqual(fr, []);
+});
+
+test("I1 round 3: allowlist stays linear on 200k inputs (reviewer b2.js shapes)", () => {
+  const shapes = [
+    ("thank you for applying " + "a ".repeat(100000)).slice(0, 200000),
+    "received your application" + " ".repeat(200000),
+    "we have received your application ".repeat(6000),
+    "n'".repeat(100000),
+    "received your application." + "... ".repeat(50000),
+    "received your application (" + "(".repeat(100000),
+    "received your application " + "é".repeat(190000),
+    "not ".repeat(50000),
+    `thank you for applying to ${"northwind ".repeat(29)}x`.slice(0, 299),
+    Array.from({ length: 79 }, () => `thank you for applying to ${"abcdefghij".repeat(25)}`).join(". "),
+  ];
+  for (const sh of shapes) {
+    const t0 = Date.now();
+    replyMatcher.classifyReply(sh);
+    replyMatcher.ackAllow(sh.slice(0, 19999));
+    assert.ok(Date.now() - t0 < 1500, `slow on shape length ${sh.length}: ${Date.now() - t0}ms`);
+  }
+});
+
+test("bounce round 3 (reviewer bounce.js/b2.js): staff task only for a provider-domain sender; multipart/report from anyone else is a normal message", async () => {
+  process.env.INBOUND_BOUNCE_DOMAINS = "mailer.vita.test.invalid";
+  try {
+    const dsn = "Delivery has failed. Diagnostic-Code: smtp; 550 5.1.1 user unknown. Action: failed";
+    const cases = [
+      ["MAILER-DAEMON@provider domain", { from: "MAILER-DAEMON@mailer.vita.test.invalid", subject: "Undelivered Mail Returned to Sender" }, true],
+      ["MAILER-DAEMON@MAIL_FROM domain", { from: "MAILER-DAEMON@vita.test.invalid", subject: "Delivery Status Notification (Failure)" }, true],
+      ["provider domain, report content type, other local part", { from: "bounces@mailer.vita.test.invalid", subject: "x", contentType: "multipart/report; report-type=delivery-status; boundary=x" }, true],
+      ["provider bounce domain but dkim fail", { from: "MAILER-DAEMON@mailer.vita.test.invalid", subject: "Undelivered", authResults: "mx; dkim=fail header.d=mailer.vita.test.invalid" }, false],
+      ["MAILER-DAEMON@evil.example", { from: "MAILER-DAEMON@evil.example", subject: "Undelivered Mail Returned to Sender" }, false],
+      ["MAILER-DAEMON@evil.example + pass", { from: "MAILER-DAEMON@evil.example", subject: "Undelivered", authResults: "mx; dkim=pass header.d=evil.example" }, false],
+      ["postmaster@vita.test.invalid.evil.example", { from: "postmaster@vita.test.invalid.evil.example", subject: "Undelivered" }, false],
+      ["postmaster@evilvita.test.invalid", { from: "postmaster@evilvita.test.invalid", subject: "Undelivered" }, false],
+      ["multipart/report from the employer", { subject: "Re: x", headers: { "Content-Type": "multipart/report; report-type=delivery-status; boundary=x" } }, false],
+      ["multipart/report from evil.example", { from: "x@evil.example", subject: "Re: x", contentType: "multipart/report; report-type=delivery-status; boundary=x" }, false],
+      ["multipart/report evil + dkim fail", { from: "x@evil.example", subject: "Re: x", authResults: "mx; dkim=fail", contentType: "multipart/report; report-type=delivery-status; boundary=x" }, false],
+      ["body-only DSN text from the employer", { subject: "Re: Application" }, false],
+    ];
+    const wrong = [];
+    for (const [name, extra, expectTask] of cases) {
+      const w = await world();
+      const tl0 = (await timelineOf(w.appId)).length;
+      const ev0 = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n;
+      const mailIn = { ...reply(w, {}), text: `${dsn} ${w.providerId}`, ...extra };
+      if (extra.from === undefined) mailIn.from = `HR <hr@${w.domain}>`;
+      const r = await inbox.ingest(mailIn);
+      const tasks = (await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1 AND reason='verify_delivery'", [w.appId])).rows[0].n;
+      const unchanged = (await subStatus(w.sub.id)) === "sent" && (await statusOf(w.appId)) === "sent";
+      const tlNew = (await timelineOf(w.appId)).slice(tl0).map((e) => e.event).filter((e) => e !== "reply_received");
+      const ev1 = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate' AND kind <> 'application.update'", [w.candidateId])).rows[0].n;
+      if (!unchanged || (tasks > 0) !== expectTask || tlNew.length || ev1 > ev0) wrong.push(`${name}: reason=${r.reason} tasks=${tasks} unchanged=${unchanged} tl=${tlNew}`);
+    }
+    assert.deepEqual(wrong, []);
+    const w = await world();
+    for (let i = 0; i < 2; i += 1) await inbox.ingest({ ...reply(w, {}), from: "MAILER-DAEMON@mailer.vita.test.invalid", text: `${dsn} ${w.providerId}`, subject: "Undelivered" });
+    assert.equal((await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1 AND reason='verify_delivery'", [w.appId])).rows[0].n, 1, "deduped");
+  } finally {
+    delete process.env.INBOUND_BOUNCE_DOMAINS;
+  }
 });

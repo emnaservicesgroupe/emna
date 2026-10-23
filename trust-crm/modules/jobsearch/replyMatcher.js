@@ -242,16 +242,18 @@ function bounceDomains() {
 }
 
 /**
- * A DSN we are willing to open a staff task for: MAILER-DAEMON/postmaster at the sending provider's
- * domain (or a subdomain), or a multipart/report; report-type=delivery-status message. Everything
+ * A DSN we are willing to open a staff task for: a sender at the sending provider's / our own domain
+ * (or a subdomain) that is MAILER-DAEMON/postmaster or sends multipart/report; report-type=delivery-status. Everything
  * else that merely LOOKS like a bounce (subject words) is handled as a normal message.
  */
 function isPlausibleBounce(m) {
   const from = parseFrom(m && m.from);
+  if (!from.ok) return false;
+  // the sender must ALWAYS be at our sending provider's / our own domain (or a subdomain)
+  if (![...bounceDomains()].some((d) => from.domain === d || from.domain.endsWith(`.${d}`))) return false;
   const ct = String((m && m.autoHeaders && m.autoHeaders.contentType) || "").toLowerCase();
-  if (/multipart\/report/.test(ct) && /report-type\s*=\s*"?delivery-status/.test(ct)) return true;
-  if (!from.ok || !/^(?:mailer-daemon|postmaster)$/i.test(from.address.split("@")[0])) return false;
-  return [...bounceDomains()].some((d) => from.domain === d || from.domain.endsWith(`.${d}`));
+  const report = /multipart\/report/.test(ct) && /report-type\s*=\s*"?delivery-status/.test(ct);
+  return report || /^(?:mailer-daemon|postmaster)$/i.test(from.address.split("@")[0]);
 }
 
 /** {hard, code} from a DSN body: a 5.x.x enhanced status (or 'Action: failed') is hard. */
@@ -435,7 +437,13 @@ const VETO = new RegExp([
   "\\bsans\\b", "\\bmanqu", "\\bveuillez\\b", "\\bmerci de\\b", "\\brenvoy", "\\benvoy", "\\bresend", "\\bre-send", "\\bresubmit", "\\bre-?upload", "\\bupload",
   "\\bfilled\\b", "\\bpourvu", "\\bposition has been\\b", "\\bclosed\\b", "\\bdeclin", "\\breject", "\\bnot selected\\b", "\\bmoving forward\\b",
   "\\bretenu", "\\bretenons\\b", "\\banother candidate\\b", "\\bother candidates\\b", "\\bwrong\\b", "\\btoo (?:large|big|small)\\b", "\\berror\\b", "\\bproblem",
-  "\\bissue\\b", "\\bwaiting\\b", "\\bawait", "\\bpending\\b", "\\byet\\b", "\\bstill\\b", "\\battente\\b", "\\bencore\\b", "\\binvalid\\b", "\\bwhether\\b", "\\bunable\\b", "\\bimpossible\\b", "\\bdid you\\b", "\\bno idea\\b", "\\bonly if\\b", "\\bexcept\\b",
+  "\\bissue\\b", "\\bwaiting\\b", "\\bawait", "\\bpending\\b", "\\byet\\b", "\\bstill\\b", "\\battente\\b", "\\bencore\\b", "\\binvalid\\b", "\\bwhether\\b", "\\bunable\\b", "\\bimpossible\\b", "\\bdid you\\b", "\\bno idea\\b", "\\bexcept\\b",
+  "\\bhold\\b", "\\bwithdrawn\\b", "\\bdenied\\b", "\\bunsuccessful\\b", "\\bfrozen\\b", "\\bsuspend", "\\bcancel", "\\bineligib", "\\bunsuitab", "\\bnot suitable\\b",
+  "\\bhired\\b", "\\bawarded\\b", "\\battribue", "\\bclos\\b", "\\becart", "\\brefus", "\\bhelas\\b", "\\bnext step", "\\brequire", "\\bneed", "\\bassessment\\b",
+  "\\bquestionnaire\\b", "\\bdeadline\\b", "\\bconditional\\b", "\\battach", "\\bjoindre\\b", "\\bpursu", "\\bpoursui", "\\bdifferent direction\\b", "\\bpass(?:ed)? over\\b",
+  "\\bwe'll pass\\b", "\\black", "\\bdisqualif", "\\boffer", "\\binterview", "\\bentretien", "\\bschedul", "\\bavailability\\b", "\\bdisponibilit", "\\bsubmit\\b", "\\bprovide\\b",
+  "\\bsend\\b", "\\bshare\\b", "\\bcomplete\\b", "\\bfill\\b", "\\breply with\\b", "\\bon file\\b", "\\bchosen\\b", "\\bothers\\b",
+  "\\bmismatch\\b", "\\boverqualif", "\\bunderqualif", "\\bdiscontinu", "\\babolish", "\\bnegative\\b", "\\bafraid\\b", "\\bregrettably\\b", "\\bsuspendu", "\\bcorrespond pas\\b",
   "\\?",
 ].join("|"));
 const PUNCT_MAP = { "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'", "“": '"', "”": '"', "„": '"', "«": '"', "»": '"', "–": "-", "—": "-", "…": "...", " ": " ", " ": " " };
@@ -457,7 +465,137 @@ function ackVeto(...texts) {
   return v ? `veto:${v[0].trim().slice(0, 30)}` : null;
 }
 
-/** True only for a whole-message, un-negated acknowledgement (see ackVeto) with no other category. */
+// ---------------------------------------------------------------- acknowledgement ALLOWLIST
+//
+// Round 3: a reply is eligible for acknowledgement evidence only when EVERY sentence/fragment (after
+// removing quoted reply blocks) is one of a few recognised classes: ACK ("we have received your
+// application", "application received", "accusé de réception", "bien reçu"...), COURTESY ("thank you
+// for applying", "merci pour votre candidature"), PROCESS-NEUTRAL ("we will review it", "we will be in
+// touch if your profile matches", "nous reviendrons vers vous"), BOILERPLATE ("do not reply", "no
+// action is required", "this is an automated message"), GREETING ("dear karim") or a team line; after
+// a SIGN-OFF ("kind regards", "cordialement") up to 12 short lines are ignored. Anything else - a
+// request, question, requirement, status, rejection, scheduling, attachment mention - and the reply
+// is NOT eligible (staff confirm by hand). At least one ACK (or application-specific courtesy)
+// fragment is required, and the denylist (ackVeto) still applies on top.
+// Every pattern is anchored, words are separated by mandatory single spaces (no ambiguous splits),
+// and fragments over 300 chars are refused: linear in practice.
+const STOP = "(?:we|you|your|our|is|are|was|were|has|have|had|will|would|not|no|but|however|unfortunately|please|hired|filled|closed|hold|position|role|application|candidate|candidates|interview|offer|selected|someone|else|regret|sorry|send|provide|need|needs|needed|require|required|attach|attached|reply|thank|thanks|nous|vous|votre|est|sont|pas|ne|merci|poste|withdrawn|denied|cancelled|canceled|frozen|declined|rejected|other|others|another|which|that|who|if|unless|only|until|before|after|missing|lacks|lack|form|complete|submit)";
+const WORD = `(?!${STOP}\\b)[a-z0-9&.'-]+`;
+const WORDS = (n) => `${WORD}(?: ${WORD}){0,${n - 1}}`;
+const DOC = "(?:application|applications|cv|resume|submission|candidacy|message|email|e-mail|application form)";
+const TITLE = `(?: (?:for|to) (?:the |our |this |your )?${WORDS(4)}(?: (?:position|role|job|vacancy|post|opening|opportunity))?)?`;
+const FRDOC = "(?:candidature|dossier(?: de candidature)?|cv|message|courriel|e-mail|email|envoi)";
+const FRTITLE = `(?: (?:pour|au) (?:le |du )?poste(?: (?:d'|de |d )?${WORDS(4)})?)?`;
+const TEAM = "(?:we|our (?:recruitment |recruiting |hiring |hr |talent |selection )?team|our recruiters?|a recruiter|a member of our team|our hiring team|the hiring team|the recruitment team|the team|our hr team|hr|someone from our team)";
+const WHEN = "(?: (?:shortly|soon|promptly|carefully|in detail|in due course|as soon as possible|within (?:the next )?\\d{1,2} (?:business |working )?(?:days|weeks)|no later than (?:[a-z0-9]+)(?: [a-z0-9]+){0,2}))?";
+const IFOK = "(?: (?:only )?if (?:your (?:profile|application|experience|skills)|you|your profile and experience) (?:is a (?:good )?(?:fit|match)|are a (?:good )?(?:fit|match)|matches?(?: (?:our|the) (?:requirements|needs|criteria))?|meets? (?:our|the) (?:requirements|criteria)|(?:is|are) shortlisted|(?:is|are) selected|(?:is|are) successful))?";
+const re = (src) => new RegExp(`^(?:${src})$`);
+const ACK_CLASS = [
+  re(`(?:we|i) (?:can |hereby )?(?:confirm (?:that )?(?:we )?|are pleased to confirm (?:that )?(?:we )?)?(?:have |'ve |'ve )?(?:successfully |safely )?received your ${DOC}${TITLE}`),
+  re(`we(?:'ve| have)? (?:successfully )?received it`),
+  re(`(?:we )?(?:hereby )?(?:confirm|acknowledge) (?:the )?receipt of your ${DOC}${TITLE}`),
+  re(`(?:your|the) ${DOC}${TITLE} (?:has been|was|is|have been) (?:successfully |safely |now )?received`),
+  re(`${DOC} (?:successfully )?received`),
+  re(`this (?:email|message) (?:is to )?confirms? (?:that )?(?:we have |we've )?received your ${DOC}`),
+  re(`(?:nous )?(?:avons |a )?(?:bien )?recu votre ${FRDOC}${FRTITLE}`),
+  re(`accuse de reception(?: de votre ${FRDOC})?`),
+  re(`votre ${FRDOC}${FRTITLE} a (?:bien )?ete (?:recue?|enregistree?|transmise? a (?:notre|l') ?equipe(?: (?:rh|de recrutement))?)`),
+  re(`nous accusons (?:bonne )?reception de votre ${FRDOC}`),
+];
+const COURTESY_ACK = [ // application-specific: count as the required acknowledgement
+  re(`(?:thank you|thanks|many thanks|thank you very much|thank you so much)(?: again)? for (?:applying|your application|submitting your application|your submission|applying (?:to|for|with) (?:the |our |this )?${WORDS(5)}(?: (?:position|role|job|vacancy|post|opening|opportunity))?)`),
+  re(`merci (?:beaucoup )?(?:pour|de) votre candidature`),
+  re(`nous vous remercions (?:pour|de) votre candidature`),
+];
+const OTHER_CLASS = [
+  // courtesy
+  re(`(?:thank you|thanks|many thanks|thank you very much|thank you so much)(?: again)?(?: for (?:your interest(?: in (?:the |our )?${WORDS(5)})?|your time|contacting us|considering ${WORDS(3)}))?`),
+  re(`we appreciate your interest(?: in (?:the |our )?${WORDS(5)})?`),
+  re(`merci(?: beaucoup)?(?: (?:pour|de) (?:votre |l')?(?:interet|message|envoi|confiance|temps)(?: (?:pour|porte a) (?:notre |le |la )?${WORDS(4)})?)?`),
+  re(`nous vous remercions (?:pour|de) (?:votre |l')?(?:interet|message|confiance)(?: (?:pour|porte a) (?:notre |le |la )?${WORDS(4)})?`),
+  re(`(?:good luck|best of luck|bonne chance|bonne journee)`),
+  // process-neutral
+  re(`(?:${TEAM} )?(?:will|'ll|shall|is going to|are going to) (?:now )?(?:carefully )?(?:review|examine|consider|assess|evaluate|look (?:at|over)|read|go through)(?: (?:it|your (?:application|profile|cv|resume|candidacy)|all applications|applications))?${WHEN}`),
+  re(`${TEAM} (?:is|are) (?:now )?(?:currently )?(?:reviewing|examining|considering|assessing|evaluating)(?: (?:it|your (?:application|profile|cv|resume)|all applications|applications))?`),
+  re(`${TEAM} (?:is|are) (?:excited|happy|looking forward) to (?:review|read)(?: it| your (?:application|profile))?`),
+  re(`(?:${TEAM} )?(?:will|'ll|shall) (?:get back to you|be in touch|contact you|reach out(?: to you)?|respond(?: to you)?|follow up(?: with you)?|let you know)${WHEN}${IFOK}${WHEN}`),
+  re(`(?:respond|reply) (?:soon|shortly)`),
+  re(`(?:your (?:application|profile|cv|candidacy)|it) (?:is|will be) (?:now )?(?:being )?(?:reviewed|processed|considered|under review|in review|in process)(?: (?:shortly|carefully))?`),
+  re(`(?:is )?(?:now )?being (?:processed|reviewed)`),
+  re(`nous (?:reviendrons|revenons) (?:rapidement |prochainement |tres vite )?vers vous(?: (?:rapidement|prochainement|tres prochainement|dans les plus brefs delais|des que possible))?`),
+  re(`(?:nous )?(?:examinerons|etudierons|allons (?:etudier|examiner)|analyserons) (?:attentivement |avec attention )?(?:votre (?:candidature|dossier|profil)|celle-ci|celui-ci)(?: (?:attentivement|rapidement|avec attention|dans les plus brefs delais|prochainement))?`),
+  re(`(?:nous |notre equipe(?: rh| de recrutement| recrutement)? |notre service rh |nos recruteurs )?(?:l'|la )?(?:etudierons|examinerons|analyserons|etudiera|examinera|analysera|etudieront|examineront)(?: (?:attentivement|rapidement|avec attention|dans les plus brefs delais|prochainement))?`),
+  re(`votre (?:candidature|dossier) (?:est|sera) (?:en cours d'(?:examen|etude)|examinee?|etudiee?)(?: (?:attentivement|rapidement|prochainement))?`),
+  // boilerplate
+  re(`(?:this is an? |it is an? )?(?:automated|automatic|auto-generated) (?:message|confirmation|email|e-mail|notification|acknowledgement|acknowledgment|response|reply)(?: from (?:our )?(?:ats|applicant tracking system|careers? (?:site|portal|page)|recruitment (?:system|platform)))?`),
+  re(`(?:please )?do not (?:reply|respond)(?: directly)?(?: to this (?:automated |automatic |auto-generated )?(?:message|email|e-mail|mail|address|notification))?`),
+  re(`(?:this (?:mailbox|address|email address) is not monitored)`),
+  re(`no (?:further )?action is (?:required|needed|necessary)(?: (?:on your part|from you|at this (?:stage|point)))?`),
+  re(`you (?:do not|don't) need to do anything(?: else)?`),
+  re(`you will not hear back unless you are (?:shortlisted|selected)`),
+  re(`aucune action (?:n'est |n est |est )?(?:requise|necessaire)(?: de votre part)?`),
+  re(`(?:merci de )?ne pas repondre(?: a ce (?:message|courriel|mail|e-mail))?`),
+  re(`(?:ceci est un |ce message est un )?(?:message|courriel|e-mail|mail) automatique`),
+  re(`nous ne manquerons pas de revenir vers vous`),
+  re(`(?:unsubscribe|privacy policy|privacy notice|terms of use|manage (?:your )?preferences|politique de confidentialite|se desabonner)(?: ${WORDS(6)})?`),
+  // greeting / team line
+  re(`(?:dear|hello|hi|hey|greetings|good (?:morning|afternoon|day)|bonjour|bonsoir|madame|monsieur|cher|chere)(?: ${WORDS(3)})?`),
+  re(`(?:the )?(?:${WORDS(3)} )?(?:team|recruitment|recruiting|hr|human resources|talent acquisition|careers|people team|equipe rh|l'equipe rh|ressources humaines|service rh|l'equipe recrutement)(?: team)?`),
+];
+const SIGNOFF = re(`(?:best regards|kind regards|warm regards|warmest regards|regards|best|sincerely|yours sincerely|yours faithfully|yours truly|respectfully|best wishes|all the best|cheers|cordialement|bien cordialement|tres cordialement|salutations|salutations distinguees|sinceres salutations|meilleures salutations|respectueusement|bien a vous)`);
+const MAX_AFTER_SIGNOFF = 12;
+const SIGWORD = `(?!${STOP}\\b)[a-z0-9&.'/@+()-]+`;
+const SIGLINE = new RegExp(`^${SIGWORD}(?: ${SIGWORD}){0,5}$`);
+
+/** NFKD + accent fold + lowercase + ASCII punctuation, newlines kept; quoted reply blocks removed. */
+function dequote(text) {
+  let t = String(text || "").normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase();
+  t = t.replace(/[‘’‚‛′“”„«»–—…  ]/g, (c) => PUNCT_MAP[c]);
+  const lines = t.split(/\r?\n/);
+  const out = [];
+  for (const line of lines) {
+    const l = line.trim();
+    if (/^(?:-{2,} ?original message ?-{2,}|-{2,} ?message d'origine ?-{2,}|_{5,})$/.test(l)) break;
+    if (/^on .{1,300} wrote:$/.test(l) || /^le .{1,300} a ecrit ?:$/.test(l)) break;
+    if (/^(?:from|de|sent|envoye|to|a|subject|objet) ?: /.test(l) && out.length && /^(?:from|de) ?: /.test(l)) break;
+    if (l.startsWith(">")) continue;
+    out.push(l);
+  }
+  return out.join("\n");
+}
+
+/**
+ * @returns {{ok: boolean, reason: string|null}} whether the WHOLE message is a recognised acknowledgement.
+ */
+function ackAllow(text) {
+  const raw = String(text || "");
+  if (raw.length > 20000) return { ok: false, reason: "too_long" };
+  const t = dequote(raw);
+  if (/[^\x00-\x7f]/.test(t)) return { ok: false, reason: "non_ascii" };
+  const frags = t.split(/[.!?;:,\n]+|\s-\s|\s(?:and|et)\s/).map((x) => x.replace(/["()[\]*_~]+/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (!frags.length) return { ok: false, reason: "empty" };
+  if (frags.length > 80) return { ok: false, reason: "too_many_sentences" };
+  let hasAck = false;
+  for (let i = 0; i < frags.length; i += 1) {
+    const f = frags[i];
+    if (f.length > 300) return { ok: false, reason: "sentence_too_long" };
+    if (SIGNOFF.test(f)) {
+      const rest = frags.slice(i + 1);
+      // signature only: short lines of names/titles/company/phone/url - no sentence words, no "PS"
+      if (rest.length > MAX_AFTER_SIGNOFF || rest.some((x) => x.length > 80 || !SIGLINE.test(x) || /^(?:ps|p\.s|nb|n\.b)\b/.test(x))) return { ok: false, reason: "after_signoff" };
+      break;
+    }
+    if (ACK_CLASS.some((r) => r.test(f)) || COURTESY_ACK.some((r) => r.test(f))) {
+      hasAck = true;
+      continue;
+    }
+    if (OTHER_CLASS.some((r) => r.test(f))) continue;
+    return { ok: false, reason: `unrecognised:${f.slice(0, 40)}` };
+  }
+  return hasAck ? { ok: true, reason: null } : { ok: false, reason: "no_ack_sentence" };
+}
+
+/** True only when the whole message is a recognised acknowledgement (ackAllow) with no veto and no other category. */
 function isAcknowledgement(text) {
   return classifyReply(text).acknowledgement;
 }
@@ -475,10 +613,12 @@ function classifyReply(text) {
       if (hit) evidence.push({ category, phrase: hit[0].trim().slice(0, 80) });
     }
   }
-  const hasAck = evidence.some((e) => e.category === "acknowledgement");
+  const allow = ackAllow(text);
+  const hasAck = allow.ok || evidence.some((e) => e.category === "acknowledgement");
   const otherCategory = evidence.some((e) => e.category !== "acknowledgement");
-  const veto = hasAck ? (otherCategory ? "other_category" : ackVeto(text)) : null;
+  const veto = hasAck ? (otherCategory ? "other_category" : !allow.ok ? `not_allowlisted:${allow.reason}` : ackVeto(dequote(text))) : null;
   const acknowledgement = hasAck && !veto;
+  if (acknowledgement && !evidence.some((e) => e.category === "acknowledgement")) evidence.push({ category: "acknowledgement", phrase: "allowlisted acknowledgement" });
   // a vetoed acknowledgement is not reported as one
   const kept = acknowledgement ? evidence : evidence.filter((e) => e.category !== "acknowledgement");
   const first = RULES.map(([cat]) => cat).find((cat) => kept.some((e) => e.category === cat));
@@ -486,4 +626,4 @@ function classifyReply(text) {
   return { category, evidence: kept.slice(0, 20), proposedStatus: PROPOSED_STATUS[category] || null, instructionLike: INSTRUCTION_LIKE.some((re) => re.test(t)), acknowledgement, ...(veto ? { ackVeto: veto } : {}) };
 }
 
-module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, isPlausibleBounce, bounceStatus, ackVeto, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };
+module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, isPlausibleBounce, bounceStatus, ackVeto, ackAllow, dequote, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };
