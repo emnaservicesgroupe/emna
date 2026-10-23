@@ -106,6 +106,25 @@ function item(v, omitted, field) {
   return s;
 }
 
+const FIRST_PERSON_RE = /(?:^|[^\p{L}])(?:i|i'm|im|i've|my|me|mine|je|j'ai|moi|mon|ma|mes|nous)(?=$|[^\p{L}])|أنا|لدي/iu;
+
+/**
+ * Job title / employer name are UNTRUSTED ad text: keep only the first clause (cut at sentence
+ * punctuation, newlines and " - "/" | " separators), at most 80 chars, and refuse anything that reads
+ * as a first-person claim, so a hostile title cannot put words in the candidate's mouth.
+ */
+function jobLabel(v, omitted, field) {
+  if (typeof v !== "string") return null;
+  const first = sanitizeUntrusted(v, 2000).split(/[.!?;\n\r\u2022]|\s[-\u2013\u2014|]\s|:\s/)[0];
+  const cut = first.replace(/\s+/g, " ").trim().slice(0, 80).trim();
+  if (!cut) return null;
+  if (FIRST_PERSON_RE.test(cut) || /\p{N}/u.test(cut) && /\b(?:years?|ans|ann[eé]es?|yrs?)\b/i.test(cut)) {
+    omitted.push(field);
+    return null;
+  }
+  return item(cut, omitted, field);
+}
+
 function list(values, omitted, field) {
   const out = [];
   for (const v of Array.isArray(values) ? values : []) {
@@ -134,8 +153,8 @@ function generateDetailed(profile, job, lang, opts = {}) {
   const omitted = [];
   const lines = [];
 
-  const employer = item(job && (job.employer_name ?? job.employer), omitted, "job.employer");
-  const title = item(job && job.title, omitted, "job.title");
+  const employer = jobLabel(job && (job.employer_name ?? job.employer), omitted, "job.employer");
+  const title = jobLabel(job && job.title, omitted, "job.title");
   lines.push(employer ? fill(t.greetingEmployer, { employer }) : t.greeting, "");
   lines.push(title ? fill(t.intro, { title }) : t.introFallback);
 

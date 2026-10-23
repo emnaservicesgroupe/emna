@@ -11,6 +11,7 @@ const consentService = require("./consentService");
 const coverLetter = require("./coverLetter");
 const documentPolicy = require("./documentPolicy");
 const { country, NOTICE } = require("./matching");
+const { normalize } = require("./jobStore");
 const { PERMISSIONS } = require("../../middleware/role");
 const { logAudit } = require("../../utils/audit");
 
@@ -40,6 +41,10 @@ const TRANSITIONS = Object.freeze({
 const PRE_SEND = ["matched", "preparing", "ready_for_review", "approved", "queued"];
 const PREPARABLE = ["matched", "preparing", "ready_for_review", "failed", "needs_staff"];
 const CANCELLABLE_QUEUE_KINDS = consentService.CANCELLABLE_QUEUE_KINDS;
+
+// Internal capability for non-human approve/queue transitions (autoApprove here; the submitter in
+// Task 11). Exported only as `_internal`; routes never pass it.
+const SYSTEM_GRANT = Symbol("jobsearch.systemSendGrant");
 
 const LABEL_NOTICE = "Employer-support labels are read from the job ad and are informational only. Always verify with the employer before relying on them.";
 const MAX_REASON = 500;
@@ -129,8 +134,10 @@ async function sendBlockers(client, candidateId, scopeKey) {
   const cand = (await client.query("SELECT is_deleted FROM candidates WHERE id = $1", [candidateId])).rows[0];
   if (!cand || cand.is_deleted) reasons.push("candidate_deleted");
   if (!(await consentService.activeConsent(candidateId, scopeKey, client))) reasons.push(`no_${scopeKey}_consent`);
-  const s = (await client.query("SELECT paused FROM js_candidate_settings WHERE candidate_id = $1", [candidateId])).rows[0];
+  const s = (await client.query("SELECT paused, mode FROM js_candidate_settings WHERE candidate_id = $1", [candidateId])).rows[0];
   if (s && s.paused) reasons.push("candidate_paused");
+  // The mode can change after creation/preparation: search_only never prepares, approves or queues.
+  if ((scopeKey === "submit" || scopeKey === "prepare") && (!s || s.mode === "search_only")) reasons.push("mode_search_only");
   const m = (await client.query("SELECT value FROM js_module_state WHERE key = 'module_paused'")).rows[0];
   if (m && m.value && m.value.paused === true) reasons.push("module_paused");
   const u = await client.query("SELECT u.is_active FROM js_candidate_accounts a JOIN users u ON u.id = a.user_id WHERE a.candidate_id = $1", [candidateId]);
@@ -170,6 +177,13 @@ async function transition(applicationId, to, actor, opts = {}) {
     if (opts.expectFrom && !opts.expectFrom.includes(from)) throw new HttpError(409, `Application is ${from}`);
     if (!(TRANSITIONS[from] || []).includes(to)) throw new HttpError(409, `Illegal transition ${from} -> ${to}`);
     if (to === "approved" || to === "queued") {
+      // A non-human actor may only approve/queue through autoApprove (or the submitter) holding the
+      // internal grant; a human needs jobsearch:approve. Never reachable from a route with 'system'.
+      if (!actor || typeof actor !== "object") {
+        if (opts[SYSTEM_GRANT] !== true) throw new HttpError(403, `A system actor cannot move an application to ${to} outside autoApprove`);
+      } else if (!hasPerm(actor, "jobsearch:approve")) {
+        throw new HttpError(403, `Moving an application to ${to} requires a manager or administrator`);
+      }
       const blockers = await sendBlockers(client, app.candidate_id, "submit");
       if (blockers.length) throw new HttpError(409, `Cannot move to ${to}: ${blockers.join(", ")}`);
     }
@@ -341,7 +355,7 @@ async function approveApplication({ id, actor, reason }) {
     if (locked.status !== "ready_for_review") throw new HttpError(409, `Application is ${locked.status}; only ready_for_review can be approved`);
     if ((locked.package_blocked || []).length) throw new HttpError(409, "The package has blocked documents");
     const problems = await documentPolicy.revalidateStoredPackage(client, locked);
-    if (problems.length) throw new HttpError(409, `The package is no longer valid: ${problems.join(", ")}`);
+    if (problems.length) throw new HttpError(409, `The package is no longer valid: ${documentPolicy.formatProblems(problems)}`);
     const job = (await client.query("SELECT status FROM js_jobs WHERE id = $1", [locked.job_id])).rows[0];
     if (!job || job.status !== "open") throw new HttpError(409, "The job is no longer open");
     const row = await transition(locked.id, "approved", actor, { client, reason: why, detail: { approvedBy: actor.id } });
@@ -462,38 +476,118 @@ function presentAuthorization(r) {
 
 // ---------------------------------------------------------------- automatic-approval eligibility (label-safety ruling)
 
+const COUNTED_SUBMISSION_STATES = ["queued", "sent", "confirmed_submitted", "outcome_unknown"];
+
+function listsOf(settingsList, rules, key) {
+  const out = [];
+  if (Array.isArray(settingsList) && settingsList.length) out.push(settingsList);
+  for (const r of rules) if (r && Array.isArray(r[key]) && r[key].length) out.push(r[key]);
+  return out;
+}
+
+function docVersionApproved(entries, row) {
+  return entries.some((e) => {
+    if (typeof e === "number") return row.cv_file_id === e;
+    if (!e || typeof e !== "object") return false;
+    const idOk = row.cv_file_id ? Number(e.cvFileId) === row.cv_file_id : row.document_id ? Number(e.documentId) === row.document_id : false;
+    if (!idOk) return false;
+    if (e.version !== undefined && Number(e.version) !== row.version) return false;
+    if (e.sha256 !== undefined && e.sha256 !== row.sha256) return false;
+    return true;
+  });
+}
+
+/** Sends counted against caps in the window: submissions in counted states + approved/queued apps not yet submitted. */
+async function countRecentSends(c, candidateId, interval) {
+  const r = await c.query(
+    `SELECT
+       (SELECT count(*) FROM js_submissions s JOIN js_applications a ON a.id = s.application_id
+         WHERE a.candidate_id = $1 AND s.status = ANY($2::text[]) AND s.created_at > now() - $3::interval)
+     + (SELECT count(*) FROM js_applications a
+         WHERE a.candidate_id = $1 AND a.status IN ('approved','queued') AND a.updated_at > now() - $3::interval
+           AND NOT EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id)) AS n`,
+    [candidateId, COUNTED_SUBMISSION_STATES, interval]
+  );
+  return Number(r.rows[0].n);
+}
+
 /**
- * Whether an application may be approved WITHOUT a human (used by the scheduler, Task 12).
- * allowed only when: mode automatic + admin-approved (settings.admin_approved_by + an active,
- * approved js_automation_rules row), status ready_for_review, package complete, submit consent,
- * not paused; and for a candidate needing work-authorization support applying outside their country
- * of residence: employer_support === 'confirmed' (no conflict) and overseas acceptance === true.
- * Unknown residence/country/support need are treated as the risky case.
+ * Whether an application may be approved WITHOUT a human (autoApprove; scheduler in Task 12).
+ * Deny by default. allowed only when ALL hold:
+ *  - mode automatic, settings.admin_approved_by set, >=1 active admin-approved js_automation_rules row;
+ *  - status ready_for_review, nothing blocked, stored package still valid, no sensitive document
+ *    (never auto-shared), every package document version listed in settings.approved_doc_versions;
+ *  - submit consent, not paused/suspended, mode not search_only; job open;
+ *  - job inside the admin scope: country in allowed_countries (required) and in every rule's
+ *    countries[], in the consent's countries[] when set, profession/source in their lists when set;
+ *    no salary_limit (job salary is not stored structurally, so it cannot be verified);
+ *  - caps per day/week (> 0) not reached (0 = no automatic sends);
+ *  - label-safety ruling: for a candidate needing work-authorization support applying outside their
+ *    country of residence, employer_support === 'confirmed' (no conflict); overseas acceptance === true
+ *    whenever the candidate is abroad. Unknown residence/country/support need = the risky case.
  * @param {object|number} application js_applications row or id
+ * @param {{client?: object}} [opts] run inside the caller's (locked) transaction
  * @returns {Promise<{allowed: boolean, reasons: string[]}>}
  */
-async function autoApproveEligibility(application) {
+async function autoApproveEligibility(application, opts = {}) {
   const id = typeof application === "object" && application ? application.id : posInt(application);
+  const c = opts.client || db();
   const reasons = [];
-  const app = id ? (await db().query("SELECT * FROM js_applications WHERE id = $1", [id])).rows[0] : null;
+  const app = id ? (await c.query("SELECT * FROM js_applications WHERE id = $1", [id])).rows[0] : null;
   if (!app) return { allowed: false, reasons: ["application_not_found"] };
-  const c = db();
-  const settings = (await c.query("SELECT mode, admin_approved_by FROM js_candidate_settings WHERE candidate_id = $1", [app.candidate_id])).rows[0] || {};
+  const cid = app.candidate_id;
+  const settings = (await c.query("SELECT * FROM js_candidate_settings WHERE candidate_id = $1", [cid])).rows[0] || {};
+  const rules = (await c.query("SELECT rule FROM js_automation_rules WHERE candidate_id = $1 AND active = true AND approved_by IS NOT NULL AND approved_at IS NOT NULL", [cid])).rows.map((r) => r.rule || {});
   if (settings.mode !== "automatic") reasons.push("mode_not_automatic");
-  else {
-    if (!settings.admin_approved_by) reasons.push("automatic_mode_not_admin_approved");
-    const rule = await c.query("SELECT 1 FROM js_automation_rules WHERE candidate_id = $1 AND active = true AND approved_by IS NOT NULL AND approved_at IS NOT NULL", [app.candidate_id]);
-    if (!rule.rowCount) reasons.push("no_admin_approved_rule");
-  }
+  if (!settings.admin_approved_by) reasons.push("automatic_mode_not_admin_approved");
+  if (!rules.length) reasons.push("no_admin_approved_rule");
   if (app.status !== "ready_for_review") reasons.push("status_not_ready_for_review");
   if ((app.package_blocked || []).length) reasons.push("package_blocked");
-  reasons.push(...(await sendBlockers(c, app.candidate_id, "submit")));
-  const prefs = (await c.query("SELECT residence_country, needs_work_auth_support FROM js_preferences WHERE candidate_id = $1", [app.candidate_id])).rows[0] || {};
-  const job = (await c.query("SELECT country, status FROM js_jobs WHERE id = $1", [app.job_id])).rows[0] || {};
+  reasons.push(...(await sendBlockers(c, cid, "submit")));
+
+  const job = (await c.query("SELECT * FROM js_jobs WHERE id = $1", [app.job_id])).rows[0] || {};
   if (job.status !== "open") reasons.push("job_not_open");
-  const match = (await c.query("SELECT employer_support, employer_support_conflict, overseas_accepted FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [app.candidate_id, app.job_id])).rows[0];
-  const residence = prefs.residence_country ? country(prefs.residence_country) : null;
   const jobCountry = job.country ? country(job.country) : null;
+
+  // Admin-approved scope.
+  const countryLists = listsOf(settings.allowed_countries, rules, "countries");
+  if (!countryLists.length) reasons.push("country_scope_missing");
+  else if (!jobCountry || !countryLists.every((l) => l.map(country).includes(jobCountry))) reasons.push("country_not_allowed");
+  const consent = await consentService.activeConsent(cid, "submit", c);
+  const consentCountries = (consent && consent.scope && consent.scope.countries) || [];
+  if (consentCountries.length && (!jobCountry || !consentCountries.map(country).includes(jobCountry))) reasons.push("country_outside_consent");
+  const profLists = listsOf(settings.allowed_professions, rules, "professions");
+  if (profLists.length) {
+    const title = ` ${normalize(job.title)} `;
+    if (!profLists.every((l) => l.some((p) => normalize(p) && title.includes(` ${normalize(p)} `)))) reasons.push("profession_not_allowed");
+  }
+  const sourceLists = listsOf(settings.allowed_sources, rules, "sources");
+  if (sourceLists.length) {
+    const keys = new Set([job.source_primary, ...(await c.query("SELECT src.key FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = $1", [app.job_id])).rows.map((r) => r.key)].filter(Boolean));
+    if (!sourceLists.every((l) => l.some((k) => keys.has(k)))) reasons.push("source_not_allowed");
+  }
+  if (settings.salary_limit !== null && settings.salary_limit !== undefined) reasons.push("salary_unverifiable");
+
+  // Package: still valid, nothing sensitive, every version admin-approved.
+  const problems = await documentPolicy.revalidateStoredPackage(c, app);
+  if (problems.length) reasons.push(...problems.map((p) => `package_invalid:${p.code}`));
+  const rows = (await c.query("SELECT * FROM js_application_documents WHERE application_id = $1 AND removed_at IS NULL", [app.id])).rows;
+  if (rows.some((r) => r.sensitive)) reasons.push("sensitive_document_never_auto_shared");
+  const approvedDocs = Array.isArray(settings.approved_doc_versions) ? settings.approved_doc_versions : [];
+  if (!approvedDocs.length) reasons.push("no_admin_approved_documents");
+  else if (rows.some((r) => !docVersionApproved(approvedDocs, r))) reasons.push("document_version_not_admin_approved");
+
+  // Caps (0 = no automatic sends).
+  if (!(settings.cap_per_day > 0) || !(settings.cap_per_week > 0)) reasons.push("cap_not_set");
+  else {
+    if ((await countRecentSends(c, cid, "1 day")) >= settings.cap_per_day) reasons.push("cap_per_day_exceeded");
+    if ((await countRecentSends(c, cid, "7 days")) >= settings.cap_per_week) reasons.push("cap_per_week_exceeded");
+  }
+
+  // Label-safety ruling.
+  const prefs = (await c.query("SELECT residence_country, needs_work_auth_support FROM js_preferences WHERE candidate_id = $1", [cid])).rows[0] || {};
+  const match = (await c.query("SELECT employer_support, employer_support_conflict, overseas_accepted FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [cid, app.job_id])).rows[0];
+  const residence = prefs.residence_country ? country(prefs.residence_country) : null;
   const abroad = !residence || !jobCountry || residence !== jobCountry;
   const needsSupport = prefs.needs_work_auth_support !== false;
   if (!match) reasons.push("no_match_record");
@@ -507,6 +601,31 @@ async function autoApproveEligibility(application) {
   }
   const uniq = [...new Set(reasons)];
   return { allowed: uniq.length === 0, reasons: uniq };
+}
+
+/**
+ * The ONLY non-human path to 'approved'. One transaction: candidate lock, application lock,
+ * autoApproveEligibility (incl. package re-validation and job-open check) on the locked state, then
+ * ready_for_review -> approved with actor 'system:auto'. A refusal is audited and changes nothing else.
+ * @returns {Promise<{approved: boolean, reasons: string[], application: object}>}
+ */
+async function autoApprove(applicationId, opts = {}) {
+  const id = posInt(applicationId);
+  if (!id) throw new HttpError(404, "Not found");
+  const run = async (client) => {
+    const app = await lockApplication(client, id);
+    const elig = await autoApproveEligibility(app, { client });
+    if (!elig.allowed) {
+      await audit(client, "system:auto", "application.auto_approve_refused", app.candidate_id, app.id, { reasons: elig.reasons });
+      return { approved: false, reasons: elig.reasons, application: present(app) };
+    }
+    const row = await transition(app.id, "approved", "system:auto", { client, reason: "auto_approved_within_admin_rules", expectFrom: ["ready_for_review"], [SYSTEM_GRANT]: true });
+    await client.query("UPDATE js_application_documents SET approved_at = now() WHERE application_id = $1 AND removed_at IS NULL", [app.id]);
+    await audit(client, "system:auto", "application.auto_approve", app.candidate_id, app.id, { reason: "auto_approved_within_admin_rules" });
+    await event(client, app.candidate_id, "application.approved", { applicationId: app.id, auto: true });
+    return { approved: true, reasons: [], application: present(row) };
+  };
+  return opts.client ? run(opts.client) : inTx(run);
 }
 
 // ---------------------------------------------------------------- CV approval
@@ -682,6 +801,8 @@ module.exports = {
   grantSharing,
   revokeSharing,
   autoApproveEligibility,
+  autoApprove,
+  _internal: { SYSTEM_GRANT },
   approveCvVersion,
   listApplications,
   getApplication,

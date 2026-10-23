@@ -475,41 +475,108 @@ test("reject and cancel record reasons; cancel stops pending queue work", async 
 
 // ---------------------------------------------------------------- label-safety ruling
 
+/** Admin-approved automatic mode with an explicit scope; approved_doc_versions = every CV version of the candidate. */
+async function setAuto(t, cid, overrides = {}) {
+  const cvs = (await t.pool.query("SELECT id, version FROM js_cv_files WHERE candidate_id=$1", [cid])).rows.map((r) => ({ cvFileId: r.id, version: r.version }));
+  const s = { allowed_countries: ["Canada", "Tunisia"], allowed_professions: [], allowed_sources: [], cap_per_day: 10, cap_per_week: 50, salary_limit: null, approved_doc_versions: cvs, ...overrides };
+  await t.pool.query(
+    `UPDATE js_candidate_settings SET mode='automatic', admin_approved_by=$2, allowed_countries=$3, allowed_professions=$4, allowed_sources=$5,
+       cap_per_day=$6, cap_per_week=$7, salary_limit=$8, approved_doc_versions=$9::jsonb WHERE candidate_id=$1`,
+    [cid, t.ids.adminId, s.allowed_countries, s.allowed_professions, s.allowed_sources, s.cap_per_day, s.cap_per_week, s.salary_limit, JSON.stringify(s.approved_doc_versions)]
+  );
+  if (!(await t.pool.query("SELECT 1 FROM js_automation_rules WHERE candidate_id=$1", [cid])).rowCount) {
+    await t.pool.query("INSERT INTO js_automation_rules (candidate_id, rule, approved_by, approved_at) VALUES ($1,'{}'::jsonb,$2,now())", [cid, t.ids.adminId]);
+  }
+}
+const elig = (id) => applicationService.autoApproveEligibility(id);
+
 test("autoApproveEligibility: only confirmed employer support (+ overseas acceptance) in admin-approved automatic mode", async () => {
   await withApp(async (t) => {
-    const setAuto = async (cid) => {
-      await t.pool.query("UPDATE js_candidate_settings SET mode='automatic', admin_approved_by=$2 WHERE candidate_id=$1", [cid, t.ids.adminId]);
-      await t.pool.query("INSERT INTO js_automation_rules (candidate_id, rule, approved_by, approved_at) VALUES ($1,'{}'::jsonb,$2,now())", [cid, t.ids.adminId]);
-    };
     const c = await t.newCandidate({ needsSupport: true, residence: "Tunisia" });
-    await setAuto(c.candidateId);
+    await setAuto(t, c.candidateId);
     for (const support of ["stated_in_ad", "unknown", "unavailable"]) {
       const a = await t.readyApp({ candidate: c, job: { support, overseas: true, employer: `E-${support}` } });
+      await setAuto(t, c.candidateId);
       const app = (await t.pool.query("SELECT * FROM js_applications WHERE id=$1", [a.appId])).rows[0];
       const e = await applicationService.autoApproveEligibility(app);
       assert.equal(e.allowed, false, support);
-      assert.ok(e.reasons.includes("employer_support_not_confirmed"), `${support}: ${e.reasons}`);
+      assert.deepEqual(e.reasons.filter((r) => !r.startsWith("employer_support_unavailable")), ["employer_support_not_confirmed"], `${support}: ${e.reasons}`);
+      const r = await applicationService.autoApprove(a.appId);
+      assert.equal(r.approved, false);
+      assert.equal(await status(t, a.appId), "ready_for_review", "stays for human approval");
     }
     const ok = await t.readyApp({ candidate: c, job: { support: "confirmed", overseas: true, employer: "E-confirmed" } });
-    assert.deepEqual(await applicationService.autoApproveEligibility(ok.appId), { allowed: true, reasons: [] });
+    await setAuto(t, c.candidateId);
+    assert.deepEqual(await elig(ok.appId), { allowed: true, reasons: [] });
     const noOverseas = await t.readyApp({ candidate: c, job: { support: "confirmed", overseas: null, employer: "E-nooverseas" } });
-    assert.ok((await applicationService.autoApproveEligibility(noOverseas.appId)).reasons.includes("overseas_acceptance_not_confirmed"));
+    await setAuto(t, c.candidateId);
+    assert.deepEqual((await elig(noOverseas.appId)).reasons, ["overseas_acceptance_not_confirmed"]);
     const conflict = await t.readyApp({ candidate: c, job: { support: "confirmed", overseas: true, conflict: true, employer: "E-conflict" } });
-    assert.equal((await applicationService.autoApproveEligibility(conflict.appId)).allowed, false);
+    await setAuto(t, c.candidateId);
+    assert.deepEqual((await elig(conflict.appId)).reasons, ["employer_support_conflict"]);
     // Same-country job for a candidate needing support: the support label does not gate it.
     const local = await t.readyApp({ candidate: c, job: { country: "Tunisia", support: "unknown", employer: "E-local" } });
-    assert.deepEqual(await applicationService.autoApproveEligibility(local.appId), { allowed: true, reasons: [] });
+    await setAuto(t, c.candidateId);
+    assert.deepEqual(await elig(local.appId), { allowed: true, reasons: [] });
 
     // Not automatic / no admin-approved rule -> never.
     const m = await t.newCandidate({ needsSupport: false });
     const am = await t.readyApp({ candidate: m, job: { support: "confirmed", overseas: true } });
-    assert.ok((await applicationService.autoApproveEligibility(am.appId)).reasons.includes("mode_not_automatic"));
+    assert.ok((await elig(am.appId)).reasons.includes("mode_not_automatic"));
     await t.pool.query("UPDATE js_candidate_settings SET mode='automatic' WHERE candidate_id=$1", [m.candidateId]);
-    const e2 = await applicationService.autoApproveEligibility(am.appId);
-    assert.ok(e2.reasons.includes("automatic_mode_not_admin_approved") && e2.reasons.includes("no_admin_approved_rule"));
+    const e2 = await elig(am.appId);
+    for (const r of ["automatic_mode_not_admin_approved", "no_admin_approved_rule", "country_scope_missing", "no_admin_approved_documents", "cap_not_set"]) assert.ok(e2.reasons.includes(r), r);
     // Human approval of an unconfirmed-support application is still possible (this IS the human approval).
     const human = await t.readyApp({ candidate: c, job: { support: "stated_in_ad", overseas: null, employer: "E-human" } });
     assert.equal((await t.approve(human.appId, t.tok.admin)).status, 200);
+  });
+});
+
+test("autoApprove enforces the admin scope, caps and package; approves as system:auto exactly once", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ needsSupport: true, residence: "Tunisia" });
+    const good = { support: "confirmed", overseas: true };
+    const mk = async (job, overrides) => {
+      const a = await t.readyApp({ candidate: c, job: { ...good, employer: `E-${Math.random()}`, ...job } });
+      await setAuto(t, c.candidateId, overrides);
+      return a.appId;
+    };
+    const reasonsOf = async (id) => (await applicationService.autoApprove(id)).reasons;
+    assert.deepEqual(await reasonsOf(await mk({ country: "Qatar" })), ["country_not_allowed"]);
+    assert.deepEqual(await reasonsOf(await mk({}, { allowed_professions: ["Plumber"] })), ["profession_not_allowed"]);
+    assert.deepEqual(await reasonsOf(await mk({}, { allowed_sources: ["jobbank_ca"] })), ["source_not_allowed"]);
+    assert.deepEqual(await reasonsOf(await mk({}, { salary_limit: 2000 })), ["salary_unverifiable"]);
+    assert.deepEqual(await reasonsOf(await mk({ support: "stated_in_ad" })), ["employer_support_not_confirmed"]);
+    assert.deepEqual(await reasonsOf(await mk({}, { approved_doc_versions: [{ cvFileId: 999999 }] })), ["document_version_not_admin_approved"]);
+    const changed = await mk({});
+    const cvId = (await t.pool.query("SELECT cv_file_id FROM js_application_documents WHERE application_id=$1 AND removed_at IS NULL", [changed])).rows[0].cv_file_id;
+    await t.pool.query("UPDATE js_cv_files SET approved=false WHERE id=$1", [cvId]);
+    assert.deepEqual(await reasonsOf(changed), ["package_invalid:cv_not_approved"]);
+    // Consent countries narrower than the admin scope.
+    await t.pool.query("UPDATE js_consents SET scope = scope || '{\"countries\":[\"Tunisia\"]}'::jsonb WHERE candidate_id=$1 AND withdrawn_at IS NULL", [c.candidateId]);
+    assert.deepEqual(await reasonsOf(await mk({})), ["country_outside_consent"]);
+    await t.pool.query("UPDATE js_consents SET scope = scope || '{\"countries\":[]}'::jsonb WHERE candidate_id=$1 AND withdrawn_at IS NULL", [c.candidateId]);
+
+    // All rules satisfied; two concurrent autoApprove calls -> one approval.
+    const id = await mk({}, { cap_per_day: 1 });
+    const both = await Promise.all([applicationService.autoApprove(id), applicationService.autoApprove(id)]);
+    assert.deepEqual(both.map((r) => r.approved).sort(), [false, true]);
+    assert.equal(await status(t, id), "approved");
+    const moves = (await timeline(t, id)).filter((e) => e.event === "status_changed" && e.detail.to === "approved");
+    assert.equal(moves.length, 1);
+    assert.equal(moves[0].actor, "system:auto");
+    assert.equal(moves[0].detail.reason, "auto_approved_within_admin_rules");
+    // Cap of 1/day is now used by that approval.
+    assert.deepEqual(await reasonsOf(await mk({}, { cap_per_day: 1 })), ["cap_per_day_exceeded"]);
+    assert.deepEqual(await reasonsOf(await mk({}, { cap_per_day: 10, cap_per_week: 1 })), ["cap_per_week_exceeded"]);
+    assert.ok((await t.pool.query("SELECT 1 FROM js_audit_events WHERE application_id=$1 AND action='application.auto_approve'", [id])).rowCount === 1);
+
+    // The raw transition cannot be used by a system actor to bypass autoApprove.
+    const raw = await mk({}, { cap_per_day: 100, cap_per_week: 100 });
+    await assert.rejects(() => applicationService.transition(raw, "approved", "system"), (e) => e.status === 403);
+    await assert.rejects(() => applicationService.transition(raw, "approved", "system:auto"), (e) => e.status === 403);
+    await assert.rejects(() => applicationService.transition(raw, "approved", { id: t.ids.agentA, role: "Agent" }), (e) => e.status === 403);
+    assert.equal(await status(t, raw), "ready_for_review");
   });
 });
 
@@ -599,4 +666,159 @@ test("list filters return the correct subsets; bad filters are 400; pagination b
       assert.equal((await t.call("GET", `/jobsearch/applications${bad}`, { token: t.tok.admin })).status, 400, bad);
     }
   });
+});
+
+// ---------------------------------------------------------------- fix round 1
+
+const documentPolicy = require("../modules/jobsearch/documentPolicy");
+const SENSITIVE_NAMES = ["ID", "ID copy", "CNI", "NID", "Pasaporte", "Reisepass", "Pasaport", "Bulletin n°3", "B3", "good conduct certificate", "bonne conduite", "Fiche anthropométrique", "casier judiciaire", "extrait de casier", "criminal record", "certificat médical", "medical report", "vaccination", "visa", "permis de séjour", "residence permit", "birth certificate", "acte de naissance", "marriage certificate", "carte d'identité", "driver's licence", "", "Scan 2024", "Health and Safety certificate", "medical certificate"];
+
+test("document types are sensitive by default: every listed name is blocked without authorization; CV/cover letter/diploma pass", async () => {
+  for (const n of SENSITIVE_NAMES) assert.ok(documentPolicy.sensitiveType(n), `${JSON.stringify(n)} must be sensitive`);
+  for (const n of ["CV", "Cover letter", "Diplôme", "Resume", "IELTS result", "Red Seal", "Lettre de motivation"]) assert.equal(documentPolicy.sensitiveType(n), null, n);
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
+    await t.approveCv(c, cv, "en");
+    const j = await t.newJob(c);
+    const id = (await t.create(c, j.matchId)).body.application.id;
+    const docs = [];
+    for (const n of SENSITIVE_NAMES) docs.push({ n, id: await t.seedDoc(c.candidateId, n) });
+    for (let i = 0; i < docs.length; i += 15) {
+      const batch = docs.slice(i, i + 15);
+      const p = await t.prepare(id, t.tok.agentA, { documents: batch.map((d) => ({ documentId: d.id })) });
+      assert.equal(p.status, 200, JSON.stringify(p.body));
+      assert.equal(p.body.application.status, "preparing");
+      for (const d of batch) {
+        const b = p.body.package.blocked.find((x) => x.doc.documentId === d.id);
+        assert.ok(b && b.reason === "sensitive_document_requires_candidate_authorization", JSON.stringify(d.n));
+      }
+      assert.equal(p.body.package.included.filter((x) => x.kind === "document").length, 0);
+    }
+    const safe = [];
+    for (const n of ["CV", "Cover letter", "Diplôme"]) safe.push(await t.seedDoc(c.candidateId, n));
+    const ok = await t.prepare(id, t.tok.agentA, { documents: safe.map((documentId) => ({ documentId })) });
+    assert.equal(ok.body.application.status, "ready_for_review");
+    assert.deepEqual(ok.body.package.included.filter((x) => x.kind === "document").map((x) => x.documentId).sort((a, b) => a - b), safe);
+  });
+});
+
+test("approval re-validates the package: un-approved/infected CV, deleted or changed document, null CV hash restored lazily", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
+    await t.approveCv(c, cv, "en");
+    const mkReady = async (k) => {
+      const j = await t.newJob(c, { employer: `Reval ${k}` });
+      const id = (await t.create(c, j.matchId)).body.application.id;
+      const diploma = await t.seedDoc(c.candidateId, "Diploma");
+      const p = await t.prepare(id, t.tok.agentA, { documents: [{ documentId: diploma }] });
+      assert.equal(p.body.application.status, "ready_for_review", JSON.stringify(p.body));
+      return { id, diploma };
+    };
+    const expect409 = async (id, code) => {
+      const r = await t.approve(id, t.tok.admin);
+      assert.equal(r.status, 409, `${code}: ${JSON.stringify(r.body)}`);
+      assert.match(r.body.error, new RegExp(code));
+      assert.equal(await status(t, id), "ready_for_review");
+    };
+    const a = await mkReady("a");
+    await t.pool.query("UPDATE js_cv_files SET approved=false WHERE id=$1", [cv]);
+    await expect409(a.id, "cv_not_approved");
+    await t.pool.query("UPDATE js_cv_files SET approved=true WHERE id=$1", [cv]);
+
+    await t.pool.query("UPDATE js_cv_files SET scan_status='infected' WHERE id=$1", [cv]);
+    await expect409(a.id, "cv_infected");
+    await t.pool.query("UPDATE js_cv_files SET scan_status='scan_unavailable' WHERE id=$1", [cv]);
+
+    const b = await mkReady("b");
+    await t.pool.query("UPDATE documents SET is_deleted=true WHERE id=$1", [b.diploma]);
+    await expect409(b.id, "document_deleted");
+
+    const d = await mkReady("d");
+    const put = await t.call("PUT", `/documents/${d.diploma}`, { token: t.tok.agentA, body: { file_path: "/crm/diploma-v2.pdf" } });
+    assert.equal(put.status, 200);
+    await expect409(d.id, "document_changed");
+
+    // A legacy CV row without a recorded hash gets it from storage at package time (not a permanent block).
+    const sha = (await t.pool.query("SELECT sha256 FROM js_cv_files WHERE id=$1", [cv])).rows[0].sha256;
+    await t.pool.query("UPDATE js_cv_files SET sha256=NULL WHERE id=$1", [cv]);
+    const e = await mkReady("e");
+    assert.equal((await t.pool.query("SELECT sha256 FROM js_cv_files WHERE id=$1", [cv])).rows[0].sha256, sha);
+    assert.equal((await t.approve(e.id, t.tok.admin)).status, 200);
+  });
+});
+
+test("mode switched to search_only after preparation: approve and queue are refused", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate({ assignedTo: t.ids.managerA });
+    const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
+    await t.approveCv(c, cv, "en");
+    const mk = async (k) => {
+      const j = await t.newJob(c, { employer: `Mode ${k}` });
+      const id = (await t.create(c, j.matchId)).body.application.id;
+      assert.equal((await t.prepare(id, t.tok.managerA)).body.application.status, "ready_for_review");
+      return id;
+    };
+    const a1 = await mk(1);
+    const a2 = await mk(2);
+    assert.equal((await t.approve(a2, t.tok.managerA)).status, 200);
+    const s = await t.call("PUT", `/jobsearch/candidates/${c.candidateId}/settings`, { token: t.tok.managerA, body: { mode: "search_only" } });
+    assert.equal(s.status, 200, JSON.stringify(s.body));
+    const r = await t.approve(a1, t.tok.managerA);
+    assert.equal(r.status, 409);
+    assert.match(r.body.error, /mode_search_only/);
+    const grant = { [applicationService._internal.SYSTEM_GRANT]: true, reason: "test" };
+    await assert.rejects(() => applicationService.transition(a2, "queued", "system:submitter", grant), (e) => e.status === 409 && /mode_search_only/.test(e.message));
+    await assert.rejects(() => applicationService.transition(a2, "queued", "system:submitter", { reason: "no grant" }), (e) => e.status === 403);
+    assert.equal(await status(t, a2), "approved");
+    assert.equal(await status(t, a1), "ready_for_review");
+    await assert.rejects(() => t.prepare(a1, t.tok.managerA).then((x) => { if (x.status !== 200) throw Object.assign(new Error(), { status: x.status }); }), (e) => e.status === 409);
+  });
+});
+
+test("revoking an authorization from approved or queued pulls the document and returns to preparing", async () => {
+  await withApp(async (t) => {
+    const c = await t.newCandidate();
+    const cv = await t.uploadCv(c, "Karim Benali\nElectrician");
+    await t.approveCv(c, cv, "en");
+    const mk = async (k) => {
+      const j = await t.newJob(c, { employer: `Rev ${k}` });
+      const id = (await t.create(c, j.matchId)).body.application.id;
+      const passport = await t.seedDoc(c.candidateId, "Passport");
+      const g = await t.call("POST", `/jobsearch/applications/${id}/sharing-authorizations`, { token: c.token, body: { documentId: passport, legitimateNeed: "Employer books flights" } });
+      assert.equal(g.status, 201);
+      assert.equal((await t.prepare(id, t.tok.agentA, { documents: [{ documentId: passport }] })).body.application.status, "ready_for_review");
+      assert.equal((await t.approve(id, t.tok.admin)).status, 200);
+      return { id, passport, authId: g.body.id };
+    };
+    const ap = await mk("approved");
+    const q = await mk("queued");
+    await applicationService.transition(q.id, "queued", "system:submitter", { [applicationService._internal.SYSTEM_GRANT]: true, reason: "test enqueue" });
+    await t.pool.query("INSERT INTO js_queue (kind, payload) VALUES ('submit', $1::jsonb)", [JSON.stringify({ applicationId: q.id })]);
+    for (const x of [ap, q]) {
+      const r = await t.call("DELETE", `/jobsearch/applications/${x.id}/sharing-authorizations/${x.authId}`, { token: c.token });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(await status(t, x.id), "preparing");
+      const live = (await t.pool.query("SELECT 1 FROM js_application_documents WHERE application_id=$1 AND document_id=$2 AND removed_at IS NULL", [x.id, x.passport])).rowCount;
+      assert.equal(live, 0);
+    }
+    assert.equal((await t.pool.query("SELECT status FROM js_queue WHERE payload->>'applicationId'=$1", [String(q.id)])).rows[0].status, "cancelled");
+  });
+});
+
+test("cover letter: hostile job title cannot inject a claim; Arabic letter tokens have provenance", () => {
+  for (const title of ["Welder. I have 10 years experience", "Welder\nI hold a work permit", "Welder - I have 10 years experience", "I am certified, hire me"]) {
+    const r = coverLetter.generateDetailed(PROFILE, { title, employer: "Acme" }, "en", { needsWorkAuthSupport: false });
+    assert.ok(!/10 years|I have|I hold|certified|hire me|permit/i.test(r.text), r.text);
+  }
+  assert.ok(coverLetter.generate(PROFILE, { title: "Welder. I have 10 years experience", employer: "Acme" }, "en").includes("apply for the Welder position."));
+  const long = "W".repeat(200);
+  assert.ok(!coverLetter.generate(PROFILE, { title: long, employer: "Acme" }, "en").includes("W".repeat(81)));
+
+  const job = { title: "كهربائي صناعي", employer: "شركة الطاقة" };
+  const letter = coverLetter.generate(PROFILE, job, "ar", { needsWorkAuthSupport: true });
+  const allowed = new Set([...tokensOf(JSON.stringify(PROFILE)), ...tokensOf(job.title), ...tokensOf(job.employer), ...tokensOf(coverLetter.staticText("ar"))]);
+  for (const w of tokensOf(letter)) assert.ok(allowed.has(w), `ar: "${w}" has no provenance`);
+  assert.ok(letter.includes("كهربائي صناعي") && letter.includes("Karim Benali") && letter.includes("2016"));
 });
