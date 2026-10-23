@@ -152,17 +152,13 @@ async function createInvoice(user, input, opts = {}) {
     if (!positive) throw new HttpError(400, "Invoice total must be greater than zero");
 
     // Number: the upsert takes the counter row lock until commit, so concurrent creates are serialised and gap-free.
-    const clock = (await client.query("SELECT COALESCE($1::timestamptz, now()) AS ts, to_char(COALESCE($1::timestamptz, now()) AT TIME ZONE 'UTC', 'YYYY') AS y", [nowArg])).rows[0];
-    const counter = (
-      await client.query("INSERT INTO fin_counters (key, value) VALUES ($1, 1) ON CONFLICT (key) DO UPDATE SET value = fin_counters.value + 1 RETURNING value::text AS value", [`invoice-${clock.y}`])
-    ).rows[0];
-    const number = `VITA-${clock.y}-${counter.value.padStart(6, "0")}`;
+    const { number, ts } = await c.nextNumber(client, "VITA", "invoice", nowArg);
 
     const inv = (
       await client.query(
         `INSERT INTO invoices (candidate_id, total_amount, remaining_amount, currency, due_date, status, notes, created_by, number, issued_at, subtotal, tax_amount)
          VALUES ($1, $2::numeric, $2::numeric, $3, $4, 'Pending', $5, $6, $7, $8, $9::numeric, $10::numeric) RETURNING id`,
-        [v.candidateId, tot.total, v.currency, v.dueDate, v.notes, user.id, number, clock.ts, tot.subtotal, tot.tax]
+        [v.candidateId, tot.total, v.currency, v.dueDate, v.notes, user.id, number, ts, tot.subtotal, tot.tax]
       )
     ).rows[0];
 
@@ -348,4 +344,4 @@ async function printInvoice(user, rawId, { lang = "en" } = {}) {
   return renderInvoiceHtml(inv, lang);
 }
 
-module.exports = { createInvoice, listInvoices, getInvoice, voidInvoice, printInvoice, renderInvoiceHtml, taxRatePercent, STATUSES, LANGS, esc };
+module.exports = { loadFull, details, companyHeader, createInvoice, listInvoices, getInvoice, voidInvoice, printInvoice, renderInvoiceHtml, taxRatePercent, STATUSES, LANGS, esc };

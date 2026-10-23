@@ -67,4 +67,17 @@ function pageParams(query) {
   return { limit: limit < 1 ? 1 : limit, offset: num(query.offset, "offset", 0, 1e9) };
 }
 
-module.exports = { HttpError, hasPerm, parseId, inTransaction, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, oneValue, pageParams };
+/**
+ * Draws the next number "<prefix>-YYYY-NNNNNN" from fin_counters (key "<counter>-YYYY", year from the DB clock in UTC).
+ * The upsert holds the counter row lock until the caller's transaction ends, so concurrent callers are serialised
+ * and a rolled-back transaction gives its number back (gap-free). `nowArg` is a test hook for the DB clock.
+ */
+async function nextNumber(client, prefix, counter, nowArg = null) {
+  const clock = (await client.query("SELECT COALESCE($1::timestamptz, now()) AS ts, to_char(COALESCE($1::timestamptz, now()) AT TIME ZONE 'UTC', 'YYYY') AS y", [nowArg])).rows[0];
+  const row = (
+    await client.query("INSERT INTO fin_counters (key, value) VALUES ($1, 1) ON CONFLICT (key) DO UPDATE SET value = fin_counters.value + 1 RETURNING value::text AS value", [`${counter}-${clock.y}`])
+  ).rows[0];
+  return { number: `${prefix}-${clock.y}-${row.value.padStart(6, "0")}`, ts: clock.ts, year: clock.y };
+}
+
+module.exports = { nextNumber, HttpError, hasPerm, parseId, inTransaction, likeEscape, isObj, requirePerm, allowedCurrencies, parseCurrency, cleanText, requiredText, parseDate, oneValue, pageParams };

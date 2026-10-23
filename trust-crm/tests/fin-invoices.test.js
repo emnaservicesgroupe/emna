@@ -562,12 +562,13 @@ test("legacy finance endpoints keep working next to v2 (and only /finance/me sty
     assert.equal(dash.status, 200);
     const li = await http("POST", "/finance/invoices", T.acct, { candidate_id: c, total_amount: 100, currency: "TND" });
     assert.equal(li.status, 201);
-    assert.equal((await q("SELECT number FROM invoices WHERE id=$1", [li.body.id])).rows[0].number, null, "legacy rows stay unnumbered");
+    assert.equal((await q("SELECT number FROM invoices WHERE id=$1", [li.body.id])).rows[0].number, li.body.number, "legacy POST /finance/invoices now assigns a number (Task 3); pre-existing rows stay unnumbered");
+    assert.match(li.body.number, /^VITA-\d{4}-\d{6}$/);
     const lp = await http("POST", "/finance/payments", T.acct, { invoice_id: li.body.id, amount_paid: 40 });
     assert.equal(lp.status, 201);
     assert.equal(lp.body.invoice.remaining_amount, "60.00");
     const listed = await http("GET", "/finance/invoices", T.acct);
-    assert.ok(listed.body.rows.some((r) => r.id === li.body.id && r.number === null), "legacy invoice shows in the v2 list");
+    assert.ok(listed.body.rows.some((r) => r.id === li.body.id && r.number === li.body.number), "legacy invoice shows in the v2 list");
     assert.equal((await http("GET", "/finance/dashboard", T.cand)).status, 403);
     assert.equal((await http("POST", "/finance/invoices", T.agent, { candidate_id: c, total_amount: 1 })).status, 403);
   }));

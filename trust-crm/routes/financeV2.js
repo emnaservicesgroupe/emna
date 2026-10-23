@@ -8,12 +8,18 @@
 //   GET   /invoices/:id                              finance:read (items, payments, refunds, balance)
 //   POST  /invoices/:id/void {reason}                finance:void (409 when live payments exist or already void)
 //   GET   /invoices/:id/print ?lang=ar|en|fr         finance:read -> text/html under a strict CSP
+//   GET   /payments ?invoice_id&candidate_id&method&from&to&include_voided&limit&offset   finance:read -> {rows,total}
+//   POST  /payments/v2 {invoice_id,amount,method,payment_date?,reference?,notes?,idempotency_key?}   finance:write (201; 200 + replayed:true for a repeated key)
+//   POST  /payments/:id/void {reason}                finance:void (409 when already void or refunded)
+//   POST  /payments/:id/refund {amount,reason,reopen?}   finance:refund (400 above the refundable amount)
+//   GET   /payments/:id/receipt ?lang=ar|en|fr       finance:read -> text/html under a strict CSP
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
 const { checkPermission } = require("../middleware/role");
 const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/errorHandler");
 const services = require("../modules/finance/services");
 const invoices = require("../modules/finance/invoices");
+const payments = require("../modules/finance/payments");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -51,6 +57,37 @@ router.get(
       "X-Frame-Options": "DENY",
     });
     res.send(html);
+  })
+);
+
+const sendHtml = (res, html) => {
+  res.set({
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": PRINT_CSP,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+  });
+  res.send(html);
+};
+
+router.get("/payments", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await payments.listPayments(req.user, req.query))));
+router.post(
+  "/payments/v2",
+  checkPermission("finance:write"),
+  asyncHandler(async (req, res) => {
+    const out = await payments.createPayment(req.user, body(req));
+    res.status(out.replayed ? 200 : 201).json(out);
+  })
+);
+router.post("/payments/:id/void", checkPermission("finance:void"), asyncHandler(async (req, res) => res.json(await payments.voidPayment(req.user, req.params.id, body(req)))));
+router.post("/payments/:id/refund", checkPermission("finance:refund"), asyncHandler(async (req, res) => res.status(201).json(await payments.refundPayment(req.user, req.params.id, body(req)))));
+router.get(
+  "/payments/:id/receipt",
+  checkPermission("finance:read"),
+  asyncHandler(async (req, res) => {
+    const lang = typeof req.query.lang === "string" ? req.query.lang : req.query.lang === undefined ? "en" : null;
+    sendHtml(res, await payments.receiptHtml(req.user, req.params.id, { lang }));
   })
 );
 

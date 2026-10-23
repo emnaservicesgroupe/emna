@@ -58,7 +58,7 @@ const ROUTE_RULES = [
   { re: /^POST \/auth\/register$/, allow: NONE, why: "users:write" },
   { re: /^\w+ \/candidates\//, allow: NONE, why: "staff candidate CRUD (/candidates/*)" },
   // finance: legacy (/dashboard, POST /invoices, POST /payments) and stage-4 routes (routes/financeV2.js: /services*, /invoices/v2,
-  // /invoices, /invoices/:id, /invoices/:id/void, /invoices/:id/print). Staff permissions only; Candidate access to /finance/me* is added with Task 4.
+  // /invoices, /invoices/:id, /invoices/:id/void, /invoices/:id/print, /payments, /payments/v2, /payments/:id/{void,refund,receipt}). Staff permissions only; Candidate access to /finance/me* is added with Task 4.
   { re: /^\w+ \/finance\//, allow: NONE, why: "finance" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
