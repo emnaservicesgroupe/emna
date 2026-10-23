@@ -24,6 +24,7 @@ const consentService = require("./consentService");
 const documentPolicy = require("./documentPolicy");
 const jobStore = require("./jobStore");
 const { country } = require("./matching");
+const { detectHandoff } = require("./handoffDetector");
 
 const db = () => require("../../db");
 
@@ -53,7 +54,9 @@ const HANDOFF_REASONS = Object.freeze(["staff_review", "unsupported_channel", "c
 
 const SENDABLE = ["approved", "queued"];
 // An OTHER application in one of these states (or with a counted submission) was already sent / is being sent.
-const IN_FLIGHT_APP = ["queued", "sent", "confirmed_submitted", "outcome_unknown", "interview", "offer", "rejected"];
+// 'needs_staff' counts (staff may be finishing it by hand); an OTHER 'approved' one counts when it is older
+// (lower id): of two approved duplicates exactly one - the older - may go.
+const IN_FLIGHT_APP = ["queued", "sent", "confirmed_submitted", "outcome_unknown", "interview", "offer", "rejected", "needs_staff"];
 const COUNTED_SUBMISSIONS = ["queued", "sent", "confirmed_submitted", "outcome_unknown"];
 const PRIOR_SUBMISSIONS = ["sent", "confirmed_submitted", "outcome_unknown"];
 const DUPLICATE_WINDOW_DAYS = 90;
@@ -165,31 +168,8 @@ function verifyRecipient(employer, email, job) {
   return domain === employerDomain;
 }
 
-// ---------------------------------------------------------------- handoff detection (conservative)
-
-// Order matters: first match wins. False positives only route the item to staff.
-const HANDOFF_PATTERNS = [
-  ["captcha", /\b(?:re)?captcha\b|\bhcaptcha\b|\bi(?:'|’| a)m not a robot\b|\bje ne suis pas un robot\b/],
-  ["payment", /\b(?:application|processing|registration|placement|recruitment|recruiting|agency|service|visa|training|file|handling|administrative|admin)\s+(?:fees?|charges?)\b|\bpay(?:ment of|ing)?\s+(?:an?\s+|the\s+)?(?:fee|deposit)\b|\b(?:fees?|deposit)\s+(?:is\s+|are\s+)?(?:required|payable|due)\b|\bfrais\s+(?:de\s+)?(?:dossier|candidature|inscription|traitement|placement|recrutement|service)\b|\bpayer\s+des\s+frais\b/],
-  ["login", /\blog\s?(?:in|on)\b|\bsign\s?in\b|\bcreate\s+(?:an?|your)\s+(?:account|profile)\b|\bregister\s+(?:on|at|with)\s+(?:our|the)\s+(?:portal|website|site|platform)\b|\bcr[ée]er\s+un\s+compte\b|\bconnectez-vous\b|\bidentifiez-vous\b/],
-  ["legal_declaration", /\bsworn\b|\baffidavit\b|\bstatutory declaration\b|\bdeclare\s+under\s+(?:penalty|oath)\b|\bsign(?:ed)?\s+(?:a\s+|the\s+)?declaration\b|\b(?:d[ée]claration|attestation)\s+sur\s+l['’]honneur\b/],
-  ["custom_questions", /\banswer\s+(?:the\s+)?(?:following|these|our|all)\s+(?:\w+\s+)?questions?\b|\bscreening\s+questions?\b|\bquestionnaire\b|\br[ée]pondez\s+aux\s+questions\b|\bplease\s+answer\b/],
-];
-const FLAG_KEYS = { requires_captcha: "captcha", requires_payment: "payment", requires_login: "login", requires_legal_declaration: "legal_declaration", requires_custom_questions: "custom_questions" };
-
-/** Handoff reason for the job (explicit js_jobs.flags when such a column exists, else the ad text), or null. */
-function detectHandoff(job) {
-  const flags = job && job.flags && typeof job.flags === "object" ? job.flags : null;
-  if (flags) {
-    for (const [k, reason] of Object.entries(FLAG_KEYS)) if (flags[k] === true) return { reason, source: `flag:${k}` };
-  }
-  const text = job && typeof job.description_text === "string" ? job.description_text.slice(0, 20000).normalize("NFKC").toLowerCase() : "";
-  for (const [reason, re] of HANDOFF_PATTERNS) {
-    const m = re.exec(text);
-    if (m) return { reason, source: `text:"${m[0].slice(0, 60)}"` };
-  }
-  return null;
-}
+// ---------------------------------------------------------------- handoff detection
+// Lives in ./handoffDetector (conservative, biased toward false positives); re-exported here.
 
 // ---------------------------------------------------------------- helpers
 
@@ -222,6 +202,50 @@ async function runRecheck(fn, jobId, now) {
   } catch (err) {
     return { status: null, verified: false, reason: `recheck_failed:${String((err && err.message) || err).slice(0, 100)}` };
   }
+}
+
+function employerOf(job) {
+  return job && job.e_id ? { domain: job.e_domain, verified_contact_email: job.e_contact } : null;
+}
+
+/**
+ * The address a send would use, and where it came from: opts.recipient ('opts'), the employer's
+ * staff-verified contact ('verified_contact'), else the single address the posting names
+ * ('employer_domain' when at the employer's staff-set domain, otherwise 'posted_in_ad'). When the
+ * posting names several, the single one at the employer domain wins; otherwise ambiguous.
+ */
+function pickRecipient(job, optsRecipient) {
+  const employer = employerOf(job);
+  const empDomain = employer ? normalizeDomain(employer.domain) : null;
+  const verified = employer ? normalizeEmail(employer.verified_contact_email) : null;
+  const atEmployer = (a) => Boolean(a && empDomain && !isFreeMail(empDomain) && a.slice(a.indexOf("@") + 1) === empDomain);
+  const out = (recipient, source, extra = {}) => ({ recipient, source, domainMatchesEmployer: atEmployer(recipient), verifiedContact: Boolean(recipient && verified && recipient === verified), ...extra });
+  if (optsRecipient !== undefined && optsRecipient !== null) return out(normalizeEmail(optsRecipient), "opts");
+  if (verified) return out(verified, "verified_contact");
+  const posted = postedAddresses(job);
+  if (posted.length === 1) return out(posted[0], atEmployer(posted[0]) ? "employer_domain" : "posted_in_ad");
+  const mine = posted.filter(atEmployer);
+  if (mine.length === 1) return out(mine[0], "employer_domain");
+  return out(null, null, { ambiguous: posted.length > 1 });
+}
+
+const JOB_WITH_EMPLOYER_SQL = `SELECT j.*, e.id AS e_id, e.name AS e_name, e.domain AS e_domain, e.verified_contact_email AS e_contact
+       FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1`;
+
+/**
+ * Read-only: which address a send of this application would go to, so T9/T11/UI can show it to the
+ * human approver. null for an unknown application.
+ * @returns {Promise<{recipient: string|null, source: 'opts'|'verified_contact'|'employer_domain'|'posted_in_ad'|null, domainMatchesEmployer: boolean, verifiedContact: boolean, ambiguous?: boolean}|null>}
+ */
+async function resolveRecipient(applicationId, opts = {}) {
+  const id = posInt(applicationId);
+  if (!id) return null;
+  const c = opts.client || db();
+  const app = (await c.query("SELECT job_id FROM js_applications WHERE id = $1", [id])).rows[0];
+  if (!app) return null;
+  const job = (await c.query(JOB_WITH_EMPLOYER_SQL, [app.job_id])).rows[0];
+  if (!job) return { recipient: null, source: null, domainMatchesEmployer: false, verifiedContact: false };
+  return pickRecipient(job, opts.recipient);
 }
 
 const canonSet = (urls) => new Set(urls.map((u) => jobStore.canonicalUrl(u)).filter(Boolean));
@@ -279,11 +303,7 @@ async function evaluate(client, id, now, recheck, opts) {
   // 2. Candidate.
   if (!cand || cand.is_deleted) return fail(notes, "candidate_deleted", "The candidate record is deleted");
 
-  const job = (await q(
-    `SELECT j.*, e.id AS e_id, e.name AS e_name, e.domain AS e_domain, e.verified_contact_email AS e_contact
-       FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1`,
-    [app.job_id]
-  )).rows[0];
+  const job = (await q(JOB_WITH_EMPLOYER_SQL, [app.job_id])).rows[0];
   const jobCountry = job && job.country ? country(job.country) : null;
 
   // 3. Consent (active, submit scope, countries).
@@ -353,6 +373,8 @@ async function evaluate(client, id, now, recheck, opts) {
       "staff_review"
     );
   }
+  const ownQueued = (await q("SELECT count(*)::int AS n FROM js_submissions WHERE application_id = $1 AND status = 'queued'", [app.id])).rows[0].n;
+  if (ownQueued > 1) return fail(notes, "duplicate_submission", `This application has ${ownQueued} queued submission attempts; only one may exist`, "staff_review");
   const dup = await findDuplicate(client, app, job, now);
   if (dup) return fail(notes, "duplicate", dup);
 
@@ -395,6 +417,7 @@ async function evaluate(client, id, now, recheck, opts) {
   )).rows[0];
   for (const [label, cap, used, span] of [["day", settings.cap_per_day, counts.day, "24 hours"], ["week", settings.cap_per_week, counts.week, "7 days"]]) {
     if (cap === null || cap === undefined) {
+      // DORMANT: cap_per_day / cap_per_week are NOT NULL DEFAULT 0 today; kept for a future nullable schema.
       if (!approval.human) return fail(notes, "cap_exceeded", `No cap_per_${label} set: automatic sends need explicit caps`);
       continue; // unlimited only for human-approved applications
     }
@@ -402,28 +425,32 @@ async function evaluate(client, id, now, recheck, opts) {
     if (used >= cap) return fail(notes, "cap_exceeded", `cap_per_${label} ${cap} reached (${used} in the last ${span})`);
   }
 
-  // 14. Recipient.
+  // 14. Recipient. Human approval: the posting's own address is acceptable (the approver sees it via
+  // resolveRecipient). System approval: ONLY the staff-verified contact or an address at the
+  // staff-set employer domain - ad text is untrusted and must not choose where an automatic send goes.
   const channel = nonEmpty(app.channel) ? app.channel.trim().toLowerCase() : "email";
   if (channel !== "email") return fail(notes, "recipient_unverified", `Channel ${channel} is not supported for automatic sending`, "unsupported_channel");
-  const employer = job.e_id ? { domain: job.e_domain, verified_contact_email: job.e_contact } : null;
-  let target = opts.recipient;
-  if (target === undefined || target === null) {
-    if (employer && nonEmpty(employer.verified_contact_email)) target = employer.verified_contact_email;
-    else {
-      const posted = postedAddresses(job);
-      if (posted.length > 1) return fail(notes, "recipient_unverified", `The posting names several addresses (${posted.length}); staff must choose`, "unsupported_channel");
-      target = posted[0];
-    }
+  const employer = employerOf(job);
+  const target = pickRecipient(job, opts.recipient);
+  if (!target.recipient) {
+    if (target.source === "opts") return fail(notes, "recipient_unverified", "The recipient is not a valid plain email address");
+    return fail(notes, "recipient_unverified", target.ambiguous ? "The posting names several addresses; staff must choose" : "No recipient address for this application", "unsupported_channel");
   }
-  if (!nonEmpty(target)) return fail(notes, "recipient_unverified", "No recipient address for this application", "unsupported_channel");
-  if (!verifyRecipient(employer, target, job)) return fail(notes, "recipient_unverified", "The recipient is not the employer's domain nor an address named in the posting");
-  const recipient = normalizeEmail(target);
+  if (!approval.human) {
+    if (!target.verifiedContact && !target.domainMatchesEmployer) {
+      return fail(notes, "recipient_unverified", `Automatic sending only goes to the employer's verified contact or an address at the employer's verified domain; ${target.recipient} (${target.source}) needs a human`, "staff_review");
+    }
+  } else if (!verifyRecipient(employer, target.recipient, job)) {
+    return fail(notes, "recipient_unverified", "The recipient is not the employer's domain nor an address named in the posting");
+  }
+  const recipient = target.recipient;
 
-  // 15. Handoff-only postings (captcha, payment, login, legal declaration, custom questions).
-  const handoff = detectHandoff(job);
+  // 15. Handoff-only postings (captcha, payment, legal declaration, login, online-only, custom questions).
+  const prefs = (await q("SELECT salary_min, availability, residence_country FROM js_preferences WHERE candidate_id = $1", [cid])).rows[0] || {};
+  const handoff = detectHandoff(job, prefs);
   if (handoff) return fail(notes, "handoff_required", `The posting requires a human step (${handoff.reason}; ${handoff.source})`, handoff.reason);
 
-  return { ok: true, recipient, notes, approval: { actor: approval.actor, human: approval.human } };
+  return { ok: true, recipient, recipientSource: target.source, domainMatchesEmployer: target.domainMatchesEmployer, notes, approval: { actor: approval.actor, human: approval.human } };
 }
 
 /** Another application of this candidate already sent / being sent for the same vacancy, or null. */
@@ -433,7 +460,7 @@ async function findDuplicate(client, app, job, now) {
             (SELECT max(COALESCE(s.sent_at, s.created_at)) FROM js_submissions s WHERE s.application_id = a.id AND s.status = ANY($3::text[])) AS last_sub
        FROM js_applications a JOIN js_jobs j ON j.id = a.job_id LEFT JOIN js_employers e ON e.id = j.employer_id
       WHERE a.candidate_id = $1 AND a.id <> $2
-        AND (a.status = ANY($4::text[]) OR EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id AND s.status = ANY($3::text[])))
+        AND (a.status = ANY($4::text[]) OR (a.status = 'approved' AND a.id < $2) OR EXISTS (SELECT 1 FROM js_submissions s WHERE s.application_id = a.id AND s.status = ANY($3::text[])))
       ORDER BY a.id`,
     [app.candidate_id, app.id, COUNTED_SUBMISSIONS, IN_FLIGHT_APP]
   )).rows;
@@ -452,11 +479,15 @@ async function findDuplicate(client, app, job, now) {
     const oEmp = jobStore.normalizeEmployer(o.employer_name || "");
     const oCity = jobStore.normalizeCity(o.location);
     const at = new Date(o.last_sub || o.updated_at).getTime();
-    if (emp && oEmp === emp && title && jobStore.normalize(o.title) === title && (!city || !oCity || city === oCity) && at > since) {
-      return `Application ${o.id} (${o.status}) went to the same employer for the same title${city && oCity ? " and city" : ""} within ${DUPLICATE_WINDOW_DAYS} days`;
+    if (!title || jobStore.normalize(o.title) !== title || at <= since) continue;
+    if (emp && oEmp) {
+      if (oEmp === emp && (!city || !oCity || city === oCity)) return `Application ${o.id} (${o.status}) went to the same employer for the same title${city && oCity ? " and city" : ""} within ${DUPLICATE_WINDOW_DAYS} days`;
+    } else if (city && oCity && city === oCity) {
+      // One side has no employer record: same title + same city within the window is treated as the same vacancy.
+      return `Application ${o.id} (${o.status}) has the same title and city (employer unknown on one side) within ${DUPLICATE_WINDOW_DAYS} days`;
     }
   }
   return null;
 }
 
-module.exports = { check, verifyRecipient, normalizeEmail, normalizeDomain, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };
+module.exports = { check, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };

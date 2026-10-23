@@ -7,6 +7,7 @@ const os = require("os");
 const path = require("path");
 const { createTestDb } = require("./helpers/db");
 const { makePdf } = require("./helpers/docs");
+const PHRASES = require("./fixtures/js-handoff-phrases");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "js-guard-test-secret";
@@ -385,8 +386,10 @@ test("duplicate: same vacancy stored twice (cross-source) -> first allowed, seco
   await applicationService.prepareApplication({ id: bApp, actor: a.manager });
   await applicationService.approveApplication({ id: bApp, actor: a.manager, reason: "ok" });
 
-  assert.equal((await check(a.appId)).ok, true, "both merely approved: neither is a prior send yet");
-  assert.equal((await check(bApp)).ok, true);
+  // Both merely approved: the OLDER one may go, the newer one is the duplicate.
+  assert.equal((await check(a.appId)).ok, true, "older approved duplicate is allowed");
+  let r0 = await check(bApp);
+  assert.equal(r0.code, "duplicate", "newer approved duplicate is blocked");
   // A is queued for sending -> B is a duplicate.
   await applicationService.transition(a.appId, "queued", a.manager);
   await sub(a.appId, "queued");
@@ -769,4 +772,155 @@ test("race: two concurrent guard+mark-queued flows for one candidate with cap 1/
   assert.equal(results.filter((r) => !r.ok)[0].code, "cap_exceeded");
   const queued = (await q("SELECT count(*)::int AS n FROM js_submissions s JOIN js_applications a ON a.id=s.application_id WHERE a.candidate_id=$1", [w.candidateId])).rows[0].n;
   assert.equal(queued, 1);
+});
+
+// ---------------------------------------------------------------- fix round 1
+
+test("recipient under automatic approval: an address only the ad names -> recipient_unverified/staff_review; human approval may use it", async () => {
+  const scamText = "Electrician wanted. Apply: hr@employer-careers-fast.com";
+  // Auto-approved, employer has a staff-set domain but no verified contact; the ad names an unrelated address.
+  const auto = await world({ auto: true, contact: null, text: scamText });
+  let r = await check(auto.appId);
+  assert.equal(r.code, "recipient_unverified", JSON.stringify(r));
+  assert.equal(r.handoff, "staff_review");
+  assert.match(r.detail, /posted_in_ad/);
+  assert.deepEqual(await guard.resolveRecipient(auto.appId), { recipient: "hr@employer-careers-fast.com", source: "posted_in_ad", domainMatchesEmployer: false, verifiedContact: false });
+  // Explicit recipient at an unrelated domain is refused for auto too.
+  assert.equal((await check(auto.appId, { recipient: "hr@employer-careers-fast.com" })).handoff, "staff_review");
+
+  // Same ad, human approval: allowed, and the source is visible.
+  const human = await world({ contact: null, text: scamText });
+  r = await check(human.appId);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.recipient, "hr@employer-careers-fast.com");
+  assert.equal(r.recipientSource, "posted_in_ad");
+  assert.equal(r.domainMatchesEmployer, false);
+
+  // The ad names an address AT the staff-set employer domain -> ok for auto.
+  const atDomain = await world({ auto: true, contact: null, text: "Apply: Careers@DOMAIN_PLACEHOLDER" });
+  await q("UPDATE js_jobs SET description_text = $2 WHERE id = $1", [atDomain.jobId, `Apply: Careers@${atDomain.domain}`]);
+  r = await check(atDomain.appId);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.recipientSource, "employer_domain");
+  assert.equal(r.domainMatchesEmployer, true);
+  // ...but not when the employer has no staff-set domain.
+  await q("UPDATE js_employers SET domain = NULL WHERE id = $1", [atDomain.employerId]);
+  r = await check(atDomain.appId);
+  assert.equal(r.code, "recipient_unverified");
+  assert.equal(r.handoff, "staff_review");
+
+  // verified_contact_email matches -> ok for auto, even at a free-mail address.
+  const verified = await world({ auto: true, contact: "Owner.Shop@gmail.com", text: scamText });
+  r = await check(verified.appId);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.recipient, "owner.shop@gmail.com");
+  assert.equal(r.recipientSource, "verified_contact");
+  assert.equal((await guard.resolveRecipient(verified.appId)).verifiedContact, true);
+  assert.equal(await guard.resolveRecipient(99999999), null);
+  // resolveRecipient runs inside a caller's transaction too.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("UPDATE js_employers SET verified_contact_email = 'jobs@other.example' WHERE id = $1", [verified.employerId]);
+    assert.equal((await guard.resolveRecipient(verified.appId, { client })).recipient, "jobs@other.example");
+    await client.query("ROLLBACK");
+  } finally {
+    client.release();
+  }
+});
+
+test("reviewer recipient attack table (attack.js): every case", () => {
+  const emp = { domain: "employer.com", verified_contact_email: null };
+  const jobNone = { description_text: "Apply now." };
+  const jobNamed = { description_text: "Send CV to jobs.employer@gmail.com" };
+  const cases = [
+    ["hr@employer.com", true, jobNone], ["hr@sub.employer.com", false, jobNone], ["hr@employer.com.evil.com", false, jobNone],
+    ["hr@evil-employer.com", false, jobNone], ["hr@employer-com.evil.com", false, jobNone], ["hr@employer.co", false, jobNone],
+    ["employer.com@evil.com", false, jobNone], ["hr@employer.com@evil.com", false, jobNone], ["employer.com <x@evil.com>", false, jobNone],
+    ["x@employer.com,y@evil.com", false, jobNone], ["x@employer.com;y@evil.com", false, jobNone], ["a@employer.com\r\nBcc: z@evil.com", false, jobNone],
+    ["a@employer.com\nBcc:z@evil.com", false, jobNone], ["a@xn--employr-6ya.com", false, jobNone], ["a@xn--mployer-2fg.com", false, jobNone],
+    ["a@еmployer.com", false, jobNone], ["a@employer.com.", false, jobNone], ["A@EMPLOYER.COM", true, jobNone],
+    ["ａ@ｅｍｐｌｏｙｅｒ．ｃｏｍ", true, jobNone], [" a@employer.com\t", true, jobNone], ["a @employer.com", false, jobNone],
+    ['"a@evil.com"@employer.com', false, jobNone], ["a+jobs@employer.com", true, jobNone], ["a%40evil.com@employer.com", false, jobNone],
+    ["a@employer%2ecom", false, jobNone], ["a@employer.com%0d%0abcc:x@evil.com", false, jobNone], ["a@EMPLOYER.com.evil.com", false, jobNone],
+    ["a@employer.com\u0000", false, jobNone], ["a@employer.com​", false, jobNone], ["a@[127.0.0.1]", false, jobNone],
+    ["a@employer.c0m", false, jobNone], ["a@employer", false, jobNone], ["a@.employer.com", false, jobNone],
+    ["a@employer.com/evil", false, jobNone], ["a(comment)@employer.com", false, jobNone], ["a@employer.com (x@evil.com)", false, jobNone],
+    ["mailto:a@employer.com", false, jobNone], ["a@employer.com?bcc=x@evil.com", false, jobNone],
+    ["jobs.employer@gmail.com", true, jobNamed], ["other@gmail.com", false, jobNamed], ["jobs.employer@googlemail.com", false, jobNamed],
+    ...["gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "protonmail.com", "aol.com", "gmx.com", "gmx.de", "yandex.ru", "live.com", "msn.com", "hotmail.fr", "yahoo.fr", "outlook.fr", "live.fr", "yahoo.co.uk", "hotmail.co.uk", "live.co.uk", "gmx.fr", "yandex.com", "aol.fr", "icloud.fr", "me.com", "mail.com", "orange.fr"].map((d) => [`x@${d}`, false, jobNone]),
+  ];
+  for (const [a, want, job] of cases) assert.equal(guard.verifyRecipient(emp, a, job), want, JSON.stringify(a));
+  for (const d of ["gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "aol.com", "gmx.de", "yandex.ru", "live.com", "msn.com", "hotmail.fr", "yahoo.co.uk", "gmx.net", "gmx.at", "web.de", "yandex.com", "outlook.co.uk"]) {
+    assert.equal(guard.verifyRecipient({ domain: d }, `x@${d}`, jobNone), false, `employer.domain=${d}`);
+  }
+  // Extraction quirks: whole token kept (never truncated to the employer domain), mailto query dropped.
+  assert.deepEqual(guard.postedAddresses({ description_text: "mail a@employer.com.evil.com" }), ["a@employer.com.evil.com"]);
+  assert.deepEqual(guard.postedAddresses({ description_text: "<a href='mailto:x@evil.com?subject=hi'>" }), ["x@evil.com"]);
+});
+
+test("handoff detector corpus: >=60 EN/FR phrasings flagged with the right reason, >=25 ordinary ads not flagged", () => {
+  const ctx = { salary_min: 1000, availability: "now", residence_country: "Tunisia" };
+  assert.ok(PHRASES.POS.length >= 60 && PHRASES.NEG.length >= 25);
+  for (const [text, reason] of PHRASES.POS) {
+    const r = guard.detectHandoff({ description_text: text }, ctx);
+    assert.ok(r, `not flagged: ${text}`);
+    assert.equal(r.reason, reason, `${text} -> ${r.source}`);
+  }
+  for (const text of PHRASES.NEG) {
+    const r = guard.detectHandoff({ description_text: text }, ctx);
+    assert.equal(r, null, `false positive: ${text} -> ${r && `${r.reason} ${r.source}`}`);
+  }
+  // Every reviewer (handoff.js) case, verbatim: positives flagged, the five negatives not.
+  const reviewerNeg = ["Sign-on bonus available.", "No fees charged to applicants.", "We never ask candidates to pay any fee.", "Aucuns frais ne sont demandés aux candidats.", "Login credentials will be provided after hiring."];
+  for (const t of reviewerNeg) assert.ok(PHRASES.NEG.includes(t));
+  // "please state your X": a custom answer unless the confirmed preferences hold X.
+  for (const t of ["Please indicate your availability.", "Please state your salary expectations.", "Indicate your country of residence."]) {
+    assert.equal(guard.detectHandoff({ description_text: t }, {}).reason, "custom_questions", t);
+    assert.equal(guard.detectHandoff({ description_text: t }, ctx), null, t);
+  }
+  // Multi-sentence ad: a harmless sentence does not mask a dangerous one; flags column wins when present.
+  assert.equal(guard.detectHandoff({ description_text: "We pay $25/hour. Fees paid by employer. Candidates must pay a $300 deposit to secure your seat." }).reason, "payment");
+  assert.equal(guard.detectHandoff({ description_text: "Normal ad.", flags: { requires_online_only: true } }).reason, "unsupported_channel");
+});
+
+test("handoff via the guard uses the candidate's preferences for 'please state your ...' requests", async () => {
+  const w = await world();
+  await q("UPDATE js_jobs SET description_text = $2 WHERE id = $1", [w.jobId, `Electrician wanted. Send your CV to jobs@${w.domain}. In your email please indicate your availability.`]);
+  let r = await check(w.appId);
+  assert.equal(r.code, "handoff_required");
+  assert.equal(r.handoff, "custom_questions");
+  await q("UPDATE js_preferences SET availability = 'immediately' WHERE candidate_id = $1", [w.candidateId]);
+  r = await check(w.appId);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  await q("UPDATE js_jobs SET description_text = $2 WHERE id = $1", [w.jobId, `Send your CV to jobs@${w.domain}. Email applications are not accepted - apply via our careers portal.`]);
+  r = await check(w.appId);
+  assert.equal(r.handoff, "unsupported_channel");
+});
+
+test("duplicate minors: other app in needs_staff blocks; employer missing on one side matches title+city; two own queued rows", async () => {
+  const w = await world({ title: "Pipe Fitter", location: "Calgary, AB" });
+  const other = await addJob(w, { title: "Pipe Fitter", location: "Calgary", employer: `Other Co ${n}` });
+  const otherApp = (await applicationService.createFromMatch({ matchId: other.matchId, actor: w.manager })).id;
+  assert.equal((await check(w.appId)).ok, true);
+  await q("UPDATE js_applications SET status='needs_staff' WHERE id=$1", [otherApp]);
+  assert.equal((await check(w.appId)).ok, true, "different employer, both known: not a duplicate");
+  await q("UPDATE js_jobs SET employer_id = NULL WHERE id=$1", [other.jobId]);
+  let r = await check(w.appId);
+  assert.equal(r.code, "duplicate", JSON.stringify(r));
+  assert.match(r.detail, /employer unknown/);
+  await q("UPDATE js_jobs SET location = 'Edmonton' WHERE id=$1", [other.jobId]);
+  assert.equal((await check(w.appId)).ok, true, "employer unknown + different city: not matched");
+  // needs_staff for the same posting URL blocks.
+  await q("UPDATE js_jobs SET url = (SELECT url FROM js_jobs WHERE id=$2) WHERE id=$1", [other.jobId, w.jobId]);
+  assert.equal((await check(w.appId)).code, "duplicate");
+  await q("UPDATE js_applications SET status='cancelled' WHERE id=$1", [otherApp]);
+  assert.equal((await check(w.appId)).ok, true);
+  // Two queued attempts of THIS application.
+  await sub(w.appId, "queued");
+  assert.equal((await check(w.appId)).ok, true, "one queued attempt (the current one) is fine");
+  await sub(w.appId, "queued");
+  r = await check(w.appId);
+  assert.equal(r.code, "duplicate_submission");
+  assert.equal(r.handoff, "staff_review");
 });
