@@ -1453,7 +1453,8 @@
   }
 
   // ================================================================ employers & rules (Task 18)
-  function canEditEmployers() { return isAdmin() || role() === "Manager"; }
+  // Task 20: renames re-key matching and can redirect where verified contacts apply - administrators only.
+  function canEditEmployers() { return isAdmin(); }
   function splitList(v) { return v.split(",").map(function (x) { return x.trim(); }).filter(Boolean); }
   function field(id, labelKey, input, hintKey) {
     return h("div", { class: "field" }, h("label", { for: id, text: t(labelKey) }), input, hintKey ? h("span", { class: "hint", text: t(hintKey) }) : null);

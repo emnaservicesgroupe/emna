@@ -1,9 +1,10 @@
 // Employer directory, automation rules and the employer-confirmation list (Task 18), mounted at /jobsearch:
 //   GET    /employers                    ?q&page&pageSize  staff (jobsearch:read): admins see all; other staff see
 //                                        employers of jobs their (non-deleted) candidates have applications for
-//   PUT    /employers/:id                {domain?, verifiedContactEmail?, name?}  jobsearch:admin; a Manager may change
-//                                        only the name of an employer in their scope (Task 19: domain and
-//                                        verifiedContactEmail decide where automatic sends go). Domain normalised (URL/www/trailing dot, IDN ->
+//   PUT    /employers/:id                {domain?, verifiedContactEmail?, name?}  jobsearch:admin ONLY (Task 19: domain
+//                                        and verifiedContactEmail decide where automatic sends go; Task 20: a rename
+//                                        re-keys matching by normalized name and can redirect where verified contacts
+//                                        apply, so Managers may not rename either). Domain normalised (URL/www/trailing dot, IDN ->
 //                                        punycode); free-mail domains, e-mail addresses, ports and IPs refused;
 //                                        normalized names stay unique; audited (before/after)
 //   GET    /automation-rules             ?candidateId  jobsearch:admin
@@ -134,7 +135,7 @@ function cleanContact(raw) {
 
 router.put("/employers/:id", verifyToken, asyncHandler(async (req, res) => {
   const user = req.user;
-  if (!hasPerm(user, "jobsearch:admin") && user.role !== "Manager") throw new HttpError(403, "Administrators or managers only");
+  if (!hasPerm(user, "jobsearch:admin")) throw new HttpError(403, "Only an administrator (jobsearch:admin) can change an employer's name, domain and verifiedContactEmail");
   const id = posInt(req.params.id);
   if (!id) throw new HttpError(404, "Not found");
   const b = body(req);
@@ -142,9 +143,6 @@ router.put("/employers/:id", verifyToken, asyncHandler(async (req, res) => {
   const unknown = Object.keys(b).filter((k) => !allowed.includes(k));
   if (unknown.length) throw new HttpError(400, `Unknown field(s): ${unknown.join(", ")}`);
   if (!allowed.some((k) => k in b)) throw new HttpError(400, "Nothing to change: send domain, verifiedContactEmail and/or name");
-  if (!hasPerm(user, "jobsearch:admin") && ("domain" in b || "verifiedContactEmail" in b)) {
-    throw new HttpError(403, "Only an administrator (jobsearch:admin) can change an employer's domain and verifiedContactEmail; managers may change the name");
-  }
   const patch = {};
   if ("domain" in b) patch.domain = cleanDomain(b.domain);
   if ("verifiedContactEmail" in b) patch.verified_contact_email = cleanContact(b.verifiedContactEmail);

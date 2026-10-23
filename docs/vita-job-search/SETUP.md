@@ -292,7 +292,8 @@ What each permission allows (always limited to the candidates the user may see):
   send reply drafts, change a candidate's mode (except to `automatic`).
 - **jobsearch:admin** (Admin, SuperAdmin) — `automatic` mode, caps, allowed countries/professions/sources,
   module and source pauses, scheduler and queue runs, automation rules, the employer's verified **domain and
-  contact address** (Task 19: Managers may only rename an employer), employer-support confirmations,
+  contact address** and its **name** (Task 19/20: a rename re-keys job matching by normalized name and can
+  redirect where a verified contact applies, so Managers cannot rename either), employer-support confirmations,
   candidate accounts, suspending/reinstating users (never one's own account, never the last active
   SuperAdmin).
 - **Health** (`GET /jobsearch/health`) is shown to Manager, Admin and SuperAdmin.
@@ -576,7 +577,7 @@ of distinct `js_cv_files.storage_key` values.
 | Withdraw consent for a candidate | Portal (candidate) | `POST /jobsearch/candidates/:id/consent/withdraw` `{ "scopeKey": "submit" }` (`search`, `prepare`, `submit` or `all`) |
 | Suspend / reinstate a user (staff or candidate; ends their sessions) | — | `POST /jobsearch/admin/users/:id/suspend` · `/reinstate` (admin; your own account and the last active SuperAdmin are refused with 409) |
 | Approve a CV version | Portal step 1 (candidate) · drawer "CV versions" (Manager/Admin, note required) | `POST /jobsearch/cv-files/:id/approve` |
-| Employer directory: verified domain / contact (Admin only), name (Admin; Manager for employers of their candidates) | Employers & rules | `GET /jobsearch/employers?q=` · `PUT /jobsearch/employers/:id` `{ "domain", "verifiedContactEmail", "name" }` (a Manager sending `domain`/`verifiedContactEmail` gets 403) |
+| Employer directory: verified domain / contact and name (Admin only, Task 20) | Employers & rules | `GET /jobsearch/employers?q=` · `PUT /jobsearch/employers/:id` `{ "domain", "verifiedContactEmail", "name" }` (any non-admin, Managers included, gets 403) |
 | Add a job by hand | Employers & rules (staff with write access) | `POST /jobsearch/jobs/manual` |
 | Record / revoke employer-support confirmation | Employers & rules (Admin) | `POST /jobsearch/employer-confirmations` · `GET` (list) · `DELETE /jobsearch/employer-confirmations/:id` |
 | Automation rules | Employers & rules (Admin) | `GET /jobsearch/automation-rules` · `POST` · `DELETE /jobsearch/automation-rules/:id` (disables) |

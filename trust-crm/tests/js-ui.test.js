@@ -381,7 +381,8 @@ test("Task 18 admin 'Employers & rules' panel: directory, manual import (https o
   assert.match(js, /if \(n\.length < 10\) \{ note\.setAttribute\("aria-invalid", "true"\); note\.focus\(\); V\.toast\(t\("conf\.noteTooShort"\)/);
   assert.match(js, /wide \? \{ employerId: app\.employer\.id, evidenceNote: n \} : \{ applicationId: app\.id, evidenceNote: n \}/, "job-specific vs employer-wide");
   assert.match(js, /\$\("#confirm-card"\)\.hidden = !isAdmin\(\);\s*\$\("#rules-card"\)\.hidden = !isAdmin\(\);/);
-  assert.match(js, /function canEditEmployers\(\) \{ return isAdmin\(\) \|\| role\(\) === "Manager"; \}/);
+  // Task 20: renames re-key matching - the whole employer edit form is admin-only
+  assert.match(js, /function canEditEmployers\(\) \{ return isAdmin\(\); \}/);
   const en = I18N.dictionaries.en;
   for (const k of ["conf.scopeJobHint", "conf.scopeEmployerHint", "rules.hint", "ruleType.auto_submit", "ruleType.ack_reply"]) assert.ok(en[k], k);
 });

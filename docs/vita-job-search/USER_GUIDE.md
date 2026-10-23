@@ -125,9 +125,9 @@ document and sends the application back to preparing.
 - **Search now** queues a search; results appear after the next worker run.
 - Health shows failing sources, the queue and stuck items. Reports and CSV exports show only your
   candidates.
-- **Employers & rules**: search the employer directory; only admins set an employer's verified domain and
-  contact address, which decide where automatic sends may go (managers may rename employers of their
-  candidates). Any staff member with write access can add a job by hand (https links only). Admins record
+- **Employers & rules**: search the employer directory; only admins edit an employer (verified domain and
+  contact address, which decide where automatic sends may go, and the name, which decides how jobs are
+  matched to the employer). Any staff member with write access can add a job by hand (https links only). Admins record
   employer-support confirmations (for this job only, or for every job of the employer, with the evidence)
   and revoke them, and create or disable automation rules.
 - Your session lasts 12 hours. If an admin suspends your account, it ends at once.
