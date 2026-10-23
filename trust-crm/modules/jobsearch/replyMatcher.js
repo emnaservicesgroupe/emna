@@ -105,7 +105,12 @@ function parseFrom(from) {
 // dkim=pass whose header.d / header.i domain equals (or is a parent of) the sender's domain (a pass
 // without a d=/i= tag is accepted). SPF is recorded but never decides (forwarding breaks it).
 // When the value is absent or carries no verdict, INBOUND_AUTH_REQUIRED (default true; false when
-// NODE_ENV=test) decides: true -> 'auth_missing'. Acknowledgement evidence ALWAYS needs authenticated.
+// NODE_ENV=test) decides: true -> 'auth_missing'. A value that is present but unparseable, non-ASCII,
+// oversize or of the wrong type is a FAILURE. Acknowledgement evidence ALWAYS needs authenticated
+// (aligned d=; a dkim=pass without header.d does not count).
+// TRUST: only YOUR OWN receiving MTA's Authentication-Results may be used - the bridge must strip any
+// sender-supplied Authentication-Results headers. With INBOUND_AUTHSERV_ID set, only results whose
+// authserv-id (first token, e.g. "mx.vita.example") matches are considered (object form: authservId).
 const AUTH_CAP = 65536;
 const DKIM_FAIL = new Set(["fail", "permerror", "temperror"]);
 const DMARC_FAIL = new Set(["fail", "permerror", "temperror"]);
@@ -117,29 +122,44 @@ function authRequired() {
   return process.env.NODE_ENV !== "test";
 }
 
+const DOMAIN_RE = /^(?=.{3,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.?$/i;
+
 function authList(raw) {
   if (raw === undefined || raw === null || raw === "") return { absent: true };
   if (typeof raw === "string") return { list: [raw] };
-  if (Array.isArray(raw)) return raw.every((x) => typeof x === "string") ? { list: raw } : { garbage: true };
+  if (Array.isArray(raw)) {
+    if (!raw.length) return { absent: true };
+    return raw.every((x) => typeof x === "string") ? { list: raw } : { garbage: true };
+  }
   if (typeof raw === "object") {
     const parts = [];
+    if (raw.authservId !== undefined && typeof raw.authservId !== "string") return { garbage: true };
     for (const k of ["dkim", "spf", "dmarc"]) {
       const v = raw[k];
       if (v === undefined || v === null) continue;
       if (typeof v !== "string" || !/^[a-z]{1,20}$/i.test(v.trim())) return { garbage: true };
       let seg = `${k}=${v.trim()}`;
       if (k === "dkim" && raw.dkimDomain !== undefined) {
-        if (typeof raw.dkimDomain !== "string") return { garbage: true };
+        // a domain only: anything else (e.g. "evil.example; dkim=pass header.d=...") is garbage
+        if (typeof raw.dkimDomain !== "string" || !DOMAIN_RE.test(raw.dkimDomain.trim())) return { garbage: true };
         seg += ` header.d=${raw.dkimDomain.trim()}`;
       }
       parts.push(seg);
     }
-    return parts.length ? { list: [parts.join("; ")] } : { absent: true };
+    if (!parts.length) return Object.keys(raw).length ? { garbage: true } : { absent: true };
+    return { list: [`${raw.authservId ? raw.authservId.trim() : "object"}; ${parts.join("; ")}`], object: true };
   }
   return { garbage: true };
 }
 
-const aligns = (senderDomain, d) => Boolean(senderDomain && d && (senderDomain === d || senderDomain.endsWith(`.${d}`)));
+const aligns = (senderDomain, d) => Boolean(senderDomain && d && d.includes(".") && (senderDomain === d || senderDomain.endsWith(`.${d}`)));
+const stripComments = (seg) => seg.replace(/\([^()]*\)/g, " ").replace(/\([^()]*\)/g, " ");
+
+/** authserv-id = the first token of an Authentication-Results value (before ';'). */
+function authservIdOf(str) {
+  const m = /^\s*([^\s;]+)/.exec(str);
+  return m ? m[1].toLowerCase() : "";
+}
 
 /**
  * @returns {{present: boolean, failed: boolean, authenticated: boolean, verdicts: {dkim: string[], spf: string[], dmarc: string[]}|null, reason?: string}}
@@ -148,22 +168,36 @@ function evaluateAuth(raw, senderDomain) {
   const a = authList(raw);
   if (a.garbage) return { present: true, failed: true, authenticated: false, verdicts: null, reason: "garbage" };
   if (a.absent) return { present: false, failed: false, authenticated: false, verdicts: null };
-  if (a.list.reduce((n, x) => n + x.length, 0) > AUTH_CAP) return { present: true, failed: true, authenticated: false, verdicts: null, reason: "oversize" };
+  if (a.list.length > 50 || a.list.reduce((n, x) => n + x.length, 0) > AUTH_CAP) return { present: true, failed: true, authenticated: false, verdicts: null, reason: "oversize" };
+  // Real Authentication-Results are ASCII; non-ASCII (look-alike letters, fullwidth '=') is a failure.
+  if (a.list.some((x) => /[^\x09\x0a\x0d\x20-\x7e]/.test(x))) return { present: true, failed: true, authenticated: false, verdicts: null, reason: "non_ascii" };
+  let list = a.list;
+  const servId = String(process.env.INBOUND_AUTHSERV_ID || "").trim().toLowerCase();
+  if (servId) {
+    list = list.filter((x) => authservIdOf(x) === servId);
+    if (!list.length) return { present: false, failed: false, authenticated: false, verdicts: null, reason: "no_trusted_authserv" };
+  }
   const verdicts = { dkim: [], spf: [], dmarc: [] };
   let aligned = false;
-  for (const str of a.list) {
-    for (const seg of str.split(/[;\n]/)) {
-      for (const m of seg.matchAll(/\b(dkim|spf|dmarc)\s*=\s*([a-z]+)/gi)) verdicts[m[1].toLowerCase()].push(m[2].toLowerCase());
-      if (/\bdkim\s*=\s*pass\b/i.test(seg)) {
-        const d = /\bheader\.d\s*=\s*([a-z0-9.-]+)/i.exec(seg);
-        const i = /\bheader\.i\s*=\s*[^\s;@]*@([a-z0-9.-]+)/i.exec(seg);
-        const doms = [d && d[1], i && i[1]].filter(Boolean).map((x) => x.toLowerCase().replace(/\.+$/, ""));
-        if (!doms.length || doms.some((x) => aligns(senderDomain, x))) aligned = true;
+  let anyFailToken = false;
+  for (const str of list) {
+    // failure scan over the WHOLE value, comments included: any fail anywhere wins
+    if (/(?:^|[^a-z0-9])dkim\s*=\s*(?:fail|permerror|temperror)\b/i.test(str) || /(?:^|[^a-z0-9])dmarc\s*=\s*(?:fail|permerror|temperror)\b/i.test(str)) anyFailToken = true;
+    for (const seg0 of str.split(/[;\n]/)) {
+      const seg = stripComments(seg0);
+      for (const m of seg.matchAll(/(?:^|[\s])(dkim|spf|dmarc)\s*=\s*([a-z]+)/gi)) verdicts[m[1].toLowerCase()].push(m[2].toLowerCase());
+      if (/(?:^|\s)dkim\s*=\s*pass\b/i.test(seg)) {
+        // alignment needs the signing domain d= (outside comments); header.i alone is not enough
+        const d = /(?:^|\s)header\.d\s*=\s*([a-z0-9.-]+)/i.exec(seg);
+        if (d && aligns(senderDomain, d[1].toLowerCase().replace(/\.+$/, ""))) aligned = true;
       }
     }
   }
-  if (!verdicts.dkim.length && !verdicts.spf.length && !verdicts.dmarc.length) return { present: false, failed: false, authenticated: false, verdicts: null, reason: "unparseable" };
-  const failed = verdicts.dkim.some((v) => DKIM_FAIL.has(v)) || verdicts.dmarc.some((v) => DMARC_FAIL.has(v));
+  const failed = anyFailToken || verdicts.dkim.some((v) => DKIM_FAIL.has(v)) || verdicts.dmarc.some((v) => DMARC_FAIL.has(v));
+  if (!failed && !verdicts.dkim.length && !verdicts.spf.length && !verdicts.dmarc.length) {
+    // a value that is present but carries no verdict is garbage -> failure (only truly absent is absent)
+    return { present: true, failed: true, authenticated: false, verdicts: null, reason: "unparseable" };
+  }
   return { present: true, failed, authenticated: !failed && aligned, verdicts };
 }
 
@@ -197,6 +231,27 @@ function isBounce(m) {
   const ct = String((m && m.autoHeaders && m.autoHeaders.contentType) || "").toLowerCase();
   if (/multipart\/report/.test(ct) && /delivery-status/.test(ct)) return true;
   return BOUNCE_SUBJECT.test(String((m && m.subject) || ""));
+}
+
+/** Domains a genuine DSN for OUR mail comes from: INBOUND_BOUNCE_DOMAINS (comma list) + our MAIL_FROM domain. */
+function bounceDomains() {
+  const out = new Set(String(process.env.INBOUND_BOUNCE_DOMAINS || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean));
+  const from = guard.normalizeEmail(String(process.env.MAIL_FROM || ""));
+  if (from) out.add(from.slice(from.indexOf("@") + 1));
+  return out;
+}
+
+/**
+ * A DSN we are willing to open a staff task for: MAILER-DAEMON/postmaster at the sending provider's
+ * domain (or a subdomain), or a multipart/report; report-type=delivery-status message. Everything
+ * else that merely LOOKS like a bounce (subject words) is handled as a normal message.
+ */
+function isPlausibleBounce(m) {
+  const from = parseFrom(m && m.from);
+  const ct = String((m && m.autoHeaders && m.autoHeaders.contentType) || "").toLowerCase();
+  if (/multipart\/report/.test(ct) && /report-type\s*=\s*"?delivery-status/.test(ct)) return true;
+  if (!from.ok || !/^(?:mailer-daemon|postmaster)$/i.test(from.address.split("@")[0])) return false;
+  return [...bounceDomains()].some((d) => from.domain === d || from.domain.endsWith(`.${d}`));
 }
 
 /** {hard, code} from a DSN body: a 5.x.x enhanced status (or 'Action: failed') is hard. */
@@ -338,7 +393,7 @@ const RULES = [
     /\bmerci de (?:nous )?(?:envoyer|transmettre|fournir|faire parvenir)\b/, /\bpourriez-vous (?:nous )?(?:envoyer|transmettre|fournir)\b/,
   ]],
   ["acknowledgement", [
-    /\breceived your application\b/, /\bthank you for applying\b/, /\bnous avons bien recu\b/, /\baccuse de reception\b/, /\bthank you for your application\b/,
+    /\breceived your application\b/, /\b(?:your )?application (?:has been|was) (?:successfully )?received\b/, /\b(?:candidature|dossier) a (?:bien )?ete recue?\b/, /\bthank you for applying\b/, /\bnous avons bien recu\b/, /\baccuse de reception\b/, /\bthank you for your application\b/,
   ]],
 ];
 const PROPOSED_STATUS = { rejection: "rejected", offer: "offer", interview_request: "interview" };
@@ -354,24 +409,57 @@ function foldText(text) {
     .replace(/\s+/g, " ");
 }
 
-// Negation / hedge markers that disqualify an acknowledgement sentence ("we have not received your
-// application documents", "pas encore reçu", "still waiting for your CV", "could not open the attachment").
-const NEGATION = /\b(?:not|no|never|cannot|cant|unable|failed|fail|fails|missing|incomplete|yet to|still (?:waiting|awaiting|need)|awaiting|resend|re-send|pas|ne|aucun|aucune|sans|jamais|encore|en attente|manquant|manquante|manquants|incomplet|incomplete|renvoyer)\b|n't|\bn'/;
-const ACK_PATTERNS = RULES.find(([cat]) => cat === "acknowledgement")[1];
-const OTHER_PATTERNS = RULES.filter(([cat]) => ["rejection", "info_request", "interview_request"].includes(cat)).flatMap(([, p]) => p);
+// ---------------------------------------------------------------- acknowledgement (asymmetric safety)
+//
+// Evidence from a reply is only taken when the WHOLE message is a plain acknowledgement: missing
+// evidence is cheap (staff confirm by hand), false evidence is not. After removing a small list of
+// benign boilerplate negations, ANY negation / failure / request / hedge / rejection marker anywhere
+// in the (folded, capped) text - or any non-ASCII letter left after folding (look-alike letters,
+// zero-width characters) - vetoes the acknowledgement. All patterns are plain alternations of
+// literals (linear time).
+const BENIGN = [
+  /\b(?:please )?do not (?:reply|respond)(?: directly)?(?: to this (?:automated |automatic |auto-generated )?(?:message|email|e-mail|mail|address|notification))?\b/g,
+  /\bno later than\b/g,
+  /\bno (?:further )?action is (?:required|needed|necessary)\b/g,
+  /\bno-?reply\b/g,
+  /\b(?:merci de )?ne pas repondre(?: a ce (?:message|courriel|mail|e-mail))?\b/g,
+  /\baucune action (?:n'est |est )?(?:requise|necessaire)\b/g,
+  /\bwill not hear back (?:from us )?unless\b/g,
+  /\bnous ne manquerons pas de\b/g,
+];
+const VETO = new RegExp([
+  "\\bnot\\b", "n't\\b", "\\b(?:havent|hasnt|hadnt|didnt|dont|doesnt|cant|wont|couldnt|wouldnt|shouldnt|isnt|arent|wasnt|werent)\\b",
+  "\\bnever\\b", "\\bno longer\\b", "\\bunable\\b", "\\bcannot\\b", "\\bfail", "\\bmissing\\b", "\\bincomplet", "\\bcorrupt", "\\bblank\\b", "\\bempty\\b",
+  "\\bunreadable\\b", "\\billisible\\b", "\\bcould\\b", "\\bcan you\\b", "\\bplease\\b", "\\bkindly\\b", "\\bhowever\\b", "\\bbut\\b", "\\btoutefois\\b", "\\bcependant\\b",
+  "\\bmais\\b", "\\bmalheureusement\\b", "\\bunfortunately\\b", "\\bsadly\\b", "\\bregret", "\\bsorry\\b", "\\bdesole", "\\bpas\\b", "\\bne\\b", "\\bn'", "\\baucun",
+  "\\bsans\\b", "\\bmanqu", "\\bveuillez\\b", "\\bmerci de\\b", "\\brenvoy", "\\benvoy", "\\bresend", "\\bre-send", "\\bresubmit", "\\bre-?upload", "\\bupload",
+  "\\bfilled\\b", "\\bpourvu", "\\bposition has been\\b", "\\bclosed\\b", "\\bdeclin", "\\breject", "\\bnot selected\\b", "\\bmoving forward\\b",
+  "\\bretenu", "\\bretenons\\b", "\\banother candidate\\b", "\\bother candidates\\b", "\\bwrong\\b", "\\btoo (?:large|big|small)\\b", "\\berror\\b", "\\bproblem",
+  "\\bissue\\b", "\\bwaiting\\b", "\\bawait", "\\bpending\\b", "\\byet\\b", "\\bstill\\b", "\\battente\\b", "\\bencore\\b", "\\binvalid\\b", "\\bwhether\\b", "\\bunable\\b", "\\bimpossible\\b", "\\bdid you\\b", "\\bno idea\\b", "\\bonly if\\b", "\\bexcept\\b",
+  "\\?",
+].join("|"));
+const PUNCT_MAP = { "‘": "'", "’": "'", "‚": "'", "‛": "'", "′": "'", "“": '"', "”": '"', "„": '"', "«": '"', "»": '"', "–": "-", "—": "-", "…": "...", " ": " ", " ": " " };
 
-function sentences(folded) {
-  return folded.split(/(?<=[.!?;])\s+|\n+|\s+[-\u2013\u2014]\s+(?=[a-z])/).map((x) => x.trim()).filter(Boolean);
+/** Folded text for the acknowledgement veto: typographic punctuation mapped to ASCII. */
+function ackFold(text) {
+  return foldText(text).replace(/[‘’‚‛′“”„«»–—…  ]/g, (c) => PUNCT_MAP[c]);
 }
 
-/** An acknowledgement phrase in its own sentence with no negation/hedge and no other-category phrase. */
-function ackSentences(folded) {
-  return sentences(folded).filter((sen) => ACK_PATTERNS.some((re) => re.test(sen)) && !NEGATION.test(sen) && !OTHER_PATTERNS.some((re) => re.test(sen)));
+/**
+ * Whole-message veto. @returns {string|null} the veto reason, or null when the text may count as an acknowledgement.
+ */
+function ackVeto(...texts) {
+  if (texts.some((x) => String(x || "").length > 20000)) return "too_long";
+  let t = texts.map(ackFold).join("\n");
+  for (const re of BENIGN) t = t.replace(re, " ");
+  if (/[^\x00-\x7f]/.test(t)) return "non_ascii";
+  const v = VETO.exec(t);
+  return v ? `veto:${v[0].trim().slice(0, 30)}` : null;
 }
 
-/** True only for an un-negated acknowledgement sentence (see ackSentences). */
+/** True only for a whole-message, un-negated acknowledgement (see ackVeto) with no other category. */
 function isAcknowledgement(text) {
-  return ackSentences(foldText(text)).length > 0;
+  return classifyReply(text).acknowledgement;
 }
 
 /**
@@ -380,22 +468,22 @@ function isAcknowledgement(text) {
  */
 function classifyReply(text) {
   const t = foldText(text);
-  const ackOk = ackSentences(t);
   const evidence = [];
   for (const [category, patterns] of RULES) {
     for (const re of patterns) {
-      if (category === "acknowledgement") {
-        const sen = ackOk.find((x) => re.test(x));
-        if (sen) evidence.push({ category, phrase: re.exec(sen)[0].trim().slice(0, 80) });
-        continue;
-      }
       const hit = re.exec(t);
       if (hit) evidence.push({ category, phrase: hit[0].trim().slice(0, 80) });
     }
   }
-  const first = RULES.map(([cat]) => cat).find((cat) => evidence.some((e) => e.category === cat));
+  const hasAck = evidence.some((e) => e.category === "acknowledgement");
+  const otherCategory = evidence.some((e) => e.category !== "acknowledgement");
+  const veto = hasAck ? (otherCategory ? "other_category" : ackVeto(text)) : null;
+  const acknowledgement = hasAck && !veto;
+  // a vetoed acknowledgement is not reported as one
+  const kept = acknowledgement ? evidence : evidence.filter((e) => e.category !== "acknowledgement");
+  const first = RULES.map(([cat]) => cat).find((cat) => kept.some((e) => e.category === cat));
   const category = first || "other";
-  return { category, evidence: evidence.slice(0, 20), proposedStatus: PROPOSED_STATUS[category] || null, instructionLike: INSTRUCTION_LIKE.some((re) => re.test(t)), acknowledgement: ackOk.length > 0 };
+  return { category, evidence: kept.slice(0, 20), proposedStatus: PROPOSED_STATUS[category] || null, instructionLike: INSTRUCTION_LIKE.some((re) => re.test(t)), acknowledgement, ...(veto ? { ackVeto: veto } : {}) };
 }
 
-module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, bounceStatus, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };
+module.exports = { match, classifyReply, isAcknowledgement, evaluateAuth, authRequired, isAutoReply, isBounce, isPlausibleBounce, bounceStatus, ackVeto, isOwnAddress, parseFrom, parseAuthResults, normalizeMessageId, messageIdList, tokensIn, senderMatchesEmployer, PROPOSED_STATUS };

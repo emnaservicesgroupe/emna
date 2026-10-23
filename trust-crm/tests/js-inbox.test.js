@@ -729,9 +729,9 @@ test("I2: auth evaluation fails closed (any fail wins, whole value scanned, garb
   assert.equal(e(`dkim=pass ${"x".repeat(70000)}`, "a.example").failed, true);
   assert.equal(e(42, "a.example").failed, true);
   assert.equal(e(null, "a.example").present, false);
-  assert.equal(e("no verdicts here", "a.example").present, false);
+  assert.equal(e("no verdicts here", "a.example").failed, true, "present-but-unparseable is a failure");
   assert.equal(e("dkim=pass header.d=a.example", "hr.a.example").authenticated, true, "parent domain aligns");
-  assert.equal(e("dkim=pass header.i=@a.example", "a.example").authenticated, true);
+  assert.equal(e("dkim=pass header.i=@a.example", "a.example").authenticated, false, "round 2: header.i alone does not align");
   assert.equal(e("dkim=pass header.d=other.example", "a.example").authenticated, false);
   assert.equal(e({ spf: "fail", dkim: "pass", dkimDomain: "a.example" }, "a.example").authenticated, true, "SPF never decides");
   const w = await world();
@@ -808,8 +808,10 @@ test("minor (a)(b): object From stored as plain address + display name (drafts w
   assert.ok(view.body.timeline.some((e) => e.event === "status_from_reply" && e.detail.reason === "reply_rejected"));
 });
 
-test("minor (c): hard bounce matched by Message-ID -> outcome_unknown + verify_delivery task, never attached; soft bounce changes nothing", async () => {
+test("bounce (round 2): a plausible DSN only opens a staff task + staff event; never changes status, never candidate-visible", async () => {
   const w = await world();
+  const tl0 = (await timelineOf(w.appId)).length;
+  const ev0 = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n;
   const r = await inbox.ingest({
     messageId: newId(),
     from: "MAILER-DAEMON@mx.northwind-relay.example",
@@ -823,17 +825,54 @@ test("minor (c): hard bounce matched by Message-ID -> outcome_unknown + verify_d
   const m = await msgRow(r.id);
   assert.equal(m.application_id, null);
   assert.equal(m.message_kind, "bounce");
-  assert.equal(await subStatus(w.sub.id), "outcome_unknown");
-  assert.equal(await statusOf(w.appId), "outcome_unknown");
+  assert.equal(await subStatus(w.sub.id), "sent");
+  assert.equal(await statusOf(w.appId), "sent");
   const t = (await q("SELECT * FROM js_tasks WHERE application_id=$1 AND reason='verify_delivery' AND status='open'", [w.appId])).rows;
   assert.equal(t.length, 1);
-  assert.ok((await timelineOf(w.appId)).some((e) => e.event === "delivery_bounce_reported"));
-  const ct = await candidateToken(w.userId);
-  assert.deepEqual((await http("GET", "/jobsearch/messages", ct)).body.messages, []);
+  assert.match(t[0].detail, /^bounce_reported:/);
+  assert.equal((await timelineOf(w.appId)).length, tl0, "no candidate-visible timeline row");
+  assert.equal((await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n, ev0);
+  assert.ok((await q("SELECT 1 FROM js_events WHERE kind='staff.delivery_bounce' AND audience='staff' AND payload->>'messageId'=$1", [String(r.id)])).rowCount);
+  // MAILER-DAEMON at our own sending domain is plausible too; a second DSN does not open a second task
+  const r2 = await inbox.ingest({ messageId: newId(), from: "MAILER-DAEMON@vita.test.invalid", subject: "Undeliverable", text: `550 5.1.1 ${w.providerId}` });
+  assert.equal(r2.reason, "bounce");
+  assert.equal((await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1 AND reason='verify_delivery' AND status='open'", [w.appId])).rows[0].n, 1);
+  assert.deepEqual((await http("GET", "/jobsearch/messages", await candidateToken(w.userId))).body.messages, []);
   const w2 = await world();
-  const soft = await inbox.ingest({ messageId: newId(), from: "postmaster@relay.example", subject: "Delivery delayed", text: `Status: 4.4.1 deferred\n${w2.providerId}` });
+  const soft = await inbox.ingest({ messageId: newId(), from: "postmaster@vita.test.invalid", subject: "Delivery delayed", text: `Status: 4.4.1 deferred\n${w2.providerId}` });
   assert.equal(soft.reason, "bounce");
-  assert.equal(await subStatus(w2.sub.id), "sent");
+  assert.equal((await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1", [w2.appId])).rows[0].n, 0);
+});
+
+test("bounce (round 2): forged DSNs (attacker, DKIM fail, MAILER-DAEMON elsewhere, employer spoof) change nothing; a real employer reply with a DSN subject is a normal message", async () => {
+  const forged = [
+    ["attacker@evil.example", "mx; dkim=fail; dmarc=fail", undefined],
+    ["MAILER-DAEMON@evil.example", undefined, undefined],
+    [null, undefined, undefined],
+    ["MAILER-DAEMON@vita.test.invalid", "mx; dkim=fail", undefined],
+    ["attacker@evil.example", "mx; dkim=fail", { "Content-Type": "multipart/report; report-type=delivery-status" }],
+  ];
+  for (const [from, auth, headers] of forged) {
+    const w = await world();
+    const tl0 = (await timelineOf(w.appId)).length;
+    const ev0 = (await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n;
+    const r = await inbox.ingest({ messageId: newId(), from: from || `hr@${w.domain}`, subject: "Undeliverable: Application", text: `Delivery failed permanently:\n550 5.1.1 user unknown\nOriginal-Message-ID: ${w.providerId}`, authResults: auth, headers });
+    assert.equal(r.matched, false, from);
+    assert.equal(await subStatus(w.sub.id), "sent", from);
+    assert.equal(await statusOf(w.appId), "sent", from);
+    assert.equal((await timelineOf(w.appId)).length, tl0, from);
+    assert.equal((await q("SELECT count(*)::int n FROM js_events WHERE candidate_id=$1 AND audience='candidate'", [w.candidateId])).rows[0].n, ev0, from);
+    assert.equal((await q("SELECT count(*)::int n FROM js_tasks WHERE application_id=$1", [w.appId])).rows[0].n, 0, `${from}: at most the review queue`);
+  }
+  const w = await world();
+  const r = await inbox.ingest(reply(w, { subject: "Re: Delivery Status Notification (Failure)", text: "Hi, we got a Delivery Status Notification when replying, but we received your application. Interview next week?", authResults: authOk(w) }));
+  assert.equal(r.matched, true, JSON.stringify(r));
+  assert.equal((await msgRow(r.id)).message_kind, "reply");
+  assert.equal(await subStatus(w.sub.id), "sent", "no evidence from a bounce-like reply");
+  const v = await world();
+  const r3 = await inbox.ingest({ messageId: newId(), from: `hr@${v.domain}`, inReplyTo: v.providerId, subject: "Returned mail: see transcript", text: "Our portal v5.2.1 returned your mail; we did receive it though.", authResults: authOk(v) });
+  assert.equal(r3.matched, true);
+  assert.equal(await subStatus(v.sub.id), "sent");
 });
 
 test("minor (e): rate-limit map evicts expired / oldest entries instead of clearing everything", () => {
@@ -906,4 +945,276 @@ test("minor (g): HMAC is over the RAW bytes; parallel replays of one Message-ID 
   assert.ok(results.every((x) => x.status === 200), JSON.stringify(results.map((x) => x.status)));
   assert.equal(results.filter((x) => x.body.stored === true).length, 1);
   assert.equal((await q("SELECT count(*)::int n FROM js_messages WHERE message_id=$1", [race.messageId])).rows[0].n, 1);
+});
+
+// ================================================================ fix round 2
+
+// Reviewer probe t13r/cls.js (46 cases) + 23 genuine + 23 negative cases of our own. [expectAck, text]
+const CLS_CASES = [
+  [false, "Thank you for your interest. Unfortunately we are not moving forward with your application."],
+  [false, "We received your application but it is incomplete."],
+  [false, "Please resubmit — we did not receive your CV."],
+  [false, "Merci pour votre candidature, nous n'avons pas pu ouvrir la pièce jointe."],
+  [false, "Thank you for applying. We have not received your application documents yet."],
+  [false, "Thank you for applying. Unfortunately, the position has been filled."],
+  [false, "Thank you for your application; however the CV attachment is corrupted and cannot be opened."],
+  [false, "Thank you for your application; however the CV attachment is corrupted."],
+  [false, "Thank you for applying - we havent received your CV."],
+  [false, "Thank you for your application, the attachment was blank."],
+  [false, "We received your application but the attachment was empty. Please send it again."],
+  [false, "We have received your application, however the file appears to be corrupted."],
+  [false, "Nous avons bien reçu votre message, toutefois la pièce jointe est illisible."],
+  [false, "Nous avons bien reçu votre email mais le CV est corrompu, merci de le renvoyer."],
+  [false, "Thank you for applying. Your application could not be processed."],
+  [false, "Thank you for applying. Your application was rejected by our system because the file was too large."],
+  [false, "Thank you for your application. The file you sent us was unreadable; kindly re-upload through our portal."],
+  [false, "We received your application? We did not see any attachment."],
+  [false, "Thanks for applying. We regret to inform you that we will not proceed."],
+  [false, "Thank you for applying. Sadly, we have decided to go with another candidate."],
+  [false, "Thank you for your application. The role is closed and we are no longer accepting applications."],
+  [false, "Accusé de réception: votre candidature n'a pas été reçue."],
+  [false, "Accusé de réception. Votre dossier est incomplet."],
+  [false, "Thank you for applying. Please send us your CV in PDF format."],
+  [false, "Thank you for applying. Could you please send a copy of your passport?"],
+  [false, "Thank you for your application. We would like to invite you to an interview."],
+  [false, "We received your application, which was sent to the wrong address; please apply via our website."],
+  [false, "Did you get my message? I have received your application form request but have no idea what it is."],
+  [false, "I wanted to confirm whether we received your application - can you resend it to me?"],
+  [false, "Thank you for applying​. We didn’t get your CV."],
+  [false, "We have not yet received your application."],
+  [false, "We have nоt received your application."],
+  [false, "Thank you for applying. Unfortunately we did not receive your CV."],
+  [false, "Thank you for applying!Unfortunately the attachment failed to upload."],
+  [false, "Thank you for applying,unfortunately the attachment failed."],
+  [false, "we received your application。we have not reviewed it, it was empty"],
+  [true, "Thanks for applying! We have received your application and will review it."],
+  [true, "Accusé de réception: votre candidature a bien été reçue."],
+  [true, "Nous avons bien reçu votre candidature et nous reviendrons vers vous."],
+  [true, "Thank you for your application. Our team will review it shortly."],
+  [true, "Thank you for applying. We will be in touch if your profile matches."],
+  [true, "We received your application and will get back to you no later than Friday."],
+  [true, "Thank you for applying. We will contact you if you are shortlisted; please do not reply to this email."],
+  [true, "Bonjour, nous avons bien reçu votre candidature. Nous ne manquerons pas de revenir vers vous."],
+  [true, "Thank you for applying. Your application is now under review. No further action is needed."],
+  [true, "Merci, nous avons bien reçu votre dossier. Nous l'étudierons dans les plus brefs délais."],
+  // ---- our genuine acknowledgements (EN/FR)
+  [true, "Thank you for applying. We have received your application."],
+  [true, "We have received your application for the Electrician position."],
+  [true, "Thank you for your application. We will review it carefully."],
+  [true, "Thank you for applying to Northwind. Our recruiters will review your profile."],
+  [true, "Your application has been received. Thank you for applying."],
+  [true, "Thank you for applying! A recruiter will contact you if your profile matches."],
+  [true, "Thank you for your application, we will be in touch."],
+  [true, "This is an automated acknowledgement from our ATS: your application has been received. Please do not reply."],
+  [true, "Thank you for applying. We will get back to you no later than Friday."],
+  [true, "Thank you for applying. No action is required on your part."],
+  [true, "Thank you for your application. Do not reply to this automated message."],
+  [true, "Thank you for applying. We received your application and our team is reviewing it."],
+  [true, "Thanks for applying! We have received your application."],
+  [true, "Thank you for applying. Please do not reply to this email."],
+  [true, "Thank you for your application. You will not hear back unless you are shortlisted."],
+  [true, "Nous avons bien reçu votre candidature pour le poste d'électricien."],
+  [true, "Merci, nous avons bien reçu votre candidature."],
+  [true, "Accusé de réception de votre candidature. Merci."],
+  [true, "Nous avons bien reçu votre dossier de candidature et l'étudierons rapidement."],
+  [true, "Bonjour, nous avons bien reçu votre candidature. Cordialement."],
+  [true, "Nous avons bien reçu votre candidature. Merci de ne pas répondre à ce message."],
+  [true, "Accusé de réception : votre candidature a été transmise à notre équipe."],
+  [true, "Nous avons bien reçu votre candidature. Aucune action n'est requise."],
+  // ---- our negatives
+  [false, "Thank you for applying. Your CV is missing."],
+  [false, "We have received your application, but your CV is not attached."],
+  [false, "Thank you for applying. Kindly send your references."],
+  [false, "Thank you for applying. The document you uploaded is empty."],
+  [false, "Thank you for applying. We regret that the vacancy is closed."],
+  [false, "Thank you for applying. Sorry, the attachment cannot be opened."],
+  [false, "Nous avons bien reçu votre candidature mais le fichier est vide."],
+  [false, "Nous avons bien reçu votre candidature, cependant il manque votre CV."],
+  [false, "Accusé de réception : veuillez nous envoyer votre diplôme."],
+  [false, "Nous avons bien reçu votre candidature. Malheureusement le poste est pourvu."],
+  [false, "Merci pour votre candidature. Merci de renvoyer votre CV au format PDF."],
+  [false, "Thank you for applying. Your application was declined."],
+  [false, "We received your application. We are still waiting for your passport copy."],
+  [false, "Thank you for applying. There was an error with your attachment."],
+  [false, "Thank you for applying. We would like to schedule an interview."],
+  [false, "Thank you for applying. Your file is too large; resubmit it via our portal."],
+  [false, "Thank you for applying. Your application is pending until we get your references."],
+  [false, "Thank you for applying. Your application didnt include a CV."],
+  [false, "Thank you for applying. Is this the right CV?"],
+  [false, "Thank you for applying. We are pleased to offer you the position."],
+  [false, "Nous avons bien reçu votre candidature sans pièce jointe."],
+  [false, "Thank you for applying. We will not be moving forward."],
+  [false, "Nous avons bien reçu votre candidature, toutefois elle est incomplète."],
+];
+
+test("I1 round 2: acknowledgement table (reviewer cls.js + own genuine/negative): 0 false accepts, benign boilerplate accepted", () => {
+  const fa = [];
+  const fr = [];
+  for (const [exp, text] of CLS_CASES) {
+    const got = replyMatcher.classifyReply(text).acknowledgement;
+    if (got && !exp) fa.push(text);
+    if (!got && exp) fr.push(text);
+  }
+  assert.deepEqual(fa, [], "false accepts");
+  assert.deepEqual(fr, [], "false rejects (genuine boilerplate)");
+  assert.ok(CLS_CASES.filter(([e]) => e).length >= 30);
+  assert.ok(CLS_CASES.filter(([e]) => !e).length >= 55);
+  const t0 = Date.now();
+  const huge = `Thank you for applying. ${"we have received your application ".repeat(6000)}`;
+  assert.equal(replyMatcher.classifyReply(huge).acknowledgement, false, "beyond the cap never counts");
+  assert.equal(replyMatcher.ackVeto(`${"a ".repeat(100000)}`), "too_long");
+  assert.equal(replyMatcher.ackVeto("x".repeat(19999)), null);
+  assert.ok(Date.now() - t0 < 500, "linear / bounded");
+});
+
+test("I1 round 2: end-to-end evidence only for whole-message acknowledgements (reviewer db.js cases)", async () => {
+  const cases = [
+    ["Thank you for applying. We have not received your application documents yet.", false],
+    ["Thank you for your application; however the CV attachment is corrupted.", false],
+    ["Thank you for applying. Please send us your CV in PDF format.", false],
+    ["Thank you for applying. Unfortunately, the position has been filled.", false],
+    ["Nous avons bien reçu votre message, toutefois la pièce jointe est illisible.", false],
+    ["Thanks for applying! We have received your application and will review it.", true],
+    ["Accusé de réception: votre candidature a bien été reçue.", true],
+    ["Thank you for applying. We will get back to you no later than Friday.", true],
+    ["This is an automated acknowledgement from our ATS: your application has been received. Please do not reply.", true],
+    ["We have received your application.", true, { headers: { "Auto-Submitted": "auto-generated" } }],
+    ["We have received your application.", false, { headers: { "Auto-Submitted": "auto-replied" } }],
+    ["We have received your application.", false, { subject: "Out of Office: Re: Application" }],
+    ["We have received your application.", false, { headers: { Precedence: "bulk" } }],
+    ["We have received your application.", false, { headers: { "X-Autoreply": "yes" } }],
+    ["We have received your application.", false, { authResults: "attacker; dkim=pass" }],
+    ["We have received your application.", false, { authResults: "mx; dkim=pass header.d=evil.example" }],
+    ["We have received your application.", false, { authResults: undefined }],
+    ["We have received your application.", false, { subject: "Re: Application - attachment missing" }],
+  ];
+  const wrong = [];
+  for (const [text, expect, extra = {}] of cases) {
+    const w = await world();
+    const r = await inbox.ingest(reply(w, { text, authResults: authOk(w), ...extra }));
+    const confirmed = (await subStatus(w.sub.id)) === "confirmed_submitted";
+    if (confirmed !== expect) wrong.push(`${text} ${JSON.stringify(extra)} -> ${JSON.stringify(r.evidence)}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("I2 round 2: reviewer auth.js table + unparseable = failure even when auth is not required + INBOUND_AUTHSERV_ID", async () => {
+  const D = "northwind.example";
+  const F = "failed";
+  const A = "authenticated";
+  const N = "neither";
+  const X = "absent";
+  const rows = [
+    ["nested array", [["dkim=fail"]], F],
+    ["array w/ number", [`dkim=pass header.d=${D}`, 5], F],
+    ["number", 42, F],
+    ["boolean", true, F],
+    ["null", null, X],
+    ["object + unknown key", { dkim: "pass", dkimDomain: D, x: "dmarc=fail" }, A],
+    ["object trailing space", { dkim: "pass ", dkimDomain: D }, A],
+    ["object other dkimDomain", { dkim: "pass", dkimDomain: "evil.example" }, N],
+    ["object pass without domain", { dkim: "pass" }, N],
+    ["object dkimDomain injection", { dkim: "pass", dkimDomain: `evil.example; dkim=pass header.d=${D}` }, F],
+    ["object dkimDomain injection fail", { dkim: "pass", dkimDomain: `${D}; dmarc=fail` }, F],
+    ["object toString trick", { dkim: "pass", dmarc: { toString() { return "fail"; } } }, F],
+    ["huge string", `dkim=pass header.d=${D} ${"x".repeat(70000)}`, F],
+    ["huge array", Array(20000).fill(`dkim=pass header.d=${D}`), F],
+    ["cyrillic a in pass", `mx; dkim=pаss header.d=${D}`, F],
+    ["cyrillic i dkim=fail + pass", `mx; dkіm=fail; dkim=pass header.d=${D}`, F],
+    ["fullwidth = fail + pass", `mx; dkim＝fail; dkim=pass header.d=${D}`, F],
+    ["spaces around =", `mx; dkim = pass header.d=${D}`, A],
+    ["comment after pass", `mx; dkim=pass (weak key) header.d=${D}`, A],
+    ["dkim=passed", `mx; dkim=passed header.d=${D}`, N],
+    ["d= only inside a comment", `mx; dkim=pass (header.d=${D}) header.d=evil.example`, N],
+    ["header.d evil + header.i @D", `mx; dkim=pass header.d=evil.example header.i=@${D}`, N],
+    ["dkim=none", "mx; dkim=none; spf=pass", N],
+    ["dkim=neutral", `mx; dkim=neutral header.d=${D}`, N],
+    ["dkim=policy", `mx; dkim=policy header.d=${D}`, N],
+    ["DKIM=FAIL uppercase", `mx; DKIM=FAIL; dkim=pass header.d=${D}`, F],
+    ["x-dkim=fail", `mx; x-dkim=fail; dkim=pass header.d=${D}`, F],
+    ["arc comment dkim=fail", `mx; arc=pass (i=1 dkim=fail); dkim=pass header.d=${D}`, F],
+    ["header.d=example (TLD-like)", "mx; dkim=pass header.d=example", N],
+    ["header.d=com", "mx; dkim=pass header.d=com", N],
+    ["spf fail + dkim pass", `mx; spf=fail; dkim=pass header.d=${D}`, A],
+    ["garbage string", "lorem ipsum", F],
+    ["empty array", [], X],
+    ["empty object", {}, X],
+    ["trailing dot", `mx; dkim=pass header.d=${D}.`, A],
+    ["glued evil suffix", `mx; dkim=pass header.d=${D}.evil.example`, N],
+    ["signing subdomain, sender at parent", `mx; dkim=pass header.d=mail.${D}`, N],
+  ];
+  const wrong = [];
+  for (const [name, v, expect] of rows) {
+    const r = replyMatcher.evaluateAuth(v, D);
+    const got = !r.present ? X : r.failed ? F : r.authenticated ? A : N;
+    if (got !== expect) wrong.push(`${name}: ${got} (want ${expect})`);
+  }
+  assert.deepEqual(wrong, []);
+  // unparseable string is a failure even though INBOUND_AUTH_REQUIRED=false in tests
+  const w = await world();
+  const g = await inbox.ingest(reply(w, { text: "hi", authResults: "lorem ipsum" }));
+  assert.equal(g.matched, false);
+  assert.equal(g.reason, "auth_failed");
+  process.env.INBOUND_AUTH_REQUIRED = "true";
+  try {
+    const g2 = await inbox.ingest(reply(w, { text: "hi", authResults: "lorem ipsum" }));
+    assert.equal(g2.matched, false);
+  } finally {
+    delete process.env.INBOUND_AUTH_REQUIRED;
+  }
+  // only our own authserv-id counts when configured
+  process.env.INBOUND_AUTHSERV_ID = "mx.vita.test";
+  try {
+    assert.equal(replyMatcher.evaluateAuth(["attacker.example; dkim=pass header.d=northwind.example"], D).present, false, "foreign authserv-id ignored");
+    assert.equal(replyMatcher.evaluateAuth(["attacker.example; dkim=pass header.d=northwind.example", `mx.vita.test; dkim=pass header.d=${D}`], D).authenticated, true);
+    assert.equal(replyMatcher.evaluateAuth([`mx.vita.test; dkim=fail header.d=${D}`, `attacker.example; dkim=pass header.d=${D}`], D).failed, true);
+    const v = await world();
+    const ok = await inbox.ingest(reply(v, { text: "Thank you for applying. We have received your application.", authResults: [`attacker.example; dkim=pass header.d=${v.domain}`] }));
+    assert.equal(ok.matched, true, "absent (not required in tests)");
+    assert.notEqual(ok.evidence && ok.evidence.recorded, true, "evidence needs OUR authenticated result");
+    assert.equal(await subStatus(v.sub.id), "sent");
+  } finally {
+    delete process.env.INBOUND_AUTHSERV_ID;
+  }
+});
+
+test("I3 round 2: deadlock retry (3x with jitter then 409 try_again); concurrency: parallel create -> one, crossing swaps never deadlock or double-book, confirm+reschedule consistent", async () => {
+  let n40 = 0;
+  const flaky = await interviewService.withDeadlockRetry(async () => {
+    n40 += 1;
+    if (n40 < 3) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    return "ok";
+  }, { sleep: async () => {} });
+  assert.equal(flaky, "ok");
+  assert.equal(n40, 3);
+  await assert.rejects(interviewService.withDeadlockRetry(async () => { throw Object.assign(new Error("deadlock"), { code: "40P01" }); }, { sleep: async () => {} }), (e) => e.status === 409 && e.code === "try_again");
+
+  const w1 = await world();
+  const w2 = await world({ managerId: w1.managerId });
+  const m1 = await inbox.ingest(reply(w1, { text: "We would like to schedule an interview." }));
+  const m2 = await inbox.ingest(reply(w2, { text: "We would like to schedule an interview." }));
+  const par = await Promise.allSettled([1, 2, 3].map(() => interviewService.createFromMessage({ messageId: m1.id, proposedStart: "2027-01-05T10:00:00Z", tz: "UTC", actor: w1.manager })));
+  assert.equal(par.filter((p) => p.status === "fulfilled").length, 1);
+  assert.ok(par.filter((p) => p.status === "rejected").every((p) => p.reason.code === "interview_already_scheduled"));
+  const a1 = par.find((p) => p.status === "fulfilled").value.appointment;
+  const a2 = (await interviewService.createFromMessage({ messageId: m2.id, proposedStart: "2027-01-05T14:00:00Z", tz: "UTC", actor: w1.manager })).appointment;
+  for (let i = 0; i < 3; i += 1) {
+    const sw = await Promise.allSettled([
+      interviewService.rescheduleInterview({ id: a1.id, proposedStart: "2027-01-05T14:00:00Z", tz: "UTC", actor: w1.manager }),
+      interviewService.rescheduleInterview({ id: a2.id, proposedStart: "2027-01-05T10:00:00Z", tz: "UTC", actor: w1.manager }),
+    ]);
+    for (const p of sw) if (p.status === "rejected") assert.ok(["APPOINTMENT_OVERLAP", "try_again"].includes(p.reason.code), String(p.reason && p.reason.message));
+    const overl = (await q(
+      "SELECT count(*)::int n FROM js_appointments x JOIN js_appointments y ON x.id < y.id AND x.staff_user_id = y.staff_user_id AND tstzrange(x.starts_at,x.ends_at) && tstzrange(y.starts_at,y.ends_at) WHERE x.status <> 'cancelled' AND y.status <> 'cancelled'"
+    )).rows[0].n;
+    assert.equal(overl, 0, "never double-booked");
+  }
+  const a3 = (await interviewService.createFromMessage({ messageId: m1.id, proposedStart: "2027-02-01T10:00:00Z", tz: "UTC", actor: w1.manager, additionalRound: true })).appointment;
+  await Promise.allSettled([
+    interviewService.confirmInterview({ id: a3.id, candidateAvailabilityConfirmed: true, actor: w1.manager, note: "candidate confirmed by phone" }),
+    interviewService.rescheduleInterview({ id: a3.id, proposedStart: "2027-02-02T10:00:00Z", tz: "UTC", actor: w1.manager }),
+  ]);
+  const final = (await q("SELECT status FROM js_appointments WHERE id=$1", [a3.id])).rows[0].status;
+  const events = (await q("SELECT event FROM js_timeline WHERE application_id=$1 AND detail->>'appointmentId'=$2 AND event IN ('interview_confirmed','interview_rescheduled') ORDER BY id", [w1.appId, String(a3.id)])).rows.map((x) => x.event);
+  assert.equal(final, events[events.length - 1] === "interview_confirmed" ? "confirmed" : "tentative", `final status follows the last committed step: ${events}`);
 });

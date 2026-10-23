@@ -205,40 +205,33 @@ async function openReviewTask(client, row, reason) {
 }
 
 /**
- * Bounce / DSN: never attached to an application (never in the candidate's view). A HARD bounce (5.x.x)
- * that references exactly one submission's provider/planned Message-ID makes a 'sent' submission
- * 'outcome_unknown' (honest: we no longer know it arrived), adds a timeline note and a 'verify_delivery'
- * staff task. Nothing is ever marked confirmed from a bounce.
+ * Plausible DSN (replyMatcher.isPlausibleBounce, auth not failed): never attached, NEVER changes a
+ * submission or application status, NEVER writes the candidate timeline or candidate events. A hard
+ * bounce (5.x.x / Action: failed) whose referenced Message-ID belongs to exactly one submission opens
+ * ONE deduped staff task 'verify_delivery' (detail 'bounce_reported: ...') + a staff event + audit;
+ * staff decide (manual_confirmation, or leave it). Anything else stays in the review queue.
  */
-async function ingestBounce(client, m, cls) {
+async function ingestBounce(client, m, cls, auth) {
   const ids = bounceIds(m);
   const subs = ids.length
     ? (await client.query("SELECT id, application_id, status FROM js_submissions WHERE provider_message_id = ANY($1::text[]) OR evidence->>'messageIdPlanned' = ANY($1::text[]) ORDER BY id DESC", [ids])).rows
     : [];
   const apps = [...new Set(subs.map((x) => x.application_id))];
   const st = matcher.bounceStatus(m.text);
-  let locked = null;
-  if (apps.length === 1 && st.hard) locked = await S.lockApplication(client, apps[0]);
-  const row = await storeRow(client, m, { reason: "bounce", kind: "bounce", cls, summary: "Delivery status notification (bounce).", submissionId: apps.length === 1 ? subs[0].id : null });
+  const row = await storeRow(client, m, { reason: "bounce", kind: "bounce", cls, auth, summary: "Delivery status notification (bounce).", submissionId: null });
   if (!row) return { duplicate: true };
   const res = { confidence: "none", reason: "bounce" };
-  if (!locked) return { row, res, taskId: await openReviewTask(client, row, apps.length > 1 ? "bounce_ambiguous" : st.hard ? "bounce_unmatched" : "bounce_soft") };
-  const { app, cand } = locked;
-  const sub = (await client.query("SELECT * FROM js_submissions WHERE id = $1 FOR UPDATE", [subs[0].id])).rows[0];
-  const bounce = { messageId: row.id, code: st.code, at: new Date().toISOString() };
-  if (sub.status === "sent") {
-    await client.query("UPDATE js_submissions SET status = 'outcome_unknown', evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [sub.id, JSON.stringify({ bounce })]);
-    if (app.status === "sent") await applicationService.transition(app.id, "outcome_unknown", SYSTEM_ACTOR, { client, reason: "hard_bounce", detail: { submissionId: sub.id } });
-  } else {
-    await client.query("UPDATE js_submissions SET evidence = COALESCE(evidence, '{}'::jsonb) || $2::jsonb WHERE id = $1", [sub.id, JSON.stringify({ lateBounce: bounce })]);
-  }
-  await S.timeline(client, app.id, SYSTEM_ACTOR, "delivery_bounce_reported", { code: "hard_bounce", submissionId: sub.id, messageId: row.id });
+  if (apps.length !== 1 || !st.hard) return { row, res, taskId: await openReviewTask(client, row, apps.length > 1 ? "bounce_ambiguous" : st.hard ? "bounce_unmatched" : "bounce_soft") };
+  const app = (await client.query("SELECT a.id, a.candidate_id, a.responsible_user_id, c.assigned_to FROM js_applications a JOIN candidates c ON c.id = a.candidate_id WHERE a.id = $1", [apps[0]])).rows[0];
+  const sub = subs[0];
+  const responsible = app.responsible_user_id || app.assigned_to || null;
+  const detail = `bounce_reported: submission ${sub.id} (status ${sub.status}), DSN message ${row.id} (${m.messageId}), code ${st.code || "unknown"}; verify delivery with the employer`;
   const existing = (await client.query("SELECT id FROM js_tasks WHERE application_id = $1 AND reason = 'verify_delivery' AND status = 'open' LIMIT 1", [app.id])).rows[0];
   const taskId = existing
     ? existing.id
-    : (await client.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to) VALUES ($1,'verify_delivery',$2,$3) RETURNING id", [app.id, `Submission ${sub.id}: hard bounce ${st.code || ""} reported (message ${row.id}); verify delivery with the employer`, S.responsibleOf(app, cand)])).rows[0].id;
-  await S.auditEvent(client, SYSTEM_ACTOR, "submission.bounce", app.candidate_id, app.id, { submissionId: sub.id, messageId: row.id, code: st.code, previousStatus: sub.status, taskId });
-  await S.staffEvent(client, app.candidate_id, S.responsibleOf(app, cand), "staff.delivery_bounce", { applicationId: app.id, submissionId: sub.id, messageId: row.id, taskId });
+    : (await client.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES ($1,'verify_delivery',$2,$3,$4) RETURNING id", [app.id, detail, responsible, row.id])).rows[0].id;
+  await S.auditEvent(client, SYSTEM_ACTOR, "submission.bounce_reported", app.candidate_id, app.id, { submissionId: sub.id, messageId: row.id, code: st.code, submissionStatus: sub.status, taskId });
+  await S.staffEvent(client, app.candidate_id, responsible, "staff.delivery_bounce", { applicationId: app.id, submissionId: sub.id, messageId: row.id, taskId });
   return { row, res, taskId, bounce: { submissionId: sub.id, applicationId: app.id } };
 }
 
@@ -251,10 +244,13 @@ async function ingest(mail) {
   const existing = (await S.db().query("SELECT id, application_id, review_state FROM js_messages WHERE direction = 'in' AND message_id = $1", [m.messageId])).rows[0];
   if (existing) return { id: existing.id, duplicate: true, matched: Boolean(existing.application_id), confidence: null, reason: "duplicate" };
   const cls = matcher.classifyReply(m.text);
-  const bounce = matcher.isBounce(m);
-  const autoReply = !bounce && matcher.isAutoReply(m);
+  const sender = matcher.parseFrom(m.from);
+  const preAuth = matcher.evaluateAuth(m.authResults, sender.ok ? sender.domain : null);
+  const plausibleBounce = matcher.isPlausibleBounce(m) && !preAuth.failed;
+  const bounceLike = plausibleBounce || matcher.isBounce(m);
+  const autoReply = !bounceLike && matcher.isAutoReply(m);
   const out = await S.inTx(async (client) => {
-    if (bounce) return ingestBounce(client, m, cls);
+    if (plausibleBounce) return ingestBounce(client, m, cls, preAuth);
     const res = await matcher.match(m, { client });
     let app = null;
     let cand = null;
@@ -284,7 +280,9 @@ async function ingest(mail) {
   // Evidence only for: 'high' + DKIM-authenticated (aligned) + an un-negated acknowledgement sentence +
   // not an auto-reply/bounce (+ the matcher already refused our own / the candidate's address).
   if (out.app) {
-    const why = out.res.confidence !== "high" ? "not_high" : out.res.authenticated !== true ? "not_authenticated" : autoReply ? "auto_reply" : !cls.acknowledgement ? null : !out.res.submissionId ? "no_submission" : "";
+    // whole-message veto over body (classifyReply) AND subject
+    const ack = cls.acknowledgement && !matcher.ackVeto(m.subject.replace(/^(?:\s*(?:re|aw|tr|fwd?)\s*:)+/i, ""));
+    const why = !ack ? null : out.res.confidence !== "high" ? "not_high" : out.res.authenticated !== true ? "not_authenticated" : autoReply ? "auto_reply" : bounceLike ? "bounce" : !out.res.submissionId ? "no_submission" : "";
     if (why === "") result.evidence = await acknowledge(out.row, out.res.submissionId);
     else if (why) result.evidence = { recorded: false, reason: why };
   }

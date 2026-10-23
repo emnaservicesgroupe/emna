@@ -152,6 +152,20 @@ async function liveAppointment(client, applicationId) {
   return (await client.query("SELECT id FROM js_appointments WHERE application_id = $1 AND status IN ('tentative','confirmed') ORDER BY id LIMIT 1", [applicationId])).rows[0] || null;
 }
 
+/** Retries a transaction that hit a Postgres deadlock (40P01) up to 3 times with jitter, then 409 try_again. */
+async function withDeadlockRetry(fn, deps = {}) {
+  const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      if (!err || err.code !== "40P01") throw err;
+      if (attempt >= 3) throw httpErr(409, "The calendar is busy; please try again", "try_again");
+      await sleep(20 + Math.floor(Math.random() * 80) * attempt);
+    }
+  }
+}
+
 /** Runs fn inside ONE transaction that first locks the candidate, then the application row. */
 async function inAppTx(applicationId, fn) {
   return S.inTx(async (client) => {
@@ -257,8 +271,15 @@ async function rescheduleInterview({ id, proposedStart, tz, actor, durationMinut
   if (!validTz(tz)) throw httpErr(400, "tz must be a valid IANA time zone (e.g. Europe/Paris)", "INVALID_TZ");
   const start = resolveStart(proposedStart, tz);
   const end = new Date(start.getTime() + durationOf(durationMinutes) * 60000);
-  const out = await inAppTx(pre.application_id, async (client, { app }) => {
-    const appt = (await client.query("SELECT * FROM js_appointments WHERE id = $1 FOR UPDATE", [pre.id])).rows[0];
+  const out = await withDeadlockRetry(() => inAppTx(pre.application_id, async (client, { app }) => {
+    // Deadlock-safe: lock this appointment AND every live appointment of the same staff member that the
+    // new slot touches, in id order (two crossing reschedules then queue instead of deadlocking).
+    await client.query(
+      `SELECT id FROM js_appointments WHERE staff_user_id = $1 AND (id = $2 OR (status <> 'cancelled' AND tstzrange(starts_at, ends_at) && tstzrange($3::timestamptz, $4::timestamptz)))
+        ORDER BY id FOR UPDATE`,
+      [pre.staff_user_id, pre.id, start.toISOString(), end.toISOString()]
+    );
+    const appt = (await client.query("SELECT * FROM js_appointments WHERE id = $1", [pre.id])).rows[0];
     if (appt.status === "cancelled") throw httpErr(409, "Interview is cancelled");
     let moved;
     try {
@@ -273,7 +294,7 @@ async function rescheduleInterview({ id, proposedStart, tz, actor, durationMinut
     await S.auditEvent(client, actor, "interview.rescheduled", app.candidate_id, app.id, { appointmentId: appt.id, previous: presentTimes(appt, null), ...times });
     await notify(client, app, appt.staff_user_id, "interview.rescheduled", moved, ctz);
     return present({ ...appt, starts_at: moved.startsAt, ends_at: moved.endsAt, tz: moved.tz, status: moved.status }, ctz);
-  });
+  }), deps);
   await S.auditLog(actor, "jobsearch.interview.reschedule", "js_appointments", pre.id, {});
   return out;
 }
@@ -295,4 +316,4 @@ async function listInterviews({ user, query = {} }) {
   return { interviews: rows.map((r) => present(r, validTz(r.candidate_tz) ? r.candidate_tz : null)) };
 }
 
-module.exports = { createFromMessage, confirmInterview, cancelInterview, rescheduleInterview, listInterviews, resolveStart, localIso, validTz, DEFAULT_MINUTES };
+module.exports = { withDeadlockRetry, createFromMessage, confirmInterview, cancelInterview, rescheduleInterview, listInterviews, resolveStart, localIso, validTz, DEFAULT_MINUTES };
