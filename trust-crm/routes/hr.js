@@ -18,6 +18,8 @@
 //   POST  /me/corrections {work_date,requested_in,requested_out?,reason}   201; GET /me/corrections ?status; POST /me/corrections/:id/cancel
 //   GET   /team/corrections ?status   hr:approve (Manager: direct reports only; HR/Admin/SuperAdmin: everyone)
 //   POST  /corrections/:id/decide {decision:approved|rejected,note?}   hr:approve (404 outside scope, 403 own request, 409 decided / overlap)
+//   GET   /attendance/open ?limit&offset   hr:read -> open sessions older than HR_MAX_OPEN_HOURS with user names (stale sessions to close)
+//   POST  /attendance/:id/close {clock_out ISO+offset, note?<=500}   hr:write: closes an OPEN record (clock_out > clock_in, <= 24 h later, not future); 409 when closed
 //   GET   /reports/attendance ?from&to&user_id, GET /export/attendance.csv ?from&to&user_id   hr:read
 // Leave (any active staff unless noted):
 //   POST  /me/leave-requests {leave_type_id,start_date,end_date,half_day_start?,half_day_end?,reason?<=500}   201 (status pending, or approved when the type needs no approval)
@@ -26,7 +28,7 @@
 //   POST  /me/leave-requests/:id/cancel     own pending, or own approved that has not started (409 otherwise)
 //   GET   /team/leave-requests ?status&year  hr:approve (Manager: direct reports only; HR/Admin/SuperAdmin: everyone); includes reasons (approver scope)
 //   POST  /leave-requests/:id/decide {decision:approved|rejected,note?}   hr:approve (404 outside scope, 403 own request, 409 decided / balance)
-//   GET   /team/calendar ?from&to           any active staff, range <= 93 days; names, leave type name and dates only, NEVER reasons / notes
+//   GET   /team/calendar ?from&to           any active staff, range <= 93 days; own leave only (Manager: + direct reports; HR/Admin: everyone); names, leave type name and dates only, NEVER reasons / notes
 //   GET   /reports/leave ?year              hr:read, per employee and leave type: entitled, adjusted, approved, pending, remaining
 // The clock can be injected through the X-Test-Now header ONLY while NODE_ENV is "test" (never in any other environment).
 const express = require("express");
@@ -53,6 +55,11 @@ router.use((_req, res, next) => {
   next();
 });
 router.use(requireStaff);
+// First HR request loads the pg_timezone_names list used to validate HR_TIMEZONE (cached for the process).
+router.use(asyncHandler(async (_req, _res, next) => {
+  await require("../modules/hr/common").ensureTimezones(require("../db"));
+  next();
+}));
 
 router.get("/me", asyncHandler(async (req, res) => res.json(await employees.me(req.user))));
 
@@ -91,6 +98,8 @@ router.post("/me/corrections", asyncHandler(async (req, res) => res.status(201).
 router.get("/me/corrections", asyncHandler(async (req, res) => res.json(await corrections.myCorrections(req.user, req.query))));
 router.post("/me/corrections/:id/cancel", asyncHandler(async (req, res) => res.json(await corrections.cancelCorrection(req.user, req.params.id))));
 
+router.get("/attendance/open", checkPermission("hr:read"), asyncHandler(async (req, res) => res.json(await attendance.listStaleOpen(req.user, req.query, clock(req)))));
+router.post("/attendance/:id/close", checkPermission("hr:write"), asyncHandler(async (req, res) => res.json(await attendance.closeOpen(req.user, req.params.id, body(req), clock(req)))));
 router.get("/team/corrections", checkPermission("hr:approve"), asyncHandler(async (req, res) => res.json(await corrections.teamCorrections(req.user, req.query))));
 router.post("/corrections/:id/decide", checkPermission("hr:approve"), asyncHandler(async (req, res) => res.json(await corrections.decide(req.user, req.params.id, body(req)))));
 

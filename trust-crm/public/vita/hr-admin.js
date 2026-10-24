@@ -522,6 +522,7 @@
         }).catch(function () {});
       });
       V.setContent($("#hr-ad-attReport"),
+        h("div", { class: "card", id: "hr-open-card" }, h("h3", { text: t("hr.open.title") }), h("p", { class: "small muted", text: t("hr.open.hint") }), h("div", { id: "hr-open-body", attrs: { "aria-live": "polite" } }, V.loading())),
         h("div", { class: "card" }, h("h3", { text: t("hr.rep.title") }), h("p", { class: "small muted", text: t("hr.rep.hint") }), form, err, status),
         h("div", { class: "card" }, h("div", { id: "hr-rep-body", attrs: { "aria-live": "polite" } }, h("p", { class: "empty", text: t("hr.rep.notRun") }))));
     },
@@ -530,6 +531,7 @@
         var who = $("#hr-rf-user");
         if (who && who.options.length <= 1) A.fillSelect(who, staffItems(t("hr.rep.everyone")), AD.rep.userId);
       }).catch(function () {});
+      loadOpenSessions();
       if (!AD.rep.data) SECTION.attReport.run();
       else renderReport();
     },
@@ -541,6 +543,58 @@
         .catch(function (err) { AD.rep.data = null; V.setContent(box, A.errorBox(err)); });
     },
   };
+  // ---------------------------------------------------------------- stale open sessions (forgotten clock-out)
+  function loadOpenSessions() {
+    var box = $("#hr-open-body");
+    if (!box) return;
+    V.api("GET", "/hr/attendance/open?limit=100")
+      .then(function (d) { renderOpenSessions((d && d.rows) || []); })
+      .catch(function (err) { V.setContent(box, A.errorBox(err)); });
+  }
+  function renderOpenSessions(list) {
+    var box = $("#hr-open-body");
+    if (!box) return;
+    var rows = list.map(function (r) {
+      var close = canWrite() ? h("button", { type: "button", class: "btn secondary small", id: "hr-open-close-" + r.id, text: t("hr.open.close") }) : null;
+      if (close) close.addEventListener("click", function () { closeDialog(r); });
+      return h("tr", null,
+        h("td", null, h("strong", { text: r.full_name })),
+        h("td", null, HR.ltr(r.clock_in_local || r.work_date)),
+        h("td", { class: "num" }, HR.ltr(String(r.open_hours))),
+        h("td", null, close));
+    });
+    V.setContent(box, A.table([t("hr.team.employee"), t("hr.open.since"), { label: t("hr.open.hours"), num: true }, t("common.actions")], rows, { empty: t("hr.open.none"), caption: t("hr.open.title") }));
+  }
+  function closeDialog(r) {
+    var local = String(r.clock_in_local || "");
+    var date = h("input", { id: "hr-oc-date", type: "date", value: local.slice(0, 10) });
+    var time = h("input", { id: "hr-oc-time", type: "time", value: "" });
+    var note = h("input", { id: "hr-oc-note", type: "text", attrs: { maxlength: "500", autocomplete: "off" } });
+    var err = h("p", { class: "form-error", attrs: { role: "alert" } });
+    var go = h("button", { type: "submit", class: "btn", text: t("hr.open.close") });
+    var cancel = h("button", { type: "button", class: "btn secondary", text: t("common.cancel") });
+    var m = HR.modal(t("hr.open.dialog"), [
+      h("p", { class: "small", text: t("hr.open.dialogHint", { name: r.full_name, tz: r.timezone, since: local }) }),
+      h("div", { class: "inline-fields" }, HR.field("hr-oc-date", t("hr.open.date"), date), HR.field("hr-oc-time", t("hr.open.time"), time)),
+      HR.field("hr-oc-note", t("hr.open.note"), note),
+      err,
+      h("div", { class: "btn-row" }, go, cancel),
+    ]);
+    var state = { sending: false };
+    cancel.addEventListener("click", m.close);
+    m.form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      err.textContent = "";
+      var iso = HU.zonedIso(date.value, time.value, r.timezone);
+      if (!iso) { err.textContent = t("hr.open.invalid"); return; }
+      var body = { clock_out: iso };
+      if (note.value.trim()) body.note = note.value.trim();
+      HR.submit(go, state, function () { return V.api("POST", "/hr/attendance/" + r.id + "/close", { body: body }); })
+        .then(function () { m.close(); V.toast(t("hr.open.closed"), "ok"); V.announce(t("hr.open.closed")); loadOpenSessions(); })
+        .catch(function (e2) { err.textContent = V.errorMessage(e2); });
+    });
+    time.focus();
+  }
   function stat(n, label, cls) { return h("div", { class: "stat " + (cls || "") }, h("div", { class: "n", text: V.fmtNumber(n) }), h("div", { class: "l", text: label })); }
   function renderReport() {
     var box = $("#hr-rep-body");

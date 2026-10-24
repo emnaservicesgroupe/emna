@@ -5,6 +5,7 @@
 const { logAudit } = require("../../utils/audit");
 const c = require("./common");
 const { yearShare } = require("./leaveDays");
+const { balanceLock, yearFigures } = require("./leaveRequests");
 
 const { HttpError } = c;
 const db = () => require("../../db");
@@ -58,18 +59,33 @@ async function setBalance(user, input) {
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
   c.onlyKeys(input, ["user_id", "leave_type_id", "year", "entitled_days", "adjusted_days"]);
   const userId = c.parseId(input.user_id, { label: "user_id" });
+  if (userId === user.id) throw new HttpError(403, "someone else must change your own balance/manager/schedule");
   const typeId = c.parseId(input.leave_type_id, { label: "leave_type_id" });
   const year = c.parseYear(input.year);
   if (input.entitled_days === undefined) throw new HttpError(400, "entitled_days is required");
   const entitled = c.parseDays(input.entitled_days, { label: "entitled_days" });
   const adjusted = input.adjusted_days === undefined ? undefined : c.parseDays(input.adjusted_days, { label: "adjusted_days", allowNegative: true });
   return c.inTransaction(async (client) => {
+    // Same lock as leave creation / approval: an approval can never pass its check against an entitlement this write is lowering.
+    await balanceLock(client, userId, typeId);
     const { STAFF_ROLES } = require("../../middleware/staff");
     const u = (await client.query("SELECT role FROM users WHERE id = $1 FOR SHARE", [userId])).rows[0];
     if (!u || !STAFF_ROLES.has(u.role)) throw new HttpError(404, "Employee not found");
-    const t = (await client.query("SELECT id FROM hr_leave_types WHERE id = $1 FOR SHARE", [typeId])).rows[0];
+    const t = (await client.query("SELECT id, counts_against_balance FROM hr_leave_types WHERE id = $1 FOR SHARE", [typeId])).rows[0];
     if (!t) throw new HttpError(404, "Leave type not found");
     const cur = (await client.query("SELECT id, entitled_days::text AS entitled_days, adjusted_days::text AS adjusted_days FROM hr_leave_balances WHERE user_id = $1 AND leave_type_id = $2 AND year = $3 FOR UPDATE", [userId, typeId, year])).rows[0];
+    // Lowering the entitlement below what is already approved + pending would overdraw the person: refused. (Keeping or raising
+    // the granted days is always allowed, so an already-overdrawn legacy balance can still be repaired step by step.)
+    if (t.counts_against_balance) {
+      const oldGranted = cur ? Number(cur.entitled_days) + Number(cur.adjusted_days) : 0;
+      const newGranted = Number(entitled) + Number(adjusted === undefined ? (cur ? cur.adjusted_days : "0") : adjusted);
+      if (newGranted < oldGranted) {
+        const fig = await yearFigures(client, userId, typeId, year);
+        if (newGranted < Number(fig.approved) + Number(fig.pending)) {
+          throw new HttpError(409, "The entitlement cannot be lowered below the leave already approved or pending for this year");
+        }
+      }
+    }
     // ON CONFLICT covers two first-time writers racing on the same key: the loser updates instead of failing.
     const r = await client.query(
       `INSERT INTO hr_leave_balances (user_id, leave_type_id, year, entitled_days, adjusted_days)

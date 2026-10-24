@@ -514,3 +514,27 @@ test("requireStaff: active staff roles pass; Candidate/Employer/Agency 403; deac
     await cleanup();
   }
 });
+
+test("migration 020: idempotent, adds the stored year split, backfills rows exactly like the live computation, keeps parts consistent", () =>
+  withShared(async (pool) => {
+    const sql = fs.readFileSync(path.join(ROOT, "sql", "migrations", "020_hr_leave_year_split.sql"), "utf8");
+    assert.equal((await pool.query("SELECT 1 FROM schema_migrations WHERE name='020_hr_leave_year_split.sql'")).rowCount, 1);
+    const cols = await pool.query("SELECT column_name, is_nullable, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name='hr_leave_requests' AND column_name LIKE 'days_year_%' ORDER BY 1");
+    assert.deepEqual(cols.rows.map((r) => [r.column_name, r.is_nullable, r.numeric_precision, r.numeric_scale]), [["days_year_end", "YES", 6, 2], ["days_year_start", "YES", 6, 2]]);
+    const u = await user(pool);
+    const lt = await leaveType(pool);
+    // a legacy cross-year row (default Mon-Fri; 28 Dec 2026 is a Monday: 4 working days in 2026) and a same-year one, both without stored parts
+    const cross = (await pool.query("INSERT INTO hr_leave_requests (user_id, leave_type_id, start_date, end_date, days) VALUES ($1,$2,'2026-12-28','2027-01-08',10) RETURNING id", [u, lt])).rows[0].id;
+    const half = (await pool.query("INSERT INTO hr_leave_requests (user_id, leave_type_id, start_date, end_date, days, half_day_start, status) VALUES ($1,$2,'2027-12-27','2028-01-04',5.5,true,'approved') RETURNING id", [u, lt])).rows[0].id;
+    const same = (await pool.query("INSERT INTO hr_leave_requests (user_id, leave_type_id, start_date, end_date, days) VALUES ($1,$2,'2026-06-01','2026-06-03',3) RETURNING id", [u, lt])).rows[0].id;
+    await pool.query(sql);
+    await pool.query(sql);
+    const get = async (id) => (await pool.query("SELECT days_year_start::text AS s, days_year_end::text AS e FROM hr_leave_requests WHERE id=$1", [id])).rows[0];
+    assert.deepEqual(await get(cross), { s: "4.00", e: "6.00" });
+    assert.deepEqual(await get(half), { s: "4.50", e: "1.00" }, "27-31 Dec 2027 = 5 working days minus the half day");
+    assert.deepEqual(await get(same), { s: "3.00", e: "0.00" });
+    // one constraint: both or neither, never summing to something else
+    await assert.rejects(pool.query("UPDATE hr_leave_requests SET days_year_start = 1, days_year_end = 1 WHERE id=$1", [cross]), CHECK);
+    await assert.rejects(pool.query("UPDATE hr_leave_requests SET days_year_start = 10 WHERE id=$1", [cross]), CHECK);
+    assert.equal((await pool.query("SELECT 1 FROM pg_constraint WHERE conname='hr_leave_year_split_check'")).rowCount, 1);
+  }));

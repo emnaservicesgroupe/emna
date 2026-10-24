@@ -4,7 +4,8 @@
 //    day at all (nothing configured yet) the default Mon-Fri applies ("default schedule").
 //  - A request's `days` are stored once. When a range crosses a year boundary the days are attributed to the two years: the start
 //    year gets the working days up to 31 Dec (minus the half-day on the first day), the end year gets the remainder, so the two
-//    parts always add up to the stored total.
+//    parts always add up to the stored total. The two parts are STORED on the request (days_year_start / days_year_end) when it is
+//    created; the live computation is only the fallback for rows where they are NULL.
 const DOW_KEYS = "ARRAY['sun','mon','tue','wed','thu','fri','sat']";
 
 /**
@@ -34,14 +35,16 @@ async function hasConfiguredSchedule(runner, userId) {
 
 /**
  * SQL numeric: the days of request alias `r` that belong to calendar year `yearExpr` (0 when it does not touch that year).
- * Single-year requests: r.days. Two-year requests: start-year share computed, end-year share = r.days - start-year share.
+ * Single-year requests: r.days. Two-year requests: the shares STORED at creation (days_year_start / days_year_end, migration 020), so a
+ * later holiday or schedule change never moves days between years; only rows without stored shares (NULL) fall back to the live
+ * computation: start-year share computed, end-year share = r.days - start-year share.
  */
 function yearShare(r, yearExpr) {
   const startShare = `LEAST(${r}.days, GREATEST(0, ${wdCount(`${r}.user_id`, `${r}.start_date`, `make_date(extract(year FROM ${r}.start_date)::int, 12, 31)`)}::numeric - CASE WHEN ${r}.half_day_start THEN 0.5 ELSE 0 END))`;
   return `(CASE
       WHEN extract(year FROM ${r}.start_date) = extract(year FROM ${r}.end_date) THEN (CASE WHEN extract(year FROM ${r}.start_date) = ${yearExpr} THEN ${r}.days ELSE 0 END)
-      WHEN extract(year FROM ${r}.start_date) = ${yearExpr} THEN ${startShare}
-      WHEN extract(year FROM ${r}.end_date) = ${yearExpr} THEN ${r}.days - ${startShare}
+      WHEN extract(year FROM ${r}.start_date) = ${yearExpr} THEN COALESCE(${r}.days_year_start, ${startShare})
+      WHEN extract(year FROM ${r}.end_date) = ${yearExpr} THEN COALESCE(${r}.days_year_end, ${r}.days - ${startShare})
       ELSE 0 END)`;
 }
 

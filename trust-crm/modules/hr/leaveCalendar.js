@@ -2,8 +2,8 @@
 //
 // Calendar visibility (any active staff may call it; the result depends on who asks)
 //  - hr:read (HR, Admin, SuperAdmin): everyone's approved AND pending leave.
-//  - hr:approve-only (Manager): their direct reports' approved and pending leave, plus approved leave of staff in their own department.
-//  - everyone else: their own leave, plus APPROVED leave of staff in the same department (no department -> only themselves).
+//  - hr:approve-only (Manager): their direct reports' approved and pending leave, plus their own.
+//  - everyone else: only their own leave (a colleague's leave is never visible; department membership grants nothing).
 // Entries carry the person's name, the leave type NAME, the dates, half-day flags and the status. They NEVER carry the reason,
 // the decision note, who decided, the day count or the request id. Holidays of the window are listed alongside.
 const c = require("./common");
@@ -27,25 +27,21 @@ async function teamCalendar(user, query = {}) {
   if (span > MAX_WINDOW_DAYS) throw new HttpError(400, `The range must not exceed ${MAX_WINDOW_DAYS} days`);
 
   const params = [from, to, user.id];
-  // `mine`: the caller's department (NULL when they have none). `viewer` flags decide which pending rows may be shown.
   const all = approvals.seesAll(user);
   const approver = c.hasPerm(user, "hr:approve");
   const rows = (
     await db().query(
-      `WITH me AS (SELECT NULLIF(btrim(lower(e.department)), '') AS dept FROM (SELECT $3::int AS id) i LEFT JOIN hr_employees e ON e.user_id = i.id)
-       SELECT r.user_id, u.full_name, t.name_ar, t.name_en, t.name_fr, t.code AS leave_type_code, t.name_en AS leave_type_name,
+      `SELECT r.user_id, u.full_name, t.name_ar, t.name_en, t.name_fr, t.code AS leave_type_code, t.name_en AS leave_type_name,
               r.start_date::text AS start_date, r.end_date::text AS end_date, r.half_day_start, r.half_day_end, r.status
          FROM hr_leave_requests r
          JOIN users u ON u.id = r.user_id AND u.is_active
          JOIN hr_leave_types t ON t.id = r.leave_type_id
          LEFT JOIN hr_employees e ON e.user_id = r.user_id
-        CROSS JOIN me
         WHERE r.start_date <= $2::date AND r.end_date >= $1::date AND r.status IN ('approved', 'pending')
           AND (
                 r.user_id = $3::int
              OR (${all ? "true" : "false"})
              OR (${approver && !all ? "e.manager_user_id = $3::int" : "false"})
-             OR (r.status = 'approved' AND me.dept IS NOT NULL AND NULLIF(btrim(lower(e.department)), '') = me.dept)
           )
         ORDER BY r.start_date ASC, u.full_name ASC, r.id ASC
         LIMIT 2000`,

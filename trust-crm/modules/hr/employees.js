@@ -12,6 +12,15 @@ const STAFF_LIST = [...STAFF_ROLES];
 const FIELDS = ["employee_no", "position", "department", "hire_date", "end_date", "employment_type", "phone", "emergency_contact_name", "emergency_contact_phone", "manager_user_id", "schedule_id", "status", "notes"];
 const TEXT_MAX = { employee_no: 40, position: 120, department: 120, employment_type: 40, phone: 40, emergency_contact_name: 120, emergency_contact_phone: 40, notes: 4000 };
 
+// Separation of duties: nobody changes the fields that drive their own approvals and entitlements. A person editing their OWN
+// profile may only touch these contact fields; everything else (manager, schedule, status, employment data, notes) needs someone else.
+const SELF_EDITABLE = ["phone", "emergency_contact_name", "emergency_contact_phone"];
+const SELF_MSG = "someone else must change your own balance/manager/schedule";
+function assertNotSelfSensitive(user, userId, input) {
+  if (userId !== user.id) return;
+  for (const k of Object.keys(input)) if (FIELDS.includes(k) && !SELF_EDITABLE.includes(k)) throw new HttpError(403, SELF_MSG);
+}
+
 const PROFILE = `e.employee_no, e.position, e.department, e.hire_date::text AS hire_date, e.end_date::text AS end_date, e.employment_type, e.phone,
   e.emergency_contact_name, e.emergency_contact_phone, e.manager_user_id, mu.full_name AS manager_name, e.schedule_id, s.name AS schedule_name,
   e.status, e.notes, e.created_at, e.updated_at`;
@@ -136,6 +145,7 @@ async function createEmployee(user, input) {
   c.requirePerm(user, "hr:write");
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
   const userId = c.parseId(input.user_id, { label: "user_id" });
+  assertNotSelfSensitive(user, userId, input);
   return c.inTransaction(
     async (client) => {
       const target = (await client.query("SELECT id, role, is_active FROM users WHERE id = $1 FOR SHARE", [userId])).rows[0];
@@ -159,6 +169,7 @@ async function updateEmployee(user, rawId, input) {
   c.requirePerm(user, "hr:write");
   const userId = c.parseId(rawId, { notFound: "Employee not found" });
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
+  assertNotSelfSensitive(user, userId, input);
   return c.inTransaction(
     async (client) => {
       await lockChain(client);

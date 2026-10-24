@@ -423,7 +423,8 @@ test("balances: PUT upserts idempotently, validates decimal strings, derives use
     assert.equal((await put({ ...body, user_id: 999999 })).status, 404);
     assert.equal((await put({ ...body, user_id: ids.cand })).status, 404, "a Candidate has no HR balances");
     assert.equal((await put({ ...body, leave_type_id: 999999 })).status, 404);
-    assert.equal((await put({ ...body, entitled_days: "366", adjusted_days: "-366" })).status, 200, "bounds");
+    assert.equal((await put({ ...body, entitled_days: "366", adjusted_days: "-366" })).status, 409, "bounds, but 0 granted is below the 3 approved days");
+    assert.equal((await put({ ...body, entitled_days: "366", adjusted_days: "-361" })).status, 200, "bounds, granted = approved + pending");
 
     // GET filters
     assert.equal((await http("GET", `/hr/balances?user_id=${u.id}`, T.hr)).body.total, 2);
@@ -512,4 +513,117 @@ test("validTimezone checks pg_timezone_names", () =>
     assert.equal(await validTimezone(pool, "Africa/Tunis"), "Africa/Tunis");
     assert.equal(await validTimezone(pool, " UTC "), "UTC");
     for (const bad of ["Nowhere/City", "", "  ", null, 5, "x".repeat(70), "africa/tunis"]) await assert.rejects(() => validTimezone(pool, bad), (e) => e.status === 400, String(bad));
+  }));
+
+// ------------------------------------------------------------------------------------------------ review round 1
+test("separation of duties: HR / Admin / SuperAdmin cannot change their own balance, manager, schedule, status or employment fields", () =>
+  withWorld(async ({ http, T, ids, q, one, staff, type }) => {
+    const lt = await type();
+    const sched = (await http("POST", "/hr/schedules", T.hr, { name: "SoD", weekly: { mon: { start: "09:00", end: "17:00" } } })).body.id;
+    const boss = await staff("Manager", { name: "Boss" });
+    // actor -> another privileged actor who sets up the profile
+    const pairs = [["hr", "admin"], ["admin", "sa"], ["sa", "admin"]];
+    for (const [actor, setter] of pairs) {
+      const created = await http("POST", "/hr/employees", T[setter], { user_id: ids[actor], position: "Officer", department: "Ops" });
+      assert.equal(created.status, 201, created.text);
+      const self = (_a, body) => http("PATCH", `/hr/employees/${ids[actor]}`, T[actor], body);
+      const refused = [
+        { manager_user_id: boss.id }, { schedule_id: sched }, { status: "inactive" }, { position: "CEO" }, { department: "X" }, { employment_type: "x" },
+        { hire_date: "2020-01-01" }, { end_date: "2030-01-01" }, { employee_no: "SELF-1" }, { notes: "n" }, { phone: "1", manager_user_id: null },
+      ];
+      for (const b of refused) {
+        const r = await self(actor, b);
+        assert.equal(r.status, 403, `${actor} ${JSON.stringify(b)} ${r.text}`);
+        assert.match(r.body.error, /someone else must change your own/);
+      }
+      const row = await one("SELECT manager_user_id, schedule_id, status, position, phone FROM hr_employees WHERE user_id=$1", [ids[actor]]);
+      assert.deepEqual([row.manager_user_id, row.schedule_id, row.status, row.position, row.phone], [null, null, "active", "Officer", null], "nothing changed");
+      // non-sensitive contact details are allowed
+      const ok = await self(actor, { phone: "+216 11 111 111", emergency_contact_name: "Mum", emergency_contact_phone: "+216 22 222 222" });
+      assert.equal(ok.status, 200, ok.text);
+      assert.equal(ok.body.phone, "+216 11 111 111");
+      // balances: any self-write is refused (even a no-op value), another HR actor can write it
+      const bal = { user_id: ids[actor], leave_type_id: lt.id, year: 2026, entitled_days: "30" };
+      const rb = await http("PUT", "/hr/balances", T[actor], bal);
+      assert.equal(rb.status, 403, rb.text);
+      assert.match(rb.body.error, /someone else must change your own/);
+      assert.equal((await http("PUT", "/hr/balances", T[actor], { ...bal, adjusted_days: "5" })).status, 403);
+      assert.equal(Number((await one("SELECT count(*) AS n FROM hr_leave_balances WHERE user_id=$1", [ids[actor]])).n), 0);
+      assert.equal((await http("PUT", "/hr/balances", T[setter], bal)).status, 200, "another admin may set it");
+      // another admin may change the manager
+      assert.equal((await http("PATCH", `/hr/employees/${ids[actor]}`, T[setter], { manager_user_id: boss.id })).status, 200);
+    }
+  }));
+
+test("separation of duties: a self-create of an HR profile with a manager or schedule is refused", () =>
+  withWorld(async ({ http, T, ids }) => {
+    const r = await http("POST", "/hr/employees", T.hr, { user_id: ids.hr, manager_user_id: ids.mgr });
+    assert.equal(r.status, 403, r.text);
+    assert.equal((await http("POST", "/hr/employees", T.hr, { user_id: ids.hr, phone: "1" })).status, 201, "contact-only self profile is allowed");
+  }));
+
+test("HR_TIMEZONE is validated against pg_timezone_names exactly: POSIX-style, wrong case and unknown names fall back to Africa/Tunis with a clear error", () =>
+  withWorld(async ({ pool }) => {
+    const c = require("../modules/hr/common");
+    const errors = [];
+    const origErr = console.error;
+    console.error = (...a) => errors.push(a.join(" "));
+    try {
+      // before the zone list is loaded only a shape check is possible, but POSIX-style offsets are already refused
+      process.env.HR_TIMEZONE = "UTC+1";
+      assert.equal(c.companyTimezone(), "Africa/Tunis");
+      await c.loadTimezones(pool);
+      for (const bad of ["UTC+1", "GMT-3", "europe/paris", "Mars/Phobos", "EST5EDT5", "Europe/Pariss", "../etc"]) {
+        process.env.HR_TIMEZONE = bad;
+        assert.equal(c.companyTimezone(), "Africa/Tunis", bad);
+      }
+      for (const good of ["Europe/Paris", "UTC", "Etc/GMT+1", "Asia/Dubai", "Africa/Tunis"]) {
+        process.env.HR_TIMEZONE = good;
+        assert.equal(c.companyTimezone(), good, good);
+      }
+      // the startup check reports a misconfiguration once, clearly, and names the fallback
+      process.env.HR_TIMEZONE = "UTC+1";
+      const res = await c.checkTimezoneConfig(pool);
+      assert.equal(res.company_ok, false);
+      assert.equal(res.effective, "Africa/Tunis");
+      assert.ok(errors.some((e) => /HR_TIMEZONE/.test(e) && /UTC\+1/.test(e) && /Africa\/Tunis/.test(e)), errors.join("|"));
+      process.env.HR_TIMEZONE = "Europe/Paris";
+      assert.equal((await c.checkTimezoneConfig(pool)).company_ok, true);
+      // a stored schedule with an unknown timezone is reported too
+      await pool.query("INSERT INTO hr_schedules (name, weekly, timezone) VALUES ('Bad tz', '{}'::jsonb, 'Mars/Phobos')");
+      errors.length = 0;
+      const res2 = await c.checkTimezoneConfig(pool);
+      assert.deepEqual(res2.invalid_schedules.map((s) => s.timezone), ["Mars/Phobos"]);
+      assert.ok(errors.some((e) => /schedule/i.test(e) && /Mars\/Phobos/.test(e)));
+    } finally {
+      console.error = origErr;
+      delete process.env.HR_TIMEZONE;
+    }
+  }));
+
+test("schedules: an invalid timezone (POSIX-style, wrong case, unknown) is a 400 on create and patch; valid names pass", () =>
+  withWorld(async ({ http, T }) => {
+    const weekly = { mon: { start: "09:00", end: "17:00" } };
+    for (const tz of ["UTC+1", "utc+01:00", "europe/paris", "Mars/Phobos", "", 5, null, "x".repeat(65)]) {
+      const r = await http("POST", "/hr/schedules", T.hr, { name: "Tz", weekly, timezone: tz });
+      assert.equal(r.status, 400, `create ${String(tz)} ${r.text}`);
+    }
+    const ok = await http("POST", "/hr/schedules", T.hr, { name: "Tz ok", weekly, timezone: "Europe/Paris" });
+    assert.equal(ok.status, 201, ok.text);
+    for (const tz of ["UTC+1", "Mars/Phobos", "paris"]) assert.equal((await http("PATCH", `/hr/schedules/${ok.body.id}`, T.hr, { timezone: tz })).status, 400, `patch ${tz}`);
+    assert.equal((await http("PATCH", `/hr/schedules/${ok.body.id}`, T.hr, { timezone: "Asia/Dubai" })).status, 200);
+    assert.equal((await http("GET", "/hr/schedules", T.hr)).body.rows.find((s) => s.id === ok.body.id).timezone, "Asia/Dubai");
+  }));
+
+test("inTransaction maps Postgres 22023 (invalid parameter, e.g. an unrecognised time zone) to a clean error without the Postgres text", () =>
+  withWorld(async () => {
+    const c = require("../modules/hr/common");
+    await assert.rejects(
+      c.inTransaction((client) => client.query("SELECT now() AT TIME ZONE $1", ["Nowhere/Land"])),
+      (e) => e.status === 500 && /timezone/i.test(e.message) && !/Nowhere|not recognized|22023/.test(e.message)
+    );
+    await assert.rejects(
+      c.inTransaction((client) => client.query("SELECT set_config('lock_timeout', 'abc', true)")),
+      (e) => e.status === 400 && !/lock_timeout|abc/.test(e.message)
+    );
   }));

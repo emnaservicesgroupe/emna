@@ -472,7 +472,7 @@ test("calendar: names and dates only, never reasons or notes, in any role's resp
     assert.equal(r2.status, 201);
   }));
 
-test("calendar: visibility by department / report line / admin, pending only for approvers and the owner", () =>
+test("calendar: non-approvers see only their own leave (no department branch), managers direct reports + own, HR/Admin everyone", () =>
   withWorld(async ({ http, T, ids, staff, profile, type, request, holiday }) => {
     const lt = (await type()).id;
     const visa1 = await staff("Agent", { name: "Visa One" });
@@ -501,20 +501,22 @@ test("calendar: visibility by department / report line / admin, pending only for
     await holiday("2026-03-20");
     const cal = async (tok) => (await http("GET", "/hr/team/calendar?from=2026-03-01&to=2026-03-31", tok)).body;
     const names = (c) => c.entries.map((e) => `${e.full_name}:${e.status}`).sort();
-    // same department (case/space-insensitive): approved of colleagues + own pending; not other departments
-    assert.deepEqual(names(await cal(visa2.token)), ["Visa One:approved", "Visa Two:approved"]);
-    assert.deepEqual(names(await cal(visa3.token)), ["Visa One:approved", "Visa Three:pending", "Visa Two:approved"], "own pending visible to the owner, a colleague's pending not");
-    assert.deepEqual(names(await cal(visa1.token)), ["Visa One:approved", "Visa One:pending", "Visa Two:approved"]);
+    // the same department grants nothing: each person sees only their own leave
+    assert.deepEqual(names(await cal(visa2.token)), ["Visa Two:approved"]);
+    assert.deepEqual(names(await cal(visa3.token)), ["Visa Three:pending"]);
+    assert.deepEqual(names(await cal(visa1.token)), ["Visa One:approved", "Visa One:pending"]);
     assert.deepEqual(names(await cal(hrDept.token)), ["Other Dept:approved"]);
-    assert.deepEqual(names(await cal(nodept.token)), ["No Dept:approved"], "no department: only themselves");
-    assert.deepEqual(names(await cal(noProfile.token)), ["No Profile:approved"], "no HR profile: only themselves");
-    // Manager: direct reports (visa1, hrDept) incl. pending, plus approved of their own department (none: no profile)
+    assert.deepEqual(names(await cal(nodept.token)), ["No Dept:approved"]);
+    assert.deepEqual(names(await cal(noProfile.token)), ["No Profile:approved"]);
+    // Manager: direct reports (visa1, hrDept) incl. pending; never the colleagues of another line
     assert.deepEqual(names(await cal(T.mgr)), ["Other Dept:approved", "Visa One:approved", "Visa One:pending"]);
+    await request(T.mgr, lt, "2026-03-18", "2026-03-18"); // the manager's own pending leave is visible to the manager too
+    assert.deepEqual(names(await cal(T.mgr)), ["Manager mgr:pending", "Other Dept:approved", "Visa One:approved", "Visa One:pending"]);
     // HR/Admin/SuperAdmin: everything, pending marked
     for (const k of ADMINS) {
       const c = await cal(T[k]);
-      assert.equal(c.entries.length, 7, k);
-      assert.equal(c.entries.filter((e) => e.status === "pending").length, 2);
+      assert.equal(c.entries.length, 8, k);
+      assert.equal(c.entries.filter((e) => e.status === "pending").length, 3);
       assert.deepEqual(c.holidays, [{ day: "2026-03-20", name: "Holiday" }]);
     }
     // cancelled / rejected never appear; deactivated people never appear
@@ -639,4 +641,76 @@ test("leave report: numbers equal the manual sums per employee and type", () =>
     assert.equal((await http("GET", "/hr/reports/leave?year=abc", T.hr)).status, 400);
     assert.equal((await http("GET", "/hr/reports/leave", T.hr)).status, 200, "defaults to the current year");
     assert.ok(!JSON.stringify(rep).includes(SECRET));
+  }));
+
+// ------------------------------------------------------------------------------------------------ review round 1
+test("cross-year leave: the year split is stored at creation; later holiday / schedule changes never move days between years", () =>
+  withWorld(async ({ http, T, q, one, staff, schedule, profile, type, balance, request }) => {
+    const lt = (await type({ counts: true })).id;
+    const u = await staff("Agent");
+    const sid = await schedule({ mon: { start: "09:00", end: "17:00" }, tue: { start: "09:00", end: "17:00" }, wed: { start: "09:00", end: "17:00" }, thu: { start: "09:00", end: "17:00" }, fri: { start: "09:00", end: "17:00" } });
+    await profile(u.id, { schedule: sid });
+    await balance(u.id, lt, 2026, 20);
+    await balance(u.id, lt, 2027, 20);
+    const r = await request(u.token, lt, "2026-12-28", "2027-01-08"); // 4 working days in 2026, 6 in 2027
+    assert.equal(r.status, 201, r.text);
+    assert.equal(r.body.days, "10.00");
+    const stored = await one("SELECT days_year_start::text AS s, days_year_end::text AS e FROM hr_leave_requests WHERE id=$1", [r.body.id]);
+    assert.deepEqual([stored.s, stored.e], ["4.00", "6.00"], "split stored at creation");
+    assert.equal((await http("POST", `/hr/leave-requests/${r.body.id}/decide`, T.hr, { decision: "approved" })).status, 200);
+    const used = async (year) => {
+      const b = (await http("GET", `/hr/balances?user_id=${u.id}&year=${year}`, T.hr)).body.rows[0];
+      const rep = (await http("GET", `/hr/reports/leave?year=${year}`, T.hr)).body.rows.find((x) => x.user_id === u.id);
+      return [b.used_days, b.remaining_days, rep.approved_days];
+    };
+    assert.deepEqual(await used(2026), ["4.00", "16.00", "4.00"]);
+    assert.deepEqual(await used(2027), ["6.00", "14.00", "6.00"]);
+    // holidays and a schedule change after the fact do not move days
+    await q("INSERT INTO hr_holidays (day, name) VALUES ('2026-12-29','H1'), ('2027-01-05','H2')");
+    assert.equal((await http("PATCH", `/hr/schedules/${sid}`, T.hr, { weekly: { mon: { start: "09:00", end: "17:00" } } })).status, 200);
+    assert.deepEqual(await used(2026), ["4.00", "16.00", "4.00"]);
+    assert.deepEqual(await used(2027), ["6.00", "14.00", "6.00"]);
+    // a legacy row without stored parts still falls back to the live computation
+    await q("UPDATE hr_leave_requests SET days_year_start = NULL, days_year_end = NULL WHERE id=$1", [r.body.id]);
+    const live = await used(2026);
+    assert.equal(live[0], "1.00", "without stored parts the live computation applies (only Dec 28 is a Monday now)");
+  }));
+
+test("setBalance takes the leave balance lock: lowering below approved + pending is refused (409), raising and equal values are fine", () =>
+  withWorld(async ({ http, T, ids, staff, type, balance, request }) => {
+    const lt = (await type({ counts: true })).id;
+    const u = await staff("Agent");
+    await balance(u.id, lt, 2026, 5);
+    const r = await request(u.token, lt, "2026-03-09", "2026-03-11"); // 3 pending days
+    assert.equal(r.status, 201, r.text);
+    const put = (days, extra = {}) => http("PUT", "/hr/balances", T.hr, { user_id: u.id, leave_type_id: lt, year: 2026, entitled_days: days, ...extra });
+    assert.equal((await put("2")).status, 409, "below pending");
+    assert.equal((await put("3")).status, 200, "exactly the pending days");
+    assert.equal((await put("3", { adjusted_days: "-1" })).status, 409, "an adjustment lowers it too");
+    assert.equal((await http("POST", `/hr/leave-requests/${r.body.id}/decide`, T.hr, { decision: "approved" })).status, 200);
+    assert.equal((await put("2")).status, 409, "below approved");
+    assert.equal((await put("10")).status, 200);
+    // a type that does not count against the balance can be lowered freely
+    const free = (await type({ counts: false })).id;
+    assert.equal((await http("PUT", "/hr/balances", T.hr, { user_id: u.id, leave_type_id: free, year: 2026, entitled_days: "0" })).status, 200);
+  }));
+
+test("setBalance racing approvals and new requests: approved + pending never exceeds the entitlement afterwards", () =>
+  withWorld(async ({ http, T, q, staff, type, balance, request }) => {
+    const lt = (await type({ counts: true })).id;
+    for (let i = 0; i < 4; i++) {
+      const u = await staff("Agent");
+      await balance(u.id, lt, 2026, 5);
+      const r = await request(u.token, lt, "2026-03-09", "2026-03-11"); // 3 days pending
+      const [lower, approve, more] = await Promise.all([
+        http("PUT", "/hr/balances", T.hr, { user_id: u.id, leave_type_id: lt, year: 2026, entitled_days: "3" }),
+        http("POST", `/hr/leave-requests/${r.body.id}/decide`, T.admin, { decision: "approved" }),
+        request(u.token, lt, "2026-03-16", "2026-03-17"), // 2 more days
+      ]);
+      assert.ok([200, 409].includes(lower.status), lower.text);
+      assert.ok([200, 409].includes(approve.status), approve.text);
+      const ent = Number((await q("SELECT entitled_days FROM hr_leave_balances WHERE user_id=$1 AND year=2026", [u.id])).rows[0].entitled_days);
+      const used = Number((await q("SELECT COALESCE(sum(days),0) AS d FROM hr_leave_requests WHERE user_id=$1 AND status IN ('approved','pending')", [u.id])).rows[0].d);
+      assert.ok(used <= ent, `iteration ${i}: used+pending ${used} > entitled ${ent} (lower ${lower.status}, approve ${approve.status}, more ${more.status})`);
+    }
   }));

@@ -423,13 +423,14 @@ test("an approval that overlaps existing attendance fails with 409 and writes no
     assert.equal(await count("SELECT count(*) AS n FROM audit_logs WHERE (table_name, action) IN (('hr_attendance','CREATE'),('hr_attendance_corrections','UPDATE'))"), 0);
     // Rejecting is still possible, and so is approving a non-overlapping one.
     assert.equal((await http("POST", `/hr/corrections/${c.id}/decide`, T.hr, { decision: "rejected" })).status, 200);
-    // An open-ended approved correction collides with an existing open session (one open record per user).
+    // An open-ended approved correction on the day of an existing OPEN session corrects that session (review round 1), no second open row.
     await att(u.id, "2026-03-12", "2026-03-12T07:00:00Z", null);
     const open = await http("POST", "/hr/me/corrections", u.token, goodCorrection({ work_date: "2026-03-12", requested_in: "2026-03-12T05:00:00Z", requested_out: undefined }), NOW);
     assert.equal(open.status, 201, open.text);
-    const clash = await http("POST", `/hr/corrections/${open.body.id}/decide`, T.hr, { decision: "approved" });
-    assert.equal(clash.status, 409);
-    assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1", [u.id]), 2, "the closed record and the pre-existing open one, nothing new");
+    const fixed = await http("POST", `/hr/corrections/${open.body.id}/decide`, T.hr, { decision: "approved" });
+    assert.equal(fixed.status, 200, fixed.text);
+    assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1", [u.id]), 2, "the closed record and the corrected open one, nothing new");
+    assert.equal((await one("SELECT clock_in, source FROM hr_attendance WHERE user_id=$1 AND clock_out IS NULL", [u.id])).source, "correction");
   }));
 
 test("self-approval is refused (HR, Admin and Manager alike); another approver can decide an HR/Admin request", () =>
@@ -514,8 +515,10 @@ test("a correction approval racing a clock-in over the same time: exactly one wi
         http("POST", `/hr/corrections/${c.id}/decide`, T.hr, { decision: "approved" }),
         http("POST", "/hr/clock-in", u.token, undefined, "2026-03-10T09:00:00Z"), // inside the corrected interval
       ]);
+      // Clock-in first: its open row is on the corrected day, so the approval corrects it (review round 1) and both succeed.
+      // Approval first: the clock-in lands inside the corrected closed interval and is refused. Never two rows.
       const wins = (dec.status === 200 ? 1 : 0) + (ci.status === 201 ? 1 : 0);
-      assert.equal(wins, 1, `decide ${dec.status} ${dec.text} / clock-in ${ci.status} ${ci.text}`);
+      assert.ok(wins >= 1, `decide ${dec.status} ${dec.text} / clock-in ${ci.status} ${ci.text}`);
       assert.ok([200, 409].includes(dec.status) && [201, 409].includes(ci.status));
       assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1", [u.id]), 1);
     }
@@ -701,4 +704,114 @@ test("the report refuses ranges that would be unbounded (too many person-days)",
     const r = await http("GET", "/hr/reports/attendance?from=2025-03-11&to=2026-03-11", T.hr);
     assert.equal(r.status, 400);
     assert.match(r.body.error, /narrow/i);
+  }));
+
+// ------------------------------------------------------------------------------------------------ review round 1: forgotten clock-out
+test("forgotten clock-out: Monday clock-in, Tuesday clock-out is 409, the approved correction fixes the open row, clock-in works again", () =>
+  withWorld(async (w) => {
+    const { http, T, staff, q, count, one } = w;
+    const u = await staff("Agent");
+    const mon = "2026-03-09T08:00:00Z";
+    const tue = "2026-03-10T10:00:00Z";
+    const inn = await http("POST", "/hr/clock-in", u.token, undefined, mon);
+    assert.equal(inn.status, 201);
+    const out = await http("POST", "/hr/clock-out", u.token, undefined, tue);
+    assert.equal(out.status, 409);
+    assert.equal(out.body.needs_correction, true);
+    assert.equal((await http("POST", "/hr/clock-in", u.token, undefined, tue)).status, 409, "locked out until fixed");
+    const c = await http("POST", "/hr/me/corrections", u.token, goodCorrection({ work_date: "2026-03-09", requested_in: "2026-03-09T09:00:00+01:00", requested_out: "2026-03-09T17:00:00+01:00" }), tue);
+    assert.equal(c.status, 201, c.text);
+    const dec = await http("POST", `/hr/corrections/${c.body.id}/decide`, T.hr, { decision: "approved", note: "forgot" }, tue);
+    assert.equal(dec.status, 200, dec.text);
+    assert.equal(dec.body.attendance.id, inn.body.record.id, "the open row itself was corrected");
+    assert.equal(dec.body.attendance.source, "correction");
+    assert.equal(dec.body.attendance.correction_id, c.body.id);
+    const rows = (await q("SELECT id, clock_in, clock_out, source, correction_id FROM hr_attendance WHERE user_id=$1", [u.id])).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].clock_out.toISOString(), "2026-03-09T16:00:00.000Z");
+    assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1 AND clock_out IS NULL", [u.id]), 0);
+    assert.equal(await count("SELECT count(*) AS n FROM audit_logs WHERE table_name='hr_attendance' AND action='UPDATE' AND record_id=$1", [inn.body.record.id]), 1, "audited");
+    const again = await http("POST", "/hr/clock-in", u.token, undefined, "2026-03-10T10:05:00Z");
+    assert.equal(again.status, 201, again.text);
+    assert.equal((await one("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1", [u.id])).n, "2");
+  }));
+
+test("a correction overlapping a CLOSED record is still 409; one overlapping an open row of another day does not touch it", () =>
+  withWorld(async (w) => {
+    const { http, T, staff, att, count } = w;
+    const u = await staff("Agent");
+    await att(u.id, "2026-03-10", "2026-03-10T10:00:00Z", "2026-03-10T12:00:00Z");
+    const c = await w.http("POST", "/hr/me/corrections", u.token, goodCorrection(), NOW);
+    assert.equal((await http("POST", `/hr/corrections/${c.body.id}/decide`, T.hr, { decision: "approved" })).status, 409);
+    assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE user_id=$1", [u.id]), 1);
+  }));
+
+test("HR close of a stale open session: hr:write only, open records only, clock_out within (clock_in, clock_in+24h] and not in the future, audited", () =>
+  withWorld(async (w) => {
+    const { http, T, staff, att, q, count } = w;
+    const u = await staff("Agent");
+    const id = await att(u.id, "2026-03-09", "2026-03-09T08:00:00Z", null);
+    const closedId = await att(u.id, "2026-03-05", "2026-03-05T08:00:00Z", "2026-03-05T16:00:00Z");
+    const now = "2026-03-10T10:00:00Z";
+    const body = { clock_out: "2026-03-09T17:00:00+01:00", note: "Employee confirmed 17:00" };
+    for (const k of ["mgr", "acct", "agent", "rec"]) assert.equal((await http("POST", `/hr/attendance/${id}/close`, T[k], body, now)).status, 403, k);
+    for (const k of ["cand", "emp", "agy"]) assert.equal((await http("POST", `/hr/attendance/${id}/close`, T[k], body, now)).status, 403, k);
+    assert.equal((await http("POST", `/hr/attendance/${id}/close`, undefined, body, now)).status, 401);
+    const bad = [{}, { clock_out: "2026-03-09T17:00:00" }, { clock_out: "nope" }, { ...body, extra: 1 }, { ...body, note: "x".repeat(501) }, { ...body, note: 5 },
+      { clock_out: "2026-03-09T08:00:00Z" }, { clock_out: "2026-03-09T07:00:00Z" }, { clock_out: "2026-03-10T08:00:01Z" }, { clock_out: "2026-03-10T10:00:01Z" }];
+    for (const b of bad) assert.equal((await http("POST", `/hr/attendance/${id}/close`, T.hr, b, now)).status, 400, JSON.stringify(b));
+    assert.equal((await http("POST", `/hr/attendance/${closedId}/close`, T.hr, body, now)).status, 409, "closed record");
+    assert.equal((await http("POST", "/hr/attendance/999999/close", T.hr, body, now)).status, 404);
+    assert.equal((await http("POST", "/hr/attendance/abc/close", T.hr, body, now)).status, 400);
+    assert.equal(await count("SELECT count(*) AS n FROM hr_attendance WHERE clock_out IS NULL"), 1, "nothing changed by the refusals");
+    const ok = await http("POST", `/hr/attendance/${id}/close`, T.admin, body, now);
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(new Date(ok.body.clock_out).toISOString(), "2026-03-09T16:00:00.000Z");
+    assert.equal(ok.body.worked_minutes, 480);
+    assert.equal(ok.body.note, "Employee confirmed 17:00");
+    assert.equal(await count("SELECT count(*) AS n FROM audit_logs WHERE table_name='hr_attendance' AND record_id=$1 AND user_id=$2 AND action='UPDATE'", [id, w.ids.admin]), 1);
+    assert.equal((await http("POST", `/hr/attendance/${id}/close`, T.hr, body, now)).status, 409, "already closed");
+    assert.equal((await http("POST", "/hr/clock-in", u.token, undefined, now)).status, 201, "the employee can clock in again");
+    // exactly 24 h is allowed
+    const v = await staff("Agent");
+    const vid = await att(v.id, "2026-03-09", "2026-03-09T08:00:00Z", null);
+    assert.equal((await http("POST", `/hr/attendance/${vid}/close`, T.hr, { clock_out: "2026-03-10T08:00:00Z" }, now)).status, 200);
+  }));
+
+test("GET /hr/attendance/open lists open sessions older than HR_MAX_OPEN_HOURS with names, hr:read only", () =>
+  withWorld(async (w) => {
+    const { http, T, staff, att } = w;
+    const old = await staff("Agent", { name: "Old Session" });
+    const fresh = await staff("Agent", { name: "Fresh Session" });
+    const id = await att(old.id, "2026-03-09", "2026-03-09T08:00:00Z", null);
+    await att(fresh.id, "2026-03-10", "2026-03-10T08:00:00Z", null);
+    const now = "2026-03-10T10:00:00Z";
+    for (const k of ["mgr", "acct", "agent", "rec", "cand", "emp", "agy"]) assert.equal((await http("GET", "/hr/attendance/open", T[k], undefined, now)).status, 403, k);
+    assert.equal((await http("GET", "/hr/attendance/open", undefined, undefined, now)).status, 401);
+    for (const k of ["sa", "admin", "hr"]) {
+      const r = await http("GET", "/hr/attendance/open", T[k], undefined, now);
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.body.rows.map((x) => [x.id, x.full_name, x.user_id]), [[id, "Old Session", old.id]]);
+      assert.equal(r.body.rows[0].open_hours, 26);
+      assert.equal(r.body.rows[0].work_date, "2026-03-09");
+    }
+  }));
+
+test("correction audit rows mask the reason and the decision note ('[private]')", () =>
+  withWorld(async (w) => {
+    const { http, T, staff, q } = w;
+    const u = await staff("Agent");
+    const r = await http("POST", "/hr/me/corrections", u.token, goodCorrection({ reason: "SENTINEL-COR-REASON" }), NOW);
+    assert.equal(r.status, 201);
+    assert.equal((await http("POST", `/hr/me/corrections/${r.body.id}/cancel`, u.token, {})).status, 200);
+    const r2 = await http("POST", "/hr/me/corrections", u.token, goodCorrection({ reason: "SENTINEL-COR-REASON" }), NOW);
+    assert.equal((await http("POST", `/hr/corrections/${r2.body.id}/decide`, T.hr, { decision: "rejected", note: "SENTINEL-COR-NOTE" })).status, 200);
+    const rows = (await q("SELECT old_data, new_data FROM audit_logs WHERE table_name='hr_attendance_corrections'")).rows;
+    assert.ok(rows.length >= 4);
+    const dump = JSON.stringify(rows);
+    assert.equal(dump.includes("SENTINEL-COR-REASON"), false, "reason leaked into audit");
+    assert.equal(dump.includes("SENTINEL-COR-NOTE"), false, "decision note leaked into audit");
+    assert.ok(dump.includes("[private]"));
+    // the real data is intact
+    assert.equal((await q("SELECT reason, decision_note FROM hr_attendance_corrections WHERE id=$1", [r2.body.id])).rows[0].decision_note, "SENTINEL-COR-NOTE");
   }));

@@ -106,7 +106,8 @@ test("A1: HR configures schedule, leave types, holiday, profiles with managers, 
     ["hr", { employee_no: "H-005", position: "HR officer", department: "HR" }],
   ];
   for (const [key, p] of profiles) {
-    const r = await hr("POST", "/hr/employees", "hr", { user_id: w.users[key], status: "active", ...p });
+    // separation of duties: HR cannot give itself a profile with approval-relevant fields; the Admin sets HR's up
+    const r = await hr("POST", "/hr/employees", key === "hr" ? "admin" : "hr", { user_id: w.users[key], status: "active", ...p });
     assert.equal(r.status, 201, `${key}: ${dump(r)}`);
   }
   // a manager cycle is refused
@@ -114,7 +115,7 @@ test("A1: HR configures schedule, leave types, holiday, profiles with managers, 
   assert.equal(cyc.status, 400, "Manager -> Agent -> Manager would be a cycle");
 
   for (const key of ["agent", "rec", "acc", "mgr", "hr"]) {
-    const b = await hr("PUT", "/hr/balances", "hr", { user_id: w.users[key], leave_type_id: S.annual, year: 2026, entitled_days: "18" });
+    const b = await hr("PUT", "/hr/balances", key === "hr" ? "admin" : "hr", { user_id: w.users[key], leave_type_id: S.annual, year: 2026, entitled_days: "18" });
     assert.equal(b.status, 200, `${key}: ${dump(b)}`);
   }
   const me = await hr("GET", "/hr/me", "agent", undefined, "2026-11-02T08:00:00+01:00");
@@ -336,12 +337,13 @@ test("D2: the team calendar shows leave entries but the JSON never contains a re
   assert.equal(nov.end_date, "2026-11-12");
   assert.equal(nov.status, "approved");
   assert.equal(asMgr.body.holidays.some((h) => h.day === "2026-11-11"), true);
-  const asAcc = await hr("GET", q, "acc"); // same department "Sales": approved leave only
-  assert.deepEqual(agentEntries(asAcc).map((e) => e.start_date), ["2026-11-06"], "same department sees approved leave, not pending");
+  const asAcc = await hr("GET", q, "acc"); // same department "Sales": a department grants nothing (privacy review)
+  assert.equal(agentEntries(asAcc).length, 0, "a colleague in the same department does not see the Agent's leave");
   const asRec = await hr("GET", q, "rec"); // different department: nothing of the Agent
   assert.equal(agentEntries(asRec).length, 0);
   const asHr = await hr("GET", q, "hr");
   assert.equal(agentEntries(asHr).length, 2);
+  assert.equal(agentEntries(await hr("GET", q, "agent")).length, 2, "the owner sees their own approved and pending leave");
   for (const [who, r] of [["mgr", asMgr], ["acc", asAcc], ["rec", asRec], ["hr", asHr], ["agent", await hr("GET", q, "agent")]]) {
     for (const s of ALL_SENTINELS) assert.equal(dump(r).includes(s), false, `${who}: calendar leaks ${s}`);
     for (const e of r.body.entries) assert.equal(Object.keys(e).some((k) => /reason|note|days|decided|request_id/i.test(k)), false, `${who}: entry keys ${Object.keys(e)}`);
@@ -531,8 +533,9 @@ test("F1: Accountant, Receptionist and Agent are denied on every HR admin route;
     typ: await w.count("SELECT count(*) AS n FROM hr_leave_types"),
     bal: await w.count("SELECT COALESCE(sum(entitled_days),0) AS n FROM hr_leave_balances"),
   };
-  const gets = ["/hr/employees", `/hr/employees/${w.users.agent}`, "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/staff", "/hr/reports/attendance?from=2026-11-02&to=2026-11-13", "/hr/reports/leave", "/hr/export/attendance.csv"];
+  const gets = ["/hr/employees", `/hr/employees/${w.users.agent}`, "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/staff", "/hr/reports/attendance?from=2026-11-02&to=2026-11-13", "/hr/reports/leave", "/hr/export/attendance.csv", "/hr/attendance/open"];
   const writes = [
+    ["POST", "/hr/attendance/1/close", { clock_out: "2026-11-02T17:00:00+01:00" }],
     ["POST", "/hr/employees", { user_id: w.users.admin }],
     ["PATCH", `/hr/employees/${w.users.agent}`, { department: "Hacked" }],
     ["POST", "/hr/schedules", { name: "x", weekly: { mon: null } }],
@@ -569,7 +572,7 @@ test("F2: Candidate (real OTP login), Employer and Agency tokens and anonymous c
     "/hr/team/calendar?from=2026-11-01&to=2026-11-30", // calendar
     "/hr/team/corrections", "/hr/team/leave-requests", // approvals
     "/hr/employees", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/staff", // admin
-    "/hr/reports/attendance?from=2026-11-02&to=2026-11-13", "/hr/reports/leave", "/hr/export/attendance.csv", // reports / export
+    "/hr/reports/attendance?from=2026-11-02&to=2026-11-13", "/hr/reports/leave", "/hr/export/attendance.csv", "/hr/attendance/open", // reports / export / stale sessions
   ];
   const posts = [
     ["POST", "/hr/clock-in", {}], ["POST", "/hr/clock-out", {}],
@@ -579,6 +582,7 @@ test("F2: Candidate (real OTP login), Employer and Agency tokens and anonymous c
     ["POST", `/hr/leave-requests/${S.pendingLeave}/decide`, { decision: "approved" }],
     ["POST", `/hr/corrections/${S.corr}/decide`, { decision: "approved" }],
     ["POST", "/hr/employees", { user_id: w.users.admin }],
+    ["POST", "/hr/attendance/1/close", { clock_out: "2026-11-02T17:00:00+01:00" }],
     ["POST", "/hr/holidays", { day: "2026-12-26", name: "x" }],
     ["PUT", "/hr/balances", { user_id: w.users.agent, leave_type_id: S.annual, year: 2026, entitled_days: "365" }],
   ];

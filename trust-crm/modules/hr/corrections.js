@@ -6,8 +6,10 @@
 //  - Decide: one transaction locks the correction FOR UPDATE, then (a) refuses the requester deciding their own request,
 //    (b) answers 404 when the correction is outside the approver's scope (a Manager sees direct reports only; HR/Admin/SuperAdmin
 //    everyone), (c) requires it to still be pending, and on approval (d) inserts ONE hr_attendance row (source 'correction',
-//    correction_id) under the same per-user lock as clock-in/out. If that row overlaps existing attendance (or collides with an
-//    open session) the whole decision fails with 409 and nothing is written: HR resolves it manually. The overlap trigger is the guard.
+//    correction_id) under the same per-user lock as clock-in/out. If the user has an OPEN session (forgotten clock-out)
+//    on that day, that row is corrected instead (clock_in/clock_out replaced, source 'correction'); the employee is not locked out.
+//    If the row overlaps a CLOSED record the whole decision fails with 409 and nothing is written: HR resolves it manually.
+//    Audit rows never carry the reason or decision note ('[private]').
 const { logAudit } = require("../../utils/audit");
 const c = require("./common");
 const { nowParam, requireStaffUser, userTz, clockLock, ISO_WITH_OFFSET } = require("./attendance");
@@ -21,6 +23,8 @@ const MAX_PENDING = 3;
 const MAX_BACK_DAYS = 60;
 const REASON_MAX = 500;
 const COR = `k.id, k.user_id, k.work_date::text AS work_date, k.requested_in, k.requested_out, k.reason, k.status, k.decided_by, k.decided_at, k.decision_note, k.created_at`;
+// Free text the employee / approver typed never enters the audit trail (same rule as leave).
+const priv = (r) => (r ? { ...r, reason: r.reason ? "[private]" : null, decision_note: r.decision_note ? "[private]" : null } : r);
 const OVERLAP_MSG = "overlaps existing attendance; ask HR to resolve";
 
 function parseInstant(v, label, { optional = false } = {}) {
@@ -86,7 +90,7 @@ async function requestCorrection(user, input, opts = {}) {
       [user.id, workDate, reqIn, reqOut, reason]
     );
     const row = await loadCorrection(client, ins.rows[0].id);
-    await logAudit({ client, userId: user.id, action: "CREATE", tableName: "hr_attendance_corrections", recordId: row.id, newData: row });
+    await logAudit({ client, userId: user.id, action: "CREATE", tableName: "hr_attendance_corrections", recordId: row.id, newData: priv(row) });
     return row;
   });
 }
@@ -101,7 +105,7 @@ async function cancelCorrection(user, rawId) {
     if (cur.status !== "pending") throw new HttpError(409, `Only a pending correction can be cancelled (it is ${cur.status})`);
     await client.query("UPDATE hr_attendance_corrections SET status = 'cancelled' WHERE id = $1", [id]);
     const row = await loadCorrection(client, id);
-    await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "hr_attendance_corrections", recordId: id, oldData: cur, newData: row });
+    await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "hr_attendance_corrections", recordId: id, oldData: priv(cur), newData: priv(row) });
     return row;
   });
 }
@@ -161,16 +165,32 @@ async function decide(user, rawId, input) {
     await approvals.assertCanDecide(client, user, cur.user_id, { notFound: "Correction not found", own: "You cannot decide your own correction; another approver must" });
     if (cur.status !== "pending") throw new HttpError(409, `This correction is already ${cur.status}`);
     let attendance;
+    let attendanceBefore = null;
     if (approve) {
       await clockLock(client, cur.user_id);
+      const ATT_RET = "id, user_id, work_date::text AS work_date, clock_in, clock_out, source, correction_id, note, created_at";
+      // A forgotten clock-out leaves an OPEN session that would block both clock-in and this insert: the approved correction
+      // then corrects that very row (same day, same user). A closed record in the way keeps the 409 below.
+      const open = (
+        await client.query(`SELECT ${ATT_RET} FROM hr_attendance WHERE user_id = $1 AND clock_out IS NULL AND work_date = $2::date FOR UPDATE`, [cur.user_id, cur.work_date])
+      ).rows[0];
       try {
-        const ins = await client.query(
-          `INSERT INTO hr_attendance (user_id, work_date, clock_in, clock_out, source, correction_id, note)
-           VALUES ($1, $2::date, $3, $4, 'correction', $5, $6)
-           RETURNING id, user_id, work_date::text AS work_date, clock_in, clock_out, source, correction_id, note, created_at`,
-          [cur.user_id, cur.work_date, cur.requested_in, cur.requested_out, cur.id, `Correction #${cur.id}`]
-        );
-        attendance = ins.rows[0];
+        if (open) {
+          attendanceBefore = open;
+          const upd = await client.query(
+            `UPDATE hr_attendance SET clock_in = $2, clock_out = $3, source = 'correction', correction_id = $4, note = $5 WHERE id = $1 RETURNING ${ATT_RET}`,
+            [open.id, cur.requested_in, cur.requested_out, cur.id, `Correction #${cur.id}`]
+          );
+          attendance = upd.rows[0];
+        } else {
+          const ins = await client.query(
+            `INSERT INTO hr_attendance (user_id, work_date, clock_in, clock_out, source, correction_id, note)
+             VALUES ($1, $2::date, $3, $4, 'correction', $5, $6)
+             RETURNING ${ATT_RET}`,
+            [cur.user_id, cur.work_date, cur.requested_in, cur.requested_out, cur.id, `Correction #${cur.id}`]
+          );
+          attendance = ins.rows[0];
+        }
       } catch (err) {
         if (err && err.code === "23P01") throw new HttpError(409, OVERLAP_MSG);
         if (err && err.code === "23505" && err.constraint === "hr_attendance_one_open_uq") throw new HttpError(409, OVERLAP_MSG);
@@ -179,8 +199,8 @@ async function decide(user, rawId, input) {
     }
     await client.query("UPDATE hr_attendance_corrections SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4 WHERE id = $1", [id, input.decision, user.id, note]);
     const row = await loadCorrection(client, id);
-    await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "hr_attendance_corrections", recordId: id, oldData: cur, newData: row });
-    if (attendance) await logAudit({ client, userId: user.id, action: "CREATE", tableName: "hr_attendance", recordId: attendance.id, newData: attendance });
+    await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "hr_attendance_corrections", recordId: id, oldData: priv(cur), newData: priv(row) });
+    if (attendance) await logAudit({ client, userId: user.id, action: attendanceBefore ? "UPDATE" : "CREATE", tableName: "hr_attendance", recordId: attendance.id, oldData: attendanceBefore, newData: attendance });
     return attendance ? { correction: row, attendance } : { correction: row };
   });
 }

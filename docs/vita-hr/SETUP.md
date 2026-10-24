@@ -1,6 +1,6 @@
 # VITA Attendance and HR — setup and daily use
 
-Attendance and HR are part of the same VITA app: no extra service, container or database. They are switched on by migrations 018 and 019, which run with the normal
+Attendance and HR are part of the same VITA app: no extra service, container or database. They are switched on by migrations 018, 019 and 020, which run with the normal
 update (`./update.sh` / app start). What was and was not verified: [CHECKLIST.md](CHECKLIST.md).
 
 **Nothing is preloaded.** A new installation has no schedule, no leave type, no holiday and no balance. Leave rules, entitlements, holidays and working schedules are **your
@@ -12,7 +12,7 @@ Put them in `.env` (on the VPS: `deploy/hostinger/.env`), then `docker compose u
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HR_TIMEZONE` | `Africa/Tunis` | Company timezone (an IANA name such as `Africa/Tunis` or `Europe/Paris`). Clock times, "today", late and absent are computed in it. A schedule can carry its own timezone; otherwise this one applies. A malformed value falls back to the default. |
+| `HR_TIMEZONE` | `Africa/Tunis` | Company timezone (an IANA name such as `Africa/Tunis` or `Europe/Paris`). Clock times, "today", late and absent are computed in it. A schedule can carry its own timezone; otherwise this one applies. It must be an exact name known to the database (`SELECT name FROM pg_timezone_names`): POSIX-style values such as `UTC+1` and unknown names are refused with an error in the server log and `Africa/Tunis` is used instead. |
 | `HR_MAX_OPEN_HOURS` | `16` | A clock-in left open longer than this many hours (1 to 168) is not closed automatically: clock-out is refused, the record is flagged "needs correction" in reports and the employee requests a correction. |
 | `HR_EXPORT_MAX_ROWS` | `50000` (also the maximum) | Row cap per attendance CSV export. When more rows match, the file is cut and the response carries `X-Row-Limit-Hit: true`; narrow the dates and export again. |
 
@@ -28,6 +28,7 @@ Put them in `.env` (on the VPS: `deploy/hostinger/.env`), then `docker compose u
 
 Everyone with a staff role is an employee. Nobody can read a colleague's attendance, corrections or leave reasons. A request outside a manager's team looks like "not found".
 Nobody approves their own request: an HR or Admin user's request is decided by another HR/Admin user; if there is none, it stays pending.
+Likewise nobody changes their own balance, manager, schedule, status or employment data (HR, Admin and SuperAdmin included): another HR/Admin user does it. Phone and emergency contact can be edited by the person themselves through HR.
 
 ## 3. First-time setup (HR or Admin, in this order)
 
@@ -39,8 +40,7 @@ Open the **HR** tab of the console, then **HR admin**.
    **counted against a balance**, and whether it needs approval. Only counted types need a balance. Types are deactivated, never deleted.
 3. **Public holidays.** Add each holiday date with its name, year by year (movable holidays change every year). A holiday is not a working day: it is not counted as leave, late or absent.
 4. **Employee profiles and managers.** For every staff member create the profile: employee number, position, department, hire date, employment type, phone, emergency contact,
-   **schedule** and **manager**. The manager must be an active staff user; this is who approves. Fill in **department** consistently (colleagues in the same department see each other's
-   approved leave on the calendar). Without a schedule, nobody is expected, so there is no late/absent report for that person. Do not put salary, ID numbers or medical information in
+   **schedule** and **manager**. The manager must be an active staff user; this is who approves. Fill in **department** consistently (informational only: colleagues do not see each other's leave on the calendar). Without a schedule, nobody is expected, so there is no late/absent report for that person. Do not put salary, ID numbers or medical information in
    any field, including the HR-only notes.
 5. **Balances.** For each employee, leave type and year set the entitled days (and adjusted days for carry-over or corrections, negative allowed). Used days are never typed: they are
    calculated from approved requests.
@@ -58,8 +58,9 @@ calendar* shows who is on leave (name, type, dates only). You cannot approve you
 
 **HR / Admin:** approve anything that is pending (including requests of managers and of each other), keep the data of section 3 up to date, and use **Reports**: the *attendance report*
 for a date range (optionally one person): worked minutes, late days, absent days, holidays, leave days, open sessions flagged *needs correction*; the *leave report* per employee and type
-for a year; and **Export CSV** (opens in Excel; text starting with `= + - @` is saved with a leading quote). Exports are logged. An open session flagged *needs correction* is solved by
-the employee requesting a correction; if the approval is refused because it overlaps, HR contacts the employee (the old open record cannot be edited from the console).
+for a year; and **Export CSV** (opens in Excel; text starting with `= + - @` is saved with a leading quote). Exports are logged. An open session flagged *needs correction* (a forgotten clock-out) is solved either by
+the employee requesting a correction (approving it corrects the open record and the employee can clock in again), or by HR in **Admin -> Attendance report -> Open sessions**: *Close* with the real
+clock-out time (within 24 hours of the clock-in, not in the future; audited). If a correction overlaps a closed record, the approval is refused and HR contacts the employee.
 
 ## 5. First check after installing (15 minutes)
 

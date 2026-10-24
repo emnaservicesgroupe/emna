@@ -703,3 +703,13 @@ test("contract: payloads built by the helpers are accepted by the API; /hr/staff
     await cleanup();
   }
 });
+
+test("hr-admin.js: the attendance section lists stale open sessions and closes them through the API (hr:write only), keys in ar/en/fr", () => {
+  const src = read("hr-admin.js");
+  assert.match(src, /V\.api\("GET", "\/hr\/attendance\/open/);
+  assert.match(src, /"\/hr\/attendance\/" \+ r\.id \+ "\/close"/);
+  assert.match(src, /canWrite\(\) \? h\("button"[^;]*hr\.open\.close/, "the Close button is only built for hr:write callers");
+  for (const k of ["hr.open.title", "hr.open.hint", "hr.open.none", "hr.open.close", "hr.open.dialog", "hr.open.dialogHint", "hr.open.closed", "hr.open.invalid"]) {
+    for (const l of LANGS) assert.ok(I18N.dictionaries[l][k] && I18N.dictionaries[l][k].length > 3, `${l}:${k}`);
+  }
+});

@@ -3,7 +3,7 @@
 // Request (POST /hr/me/leave-requests)
 //  - active leave type; dates end >= start, start at most 366 days in the past (company timezone), span at most 366 days.
 //  - days = working days per the employee's schedule (default Mon-Fri when none is configured) minus public holidays, minus 0.5 for
-//    each half-day flag; a flag on a day that is not a working day is a 400; no working day at all is a 400. Computed in SQL.
+//    each half-day flag; the per-year split of a range crossing New Year is stored on the request (days_year_start / days_year_end); a flag on a day that is not a working day is a 400; no working day at all is a 400. Computed in SQL.
 //  - counts_against_balance types need available days (entitled + adjusted - approved - pending) >= the request, checked per
 //    calendar year when the range crosses New Year. The check and the insert run under one advisory lock per (user, leave type).
 //  - status pending, or approved straight away (decided_by NULL) when the type does not require approval.
@@ -129,9 +129,9 @@ async function createRequest(user, input, opts = {}) {
     let id;
     try {
       const ins = await client.query(
-        `INSERT INTO hr_leave_requests (user_id, leave_type_id, start_date, end_date, half_day_start, half_day_end, days, reason, status, decided_at)
-         VALUES ($1,$2,$3::date,$4::date,$5,$6,$7::numeric,$8,$9, CASE WHEN $9 = 'approved' THEN now() ELSE NULL END) RETURNING id`,
-        [user.id, typeId, start, end, hs, he, days, reason, auto ? "approved" : "pending"]
+        `INSERT INTO hr_leave_requests (user_id, leave_type_id, start_date, end_date, half_day_start, half_day_end, days, days_year_start, days_year_end, reason, status, decided_at)
+         VALUES ($1,$2,$3::date,$4::date,$5,$6,$7::numeric,$8::numeric,$9::numeric,$10,$11, CASE WHEN $11 = 'approved' THEN now() ELSE NULL END) RETURNING id`,
+        [user.id, typeId, start, end, hs, he, days, parts[0].days, parts.length > 1 ? parts[1].days : 0, reason, auto ? "approved" : "pending"]
       );
       id = ins.rows[0].id;
     } catch (err) {

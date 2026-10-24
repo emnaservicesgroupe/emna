@@ -211,4 +211,69 @@ async function myAttendance(user, query = {}, opts = {}) {
   return { from: range.from, to: range.to, timezone: tz, records, days, worked_minutes: days.reduce((s, d) => s + d.worked_minutes, 0) };
 }
 
-module.exports = { clockIn, clockOut, myAttendance, resolveRange, nowParam, maxOpenHours, clockLock, userTz, requireStaffUser, withExtra, DAY_KEY, REC, REPLAY_SECONDS, ISO_WITH_OFFSET, MAX_RANGE_DAYS };
+/**
+ * HR closes a stale open session (POST /hr/attendance/:id/close, hr:write): only an OPEN record, clock_out after clock_in, at most
+ * 24 h after it and not in the future. Runs under the user's clock lock; audited; the optional note (<= 500) is stored on the record.
+ */
+async function closeOpen(user, rawId, input, opts = {}) {
+  c.requirePerm(user, "hr:write");
+  const id = c.parseId(rawId, { notFound: "Attendance record not found" });
+  if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
+  c.onlyKeys(input, ["clock_out", "note"]);
+  const v = input.clock_out;
+  if (typeof v !== "string" || !ISO_WITH_OFFSET.test(v) || !Number.isFinite(Date.parse(v)) || Number(v.slice(0, 4)) < 2000 || Number(v.slice(0, 4)) > 2200) {
+    throw new HttpError(400, "clock_out must be an ISO timestamp with an offset, e.g. 2026-03-10T17:00:00+01:00");
+  }
+  const note = c.cleanText(input.note, "note", 500);
+  const now = nowParam(opts);
+  return c.inTransaction(async (client) => {
+    const owner = (await client.query("SELECT user_id FROM hr_attendance WHERE id = $1", [id])).rows[0];
+    if (!owner) throw new HttpError(404, "Attendance record not found");
+    await clockLock(client, owner.user_id);
+    const cur = (await client.query(`SELECT ${REC} FROM hr_attendance a WHERE a.id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!cur) throw new HttpError(404, "Attendance record not found");
+    if (cur.clock_out !== null) throw new HttpError(409, "This record is already closed");
+    const f = (
+      await client.query(
+        `SELECT ($1::timestamptz > $2::timestamptz) AS after_in, ($1::timestamptz - $2::timestamptz <= interval '24 hours') AS span_ok,
+                ($1::timestamptz <= COALESCE($3::timestamptz, clock_timestamp())) AS past`,
+        [v, cur.clock_in, now]
+      )
+    ).rows[0];
+    if (!f.after_in) throw new HttpError(400, "clock_out must be after clock_in");
+    if (!f.span_ok) throw new HttpError(400, "clock_out must be at most 24 hours after clock_in");
+    if (!f.past) throw new HttpError(400, "clock_out must not be in the future");
+    try {
+      await client.query("UPDATE hr_attendance SET clock_out = $2::timestamptz, note = COALESCE($3, note) WHERE id = $1", [id, v, note]);
+    } catch (err) {
+      if (err && err.code === "23P01") throw new HttpError(409, "This overlaps an existing attendance record");
+      throw err;
+    }
+    const closed = await loadRecord(client, id);
+    await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "hr_attendance", recordId: id, oldData: cur, newData: closed });
+    return closed;
+  });
+}
+
+/** GET /hr/attendance/open (hr:read): open sessions older than HR_MAX_OPEN_HOURS, oldest first, with the person's name. */
+async function listStaleOpen(user, query = {}, opts = {}) {
+  c.requirePerm(user, "hr:read");
+  const now = nowParam(opts);
+  const { limit, offset } = c.pageParams(query);
+  const base = `FROM hr_attendance a JOIN users u ON u.id = a.user_id
+     LEFT JOIN hr_employees e ON e.user_id = a.user_id LEFT JOIN hr_schedules s ON s.id = e.schedule_id
+     WHERE a.clock_out IS NULL AND COALESCE($1::timestamptz, clock_timestamp()) - a.clock_in > make_interval(hours => $2::int)`;
+  const total = (await db().query(`SELECT count(*)::int AS n ${base}`, [now, maxOpenHours()])).rows[0].n;
+  const rows = (
+    await db().query(
+      `SELECT a.id, a.user_id, u.full_name, u.role, a.work_date::text AS work_date, a.clock_in,
+              floor(extract(epoch FROM (COALESCE($1::timestamptz, clock_timestamp()) - a.clock_in)) / 3600)::int AS open_hours,
+              COALESCE(s.timezone, $5::text) AS timezone, to_char(a.clock_in AT TIME ZONE COALESCE(s.timezone, $5::text), 'YYYY-MM-DD HH24:MI') AS clock_in_local
+         ${base} ORDER BY a.clock_in ASC, a.id ASC LIMIT $3 OFFSET $4`,
+      [now, maxOpenHours(), limit, offset, c.companyTimezone()]
+    )
+  ).rows;
+  return { rows, total, max_open_hours: maxOpenHours() };
+}
+
+module.exports = { closeOpen, listStaleOpen, clockIn, clockOut, myAttendance, resolveRange, nowParam, maxOpenHours, clockLock, userTz, requireStaffUser, withExtra, DAY_KEY, REC, REPLAY_SECONDS, ISO_WITH_OFFSET, MAX_RANGE_DAYS };

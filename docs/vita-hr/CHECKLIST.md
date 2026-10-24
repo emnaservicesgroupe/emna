@@ -65,6 +65,29 @@ mailbox or a real phone/browser by this checklist.** Run the first-use check in 
 approved by the Manager; leave across a weekend and a holiday counts exactly 4 days; over-balance and overlap are 409; cancel restores the balance; self-approval refused;
 isolation; calendar privacy; report numbers equal an independent SQL computation; CSV parses back; denial matrices; 10 parallel clock-ins; the sweep.
 
+## Review round 1 (independent HR review)
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1 | HIGH: a forgotten clock-out locked the employee out (clock-out 409 after 16 h, clock-in 409 "already clocked in", correction approval 409 on the open row) | completed | An approved correction now updates the user's OPEN row of that work day (clock_in/out replaced, source `correction`, `correction_id`, audited, same clock lock); an overlap with a CLOSED record is still 409. New HR actions `GET /hr/attendance/open` (hr:read, stale sessions with names) and `POST /hr/attendance/:id/close` (hr:write, open records only, clock_out in (clock_in, clock_in+24 h], not in the future, note <= 500, audited); "Open sessions" table with a Close button in the console (ar/en/fr). Tests: `hr-attendance.test.js` (Monday 08:00 in, Tuesday 10:00 out = 409, correction approved, clock-in works; HR close matrix; open list), `hr-ui.test.js`, route sweep |
+| 2 | MEDIUM: leave calendar privacy (department branch) | completed | Department branch removed from `leaveCalendar.js`; non-approvers see only their own leave, Managers direct reports + own, HR/Admin/SuperAdmin all. `hr-leave.test.js`, `hr-e2e.test.js` D2 updated |
+| 3 | MEDIUM: separation of duties | completed | `PUT /hr/balances` for oneself and `PATCH/POST /hr/employees` on oneself touching anything but phone / emergency contact are 403 "someone else must change your own balance/manager/schedule" for HR, Admin and SuperAdmin alike. `hr-admin.test.js` (the e2e journey now has the Admin set up HR's own profile and balance) |
+| 4 | LOW: correction reason / decision note in audit rows | completed | Masked as `[private]` like leave. `hr-attendance.test.js` |
+| 5 | LOW: cross-year split recomputed at read time | completed | Migration `020_hr_leave_year_split.sql` (idempotent, columns + consistency CHECK + `hr_working_days()` + backfill with the previous formula); stored at creation; balances / report / checks read the stored parts (NULL falls back). Tests: holiday and schedule change after approval leave both years unchanged (`hr-leave.test.js`), migration backfill and re-run (`hr-schema.test.js`), migration lists in `fin-schema.test.js` |
+| 6 | LOW: `setBalance` ignored the balance lock | completed | Takes the same advisory lock as leave creation / approval; lowering the granted days below approved + pending (that year, counted types only) is 409; raising or keeping is allowed. Parallel lowering + approval + new request never leaves approved + pending above the entitlement (`hr-leave.test.js`) |
+| 7 | LOW: HR_TIMEZONE validation | completed | Exact match against `pg_timezone_names` (POSIX-style `UTC+1`, wrong case and unknown names are refused); an invalid `HR_TIMEZONE` logs a clear error at start-up and on first use and falls back to `Africa/Tunis`; stored schedules with an unknown zone are reported at start-up; schedule create/patch with an invalid zone is 400; Postgres 22023 inside `inTransaction` becomes a clean error without the Postgres text. `hr-admin.test.js` |
+
+Remaining limits found by the review and **not fixed** (documented only):
+
+- **All-null schedule.** A schedule with no working day counts leave as Mon-Fri (the default week) while the attendance report treats that person as never expected, so the two
+  views disagree for that person until a working day is configured.
+- **Two timezones.** Leave arithmetic (today, the 366-day window, the current year) uses the company timezone (`HR_TIMEZONE`); attendance uses the employee's schedule timezone.
+  For an employee whose schedule zone differs from the company zone, "today" can differ by a day near midnight.
+- **Half-day leave without attendance.** A half-day leave day is not full-day leave, so a person who takes the half day off and does not clock in at all for the other half is
+  flagged absent for that day.
+- **Overnight shifts.** A session belongs to the day it was clocked in on; when an overnight shift has no row on the next calendar day, that next day can be flagged absent
+  because the report looks for attendance rows by work date.
+
 ## Not done / blocked
 
 - [ ] **Not run on a real server.** Same as the other stages: tests ran against a throw-away Postgres schema and an in-process server only.
@@ -80,14 +103,17 @@ isolation; calendar privacy; report numbers equal an independent SQL computation
 
 1. **Team leave list excludes a manager's own requests.** A Manager sees the leave requests of their direct reports; the Manager's own request is never in that list and cannot be
    approved by them (403): it goes to HR/Admin.
-2. **Cross-year leave split is computed at read time.** A request that crosses New Year is split between the two years when balances and reports are read (not stored);
-   the balance check runs per calendar year.
-3. **Calendar department rule.** Staff see approved leave of colleagues with the same department text (case/space-insensitive); a person without a department sees only their own
-   leave. Managers also see pending leave of direct reports; HR/Admin see everyone's. If departments are not filled in, colleagues do not see each other.
+2. **Cross-year leave split is stored at creation (migration 020).** A request that crosses New Year keeps the days of each year (`days_year_start`, `days_year_end`) as computed
+   when it was made; balances, reports and the balance checks use them, so a later holiday or schedule change never moves days between years. Only rows without stored parts
+   (made by code older than 020) fall back to the live computation. The balance check still runs per calendar year.
+3. **Calendar privacy (review round 1).** There is no department rule any more: staff see only their own leave (approved and pending); a Manager sees direct reports (approved and
+   pending) and their own; HR/Admin/SuperAdmin see everyone. Colleagues in the same department do not see each other.
 4. **The clock page relies on the server `Date` header** to show the server time; a phone with a wrong clock still records the correct (server) time, but the displayed clock may be
    off until the page is reloaded.
-5. **A session open longer than 16 hours (`HR_MAX_OPEN_HOURS`) needs a correction.** It is never auto-closed or capped. If the open record overlaps the corrected interval, the approval
-   is refused (409) and HR must resolve it manually (there is no console action that edits attendance directly, by design).
+5. **A session open longer than 16 hours (`HR_MAX_OPEN_HOURS`) needs a fix.** It is never auto-closed or capped. Two ways out (review round 1): the employee requests a correction for
+   that day and its approval corrects the open record itself (the employee can clock in again at once); or HR closes the session from **HR -> Admin -> Attendance report -> Open
+   sessions** (`POST /hr/attendance/:id/close`, within 24 h of the clock-in, not in the future, audited). A correction that overlaps a CLOSED record is still refused (409) and HR
+   resolves it manually.
 6. **The attendance report excludes people without a schedule** (nothing is expected of them, so nobody can be "late" or "absent"); their clock records still appear on days they clocked.
    People with a profile but no schedule use the default Mon-Fri week only for leave day counting.
 7. **Late/absent are computed per calendar day of the schedule's timezone;** several sessions in one day count from the first clock-in; the schedule's break is shown next to the worked
