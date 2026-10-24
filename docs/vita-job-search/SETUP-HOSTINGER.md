@@ -280,6 +280,10 @@ Everything below stays off until you do it; follow the detailed pages:
   database to install, and it is already included in the normal backup. Real payments are **recorded manually** by the Accountant; no payment
   gateway or bank is connected. Optional settings (`FIN_CURRENCIES`, `FIN_TAX_RATE_PERCENT`, `FIN_COMPANY_*`, `FIN_EXPORT_MAX_ROWS`) and the daily
   workflow: [../vita-accounting/SETUP.md](../vita-accounting/SETUP.md).
+- **Attendance and HR** (clock in/out, leave requests and approvals, corrections, holidays, reports) is part of the same VITA app too: no extra service, container
+  or database, included in the normal backup and switched on by the normal update. The only settings are optional: `HR_TIMEZONE` (default `Africa/Tunis`; set
+  it if your staff work in another timezone), `HR_MAX_OPEN_HOURS` and `HR_EXPORT_MAX_ROWS`. Schedules, leave types, holidays and entitlements are entered by HR; nothing
+  is preloaded. Setup order and daily use: [../vita-hr/SETUP.md](../vita-hr/SETUP.md).
 
 After every `.env` change: `docker compose up -d`. If a setting is wrong, the app does not start and
 `./logs.sh app` lists **every** problem (setting names only, never values).
