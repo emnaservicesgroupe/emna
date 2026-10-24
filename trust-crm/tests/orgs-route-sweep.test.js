@@ -357,7 +357,7 @@ test("sweep controls: the refused routes are alive for the roles that own them (
     assert.equal((await probe(w.base, "GET", url, attacker.token)).status, 403, `candidate GET ${url}`);
   }
   // HR: staff reach /hr/me (any active staff) and the permission-gated admin reads; the portals and the Candidate are refused on all of them.
-  for (const url of ["/hr/me", "/hr/employees", "/hr/employees/1", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances"]) {
+  for (const url of ["/hr/me", "/hr/employees", "/hr/employees/1", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/me/attendance", "/hr/me/corrections", "/hr/team/corrections", "/hr/reports/attendance", "/hr/export/attendance.csv"]) {
     if (url !== "/hr/employees/1") await ok(w.tokens.admin, url, "admin hr");
     for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
       const r = await probe(w.base, "GET", url, token);
@@ -366,6 +366,16 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   }
   await ok(w.tokens.mgr, "/hr/me", "manager hr self-view");
   assert.equal((await probe(w.base, "GET", "/hr/employees", w.tokens.mgr)).status, 403, "a Manager has no hr:read");
+  await ok(w.tokens.mgr, "/hr/team/corrections", "manager approvals (own reports)");
+  await ok(w.tokens.mgr, "/hr/me/attendance", "manager own attendance");
+  for (const url of ["/hr/reports/attendance", "/hr/export/attendance.csv"]) assert.equal((await probe(w.base, "GET", url, w.tokens.mgr)).status, 403, `a Manager has no hr:read: ${url}`);
+  // The POST routes (clock, correction request/cancel/decide) are refused for portal roles and anonymous by the router gate.
+  for (const url of ["/hr/clock-in", "/hr/clock-out", "/hr/me/corrections", "/hr/me/corrections/1/cancel", "/hr/corrections/1/decide"]) {
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "POST", url, token);
+      assert.ok(DENIED.has(r.status), `${role} POST ${url} -> ${r.status}`);
+    }
+  }
   // Staff reach every staff-only prefix, and a staff token sees the victim's rows the portal tokens are refused.
   for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/expenses.csv", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
     await ok(w.tokens.admin, url, "admin");
