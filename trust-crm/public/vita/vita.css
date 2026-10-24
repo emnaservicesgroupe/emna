@@ -299,3 +299,37 @@ dialog.wide fieldset { margin-block-end: 0.75rem; }
 .fin-line .field { margin: 0; }
 @media (min-width: 700px) { .fin-line { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: end; } .fin-line .hint { grid-column: 1 / -1; } }
 dialog.wide fieldset { min-inline-size: 0; }
+
+/* HR tab (attendance, leave, approvals, administration) */
+.hr-clock { display: grid; gap: 0.5rem; justify-items: start; }
+.hr-time { font-size: 2.4rem; font-weight: 700; line-height: 1.1; color: var(--navy); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.hr-clock .btn.big { min-block-size: 64px; inline-size: 100%; max-inline-size: 360px; font-size: 1.25rem; }
+.btn.go { background: var(--ok); border-color: var(--ok); }
+.btn.go:hover { background: #0f5223; border-color: #0f5223; }
+.btn.go[disabled], .btn.stop[disabled] { background: #e4e8ef; border-color: #c2cad6; color: #4a5568; }
+.btn.stop { background: var(--bad); border-color: var(--bad); }
+.btn.stop:hover { background: #7f1013; border-color: #7f1013; }
+.hr-split { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 900px) { .hr-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); } }
+.hr-month { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-block-end: 0.75rem; }
+.hr-month .label { font-weight: 600; color: var(--navy); min-inline-size: 9rem; text-align: center; }
+.hr-days { display: grid; gap: 0.35rem; }
+.hr-day-row { display: grid; gap: 0.4rem; grid-template-columns: 1fr 1fr; align-items: end; border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; }
+.hr-day-row .day-name { grid-column: 1 / -1; }
+.hr-day-row .field { margin: 0; }
+@media (min-width: 700px) { .hr-day-row { grid-template-columns: 9rem repeat(3, minmax(0, 1fr)); } .hr-day-row .day-name { grid-column: auto; } }
+.hr-cal td, .hr-cal th { padding: 0.25rem 0.3rem; text-align: center; min-inline-size: 1.9rem; font-size: 0.8rem; }
+.hr-cal th.who, .hr-cal td.who { text-align: start; position: sticky; inset-inline-start: 0; background: var(--white); min-inline-size: 7.5rem; max-inline-size: 11rem; font-size: 0.85rem; z-index: 1; }
+.hr-cal td.cal-approved { background: var(--blue-50); color: var(--navy); font-weight: 700; }
+.hr-cal td.cal-pending { background: var(--warn-50); color: var(--warn); border: 1px dashed var(--warn); font-weight: 700; }
+.hr-cal td.cal-half::after { content: "\00bd"; }
+.hr-cal th.cal-holiday, .hr-cal td.cal-holiday { background: var(--gold-50); }
+.hr-legend { display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem; color: var(--muted); margin-block: 0.5rem; }
+.hr-legend .sw { display: inline-block; inline-size: 0.9rem; block-size: 0.9rem; border-radius: 3px; margin-inline-end: 0.3rem; vertical-align: middle; border: 1px solid var(--line); }
+.hr-legend .sw.approved { background: var(--blue-50); border-color: var(--blue); }
+.hr-legend .sw.pending { background: var(--warn-50); border: 1px dashed var(--warn); }
+.hr-legend .sw.holiday { background: var(--gold-50); border-color: var(--gold); }
+.hr-subnav { margin-block-end: 1rem; }
+.hr-flags { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.hr-cal td { position: relative; }
+#hr-sec-team .card-head select { inline-size: auto; min-inline-size: 10rem; }

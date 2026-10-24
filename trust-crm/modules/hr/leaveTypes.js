@@ -47,6 +47,14 @@ async function listLeaveTypes(user, query = {}) {
   return { rows, total: rows.length };
 }
 
+/** GET /hr/me/leave-types: the ACTIVE types any staff member may request (the leave-request dialog needs them without hr:read). */
+async function listActiveForStaff(user) {
+  const { requireStaffUser } = require("./attendance");
+  requireStaffUser(user);
+  const rows = (await db().query(`SELECT ${COLS} FROM hr_leave_types WHERE active ORDER BY code ASC`)).rows;
+  return { rows, total: rows.length };
+}
+
 async function createLeaveType(user, input) {
   c.requirePerm(user, "hr:write");
   const v = validate(input, { creating: true });
@@ -84,4 +92,4 @@ async function updateLeaveType(user, rawId, input) {
   });
 }
 
-module.exports = { listLeaveTypes, createLeaveType, updateLeaveType };
+module.exports = { listLeaveTypes, listActiveForStaff, createLeaveType, updateLeaveType };

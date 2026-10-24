@@ -1,6 +1,8 @@
 // HR API (stage 5), mounted at /hr with its own 32 kb JSON parser. Router level: an authenticated, ACTIVE staff account
 // (requireStaff: Candidate / Employer / Agency are refused everywhere, a deactivated account is 401); then per-route permission.
 //   GET   /me                         any active staff -> own profile subset (profile:null without an HR row), schedule, balances of the year
+//   GET   /staff ?without_profile        hr:read -> {rows:[{user_id,full_name,role,has_profile}]} active staff for the console pickers
+//   GET   /me/leave-types                 any active staff -> {rows} the ACTIVE leave types (for the request dialog)
 //   GET   /employees ?status&department&q&limit&offset   hr:read -> {rows,total}
 //   POST  /employees {user_id,...}    hr:write (201; 409 profile exists / employee_no taken)
 //   GET   /employees/:user_id         hr:read (HR-only notes included only for hr:read callers; has_profile:false without a row)
@@ -54,6 +56,8 @@ router.use(requireStaff);
 
 router.get("/me", asyncHandler(async (req, res) => res.json(await employees.me(req.user))));
 
+router.get("/staff", checkPermission("hr:read"), asyncHandler(async (req, res) => res.json(await employees.listStaff(req.user, req.query))));
+router.get("/me/leave-types", asyncHandler(async (req, res) => res.json(await leaveTypes.listActiveForStaff(req.user))));
 router.get("/employees", checkPermission("hr:read"), asyncHandler(async (req, res) => res.json(await employees.listEmployees(req.user, req.query))));
 router.post("/employees", checkPermission("hr:write"), asyncHandler(async (req, res) => res.status(201).json(await employees.createEmployee(req.user, body(req)))));
 router.get("/employees/:user_id", checkPermission("hr:read"), asyncHandler(async (req, res) => res.json(await employees.getEmployee(req.user, req.params.user_id))));

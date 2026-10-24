@@ -24,6 +24,10 @@
   <script src="fin-services.js" defer></script>
   <script src="fin-expenses.js" defer></script>
   <script src="fin-reports.js" defer></script>
+  <script src="hr-util.js" defer></script>
+  <script src="hr-my.js" defer></script>
+  <script src="hr-team.js" defer></script>
+  <script src="hr-admin.js" defer></script>
 </head>
 <body data-page="admin" data-title-key="admin.title">
   <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
@@ -78,6 +82,7 @@
         <button type="button" role="tab" id="tab-orgs" aria-controls="panel-orgs" data-tab="orgs" data-i18n="tab.orgs">Organisations</button>
         <button type="button" role="tab" id="tab-employerRequests" aria-controls="panel-employerRequests" data-tab="employerRequests" data-i18n="tab.employerRequests">Employer requests</button>
         <button type="button" role="tab" id="tab-accounting" aria-controls="panel-accounting" data-tab="accounting" data-i18n="tab.accounting">Accounting</button>
+        <button type="button" role="tab" id="tab-hr" aria-controls="panel-hr" data-tab="hr" data-i18n="tab.hr">HR</button>
         <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
         <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
         <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
@@ -251,6 +256,22 @@
         <div id="fin-sec-reports" hidden></div>
         <div id="fin-sec-expenses" hidden></div>
         <div id="fin-sec-services" hidden></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- HR (built by hr-*.js; every staff role) -->
+      <section id="panel-hr" role="tabpanel" aria-labelledby="tab-hr" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="hr.title">HR</h2>
+          <p class="notice info small" data-i18n="hr.hint">Clock in and out, request leave or a correction, and follow your requests. Times are the company's time. Managers approve for their direct reports; HR manages profiles, schedules, leave types, holidays and balances.</p>
+          <div class="btn-row" role="group" data-i18n-aria-label="hr.sections">
+            <button type="button" class="btn secondary small" id="hr-nav-my" aria-pressed="true" data-i18n="hr.sec.my">My work</button>
+            <button type="button" class="btn secondary small" id="hr-nav-team" aria-pressed="false" hidden data-i18n="hr.sec.team">Team</button>
+            <button type="button" class="btn secondary small" id="hr-nav-admin" aria-pressed="false" hidden data-i18n="hr.sec.admin">HR admin</button>
+          </div>
+        </div>
+        <div id="hr-sec-my"></div>
+        <div id="hr-sec-team" hidden></div>
+        <div id="hr-sec-admin" hidden></div>
       </section>
 
       <!-- ---------------------------------------------------------- applications -->

@@ -6,8 +6,8 @@
   var V = window.VITA;
   var t = V.t, tc = V.tc, h = V.h, $ = V.$;
 
-  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant"];
-  var JOBSEARCH_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]; // jobsearch:read (the Accountant uses the Accounting tab only)
+  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant", "HR"]; // every staff role may sign in; the HR tab is for all of them
+  var JOBSEARCH_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]; // jobsearch:read (the Accountant and HR roles use their own tabs; every staff role also sees the HR tab)
   var JOBSEARCH_TABS = ["dashboard", "applications", "review", "interviews", "sources", "settings", "reports", "directory"];
   var PERMS = {
     SuperAdmin: ["read", "write", "approve", "admin"],
@@ -169,7 +169,7 @@
         renderWho();
         setupTabs();
         applyRoleTabs();
-        // The live stream needs jobsearch:read; an Accountant works in the Accounting tab and has no stream.
+        // The live stream needs jobsearch:read; an Accountant / HR user works in their own tabs and has no stream.
         if (hasJobsearch()) S.events = V.connectEvents({
           onEvent: function () { refreshSoon(); },
           onStatus: V.liveIndicator($("#live-status")),

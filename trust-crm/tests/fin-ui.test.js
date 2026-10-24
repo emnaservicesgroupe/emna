@@ -36,7 +36,9 @@ test("admin.html: Accounting tab + panel, fin scripts load last and in order, no
   assert.match(html, /<button type="button" role="tab" id="tab-accounting" aria-controls="panel-accounting" data-tab="accounting" data-i18n="tab\.accounting">/);
   assert.match(html, /<section id="panel-accounting" role="tabpanel" aria-labelledby="tab-accounting"/);
   const order = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map((m) => m[1]);
-  assert.deepEqual(order.slice(-FIN_JS.length), FIN_JS, "fin scripts are the last scripts, util first");
+  const finAt = order.indexOf("fin-util.js");
+  assert.deepEqual(order.slice(finAt, finAt + FIN_JS.length), FIN_JS, "fin scripts are contiguous, util first (the HR scripts follow them, see tests/hr-ui.test.js)");
+  assert.deepEqual(order.slice(finAt + FIN_JS.length), ["hr-util.js", "hr-my.js", "hr-team.js", "hr-admin.js"]);
   assert.ok(order.indexOf("fin-util.js") > order.indexOf("admin.js") && order.indexOf("fin-util.js") > order.indexOf("crm-util.js"));
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /\sstyle\s*=/i);
@@ -82,9 +84,9 @@ test("download(): can open an authenticated blob in a new tab (no token in a URL
   assert.doesNotMatch(src, /[?&](?:token|access_token)=/);
 });
 
-test("admin.js: Accountant may use the console but only sees accounting tabs; no live stream without jobsearch:read", () => {
+test("admin.js: Accountant may use the console but only sees accounting tabs (and the HR tab); no live stream without jobsearch:read", () => {
   const js = read("admin.js");
-  assert.match(js, /var STAFF_ROLES = \["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant"\]/);
+  assert.match(js, /var STAFF_ROLES = \["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant", "HR"\]/);
   assert.match(js, /function hasJobsearch\(\)/);
   assert.match(js, /if \(hasJobsearch\(\)\) S\.events = V\.connectEvents/);
   assert.match(js, /function applyRoleTabs\(\)/);

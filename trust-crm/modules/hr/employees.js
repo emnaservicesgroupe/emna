@@ -187,6 +187,24 @@ async function updateEmployee(user, rawId, input) {
 }
 
 /**
+ * GET /hr/staff (hr:read): every ACTIVE staff account with a has_profile flag, for the console's employee / manager / balance
+ * pickers (name and role only, no e-mail). Optional ?without_profile=true narrows it to staff HR has not set up yet.
+ */
+async function listStaff(user, query = {}) {
+  c.requirePerm(user, "hr:read");
+  const w = c.oneValue(query.without_profile, "without_profile");
+  if (w !== undefined && w !== "" && w !== "true" && w !== "false") throw new HttpError(400, "without_profile must be true or false");
+  const r = await db().query(
+    `SELECT u.id AS user_id, u.full_name, u.role, (e.user_id IS NOT NULL) AS has_profile
+       FROM users u LEFT JOIN hr_employees e ON e.user_id = u.id
+      WHERE u.is_active AND u.role = ANY($1::text[]) AND ($2::boolean IS NOT TRUE OR e.user_id IS NULL)
+      ORDER BY u.full_name ASC, u.id ASC LIMIT 500`,
+    [STAFF_LIST, w === "true"]
+  );
+  return { rows: r.rows, total: r.rows.length };
+}
+
+/**
  * GET /hr/me: the caller's own HR view. `profile` is null when HR has not created a row (self-service still works); the
  * balances are those of the current YEAR IN THE COMPANY TIMEZONE with used days derived from approved leave. No notes,
  * no phone / emergency contact: only position, department, hire date, employment type, manager name and the schedule.
@@ -217,4 +235,4 @@ async function me(user) {
   return { user: who, profile, schedule, timezone: tz, year, balances };
 }
 
-module.exports = { listEmployees, getEmployee, createEmployee, updateEmployee, me };
+module.exports = { listEmployees, getEmployee, createEmployee, updateEmployee, listStaff, me };
