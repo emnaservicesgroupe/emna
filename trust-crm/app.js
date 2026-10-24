@@ -6,6 +6,8 @@ const alertRoutes = require("./routes/alerts");
 const authRoutes = require("./routes/auth");
 const notificationRoutes = require("./routes/notifications");
 const financeRoutes = require("./routes/finance");
+const financeV2Routes = require("./routes/financeV2");
+const hrRoutes = require("./routes/hr");
 const documentRoutes = require("./routes/documents");
 const auditRoutes = require("./routes/audit");
 const jobsearchAuthRoutes = require("./routes/jobsearchAuth");
@@ -47,6 +49,8 @@ app.use("/public", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/crm", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use("/employer", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/agency", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
+app.use("/finance", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
+app.use("/hr", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 // Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
@@ -88,6 +92,10 @@ app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/finance", financeRoutes);
+// Accounting v2 (services, numbered invoices, ...). After the legacy router so /dashboard, POST /invoices and POST /payments are unchanged.
+app.use("/finance", financeV2Routes);
+// HR (stage 5): employees, schedules, leave types, holidays, balances and the self-service /hr/me. Staff accounts only.
+app.use("/hr", hrRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
 // Employer / Agency tokens never reach any /jobsearch handler (except GET /auth/me and the OTP routes).

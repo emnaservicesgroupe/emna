@@ -1,0 +1,25 @@
+/* Printable invoice / receipt documents served by the finance API (screen + print). No inline styles are used. */
+.fin-doc { margin: 0; background: #f4f5f7; color: #111; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.fin-sheet { position: relative; box-sizing: border-box; max-inline-size: 800px; margin: 16px auto; padding: 24px 16px; background: #fff; overflow: hidden; }
+.fin-head h1 { margin: 0 0 12px; font-size: 22px; color: #0b2a5b; }
+.fin-company { margin-block-end: 12px; }
+.co-name { font-weight: 700; font-size: 16px; }
+.fin-meta dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 16px; }
+.fin-meta dt { color: #555; }
+.fin-meta dd { margin: 0; }
+table { inline-size: 100%; border-collapse: collapse; }
+.fin-items th, .fin-items td { padding: 6px 8px; border-block-end: 1px solid #ddd; text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.fin-items thead th { border-block-end: 2px solid #0b2a5b; }
+.num { text-align: end !important; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fin-totals { inline-size: auto; margin-block: 16px 0; margin-inline-start: auto; }
+.fin-totals th { padding: 4px 12px; text-align: start; font-weight: 400; color: #555; }
+.fin-totals td { padding: 4px 0; }
+.fin-totals .grand th, .fin-totals .grand td { font-weight: 700; color: #111; border-block-start: 2px solid #0b2a5b; }
+.fin-notes p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.fin-void { margin-block-start: 16px; padding: 8px; border: 1px solid #b00020; color: #b00020; }
+.watermark { position: absolute; inset-block-start: 40%; inset-inline: 0; text-align: center; font-size: 96px; font-weight: 800; letter-spacing: 8px; color: rgba(176, 0, 32, 0.18); transform: rotate(-20deg); pointer-events: none; user-select: none; }
+@media print {
+  @page { margin: 15mm; }
+  .fin-doc { background: #fff; }
+  .fin-sheet { margin: 0; padding: 0; max-inline-size: none; }
+}

@@ -57,7 +57,15 @@ const ROUTE_RULES = [
   { re: /^\w+ \/crm\//, allow: NONE, why: "staff CRM" },
   { re: /^POST \/auth\/register$/, allow: NONE, why: "users:write" },
   { re: /^\w+ \/candidates\//, allow: NONE, why: "staff candidate CRUD (/candidates/*)" },
-  { re: /^\w+ \/finance\//, allow: NONE, why: "finance" },
+  // finance: legacy (/dashboard, POST /invoices, POST /payments) and stage-4 routes (routes/financeV2.js: /services*, /invoices*, /payments*,
+  // /expenses*, /expense-categories*, /reports/*, /export/*.csv) are staff permissions only: no portal role and no Candidate.
+  // The ONE exception is the Candidate self-view, GET /finance/me and GET /finance/me/invoices/:id/print (role Candidate only,
+  // ownership from js_candidate_accounts); Employer and Agency never reach it. First match wins, so it sits before the catch-all.
+  { re: /^GET \/finance\/me(\/|$)/, allow: ["candidate"], why: "finance candidate self-view (/finance/me*)" },
+  { re: /^\w+ \/finance\//, allow: NONE, why: "finance (staff permissions)" },
+  // hr (stage 5, routes/hr.js): /hr/me and every admin route sit behind requireStaff (an ACTIVE staff account); Candidate, Employer and
+  // Agency are refused on all of them, /hr/me included. Staff access is by permission / report line and is covered by tests/hr-*.test.js.
+  { re: /^\w+ \/hr\//, allow: NONE, why: "hr (active staff accounts only)" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -335,8 +343,45 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   assert.equal((await ok(attacker.token, "/jobsearch/auth/me", "candidate")).json.candidate_id, attacker.id);
   await ok(attacker.token, "/jobsearch/applications/2", "candidate own application");
   await ok(attacker.token, "/jobsearch/messages", "candidate messages");
+  // Finance self-view: the Candidate gets its own (empty) statement; staff, Employer, Agency and anonymous are refused on /finance/me*.
+  const finMe = await ok(attacker.token, "/finance/me", "candidate finance self-view");
+  assert.deepEqual(finMe.json, { invoices: [], totals: [] });
+  for (const url of ["/finance/me", "/finance/me/invoices/1/print"]) {
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["admin", w.tokens.admin], ["mgr", w.tokens.mgr], ["anon", null]]) {
+      const r = await probe(w.base, "GET", url, token);
+      assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
+    }
+  }
+  // ...and the Candidate is refused on every staff finance route (the carve-out is /me* only).
+  for (const url of ["/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/invoices.csv"]) {
+    assert.equal((await probe(w.base, "GET", url, attacker.token)).status, 403, `candidate GET ${url}`);
+  }
+  // HR: staff reach /hr/me (any active staff) and the permission-gated admin reads; the portals and the Candidate are refused on all of them.
+  for (const url of ["/hr/me", "/hr/employees", "/hr/employees/1", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/me/attendance", "/hr/me/corrections", "/hr/team/corrections", "/hr/reports/attendance", "/hr/export/attendance.csv", "/hr/me/leave-requests", "/hr/team/leave-requests", "/hr/team/calendar?from=2026-03-01&to=2026-03-31", "/hr/reports/leave", "/hr/staff", "/hr/me/leave-types", "/hr/attendance/open"]) {
+    if (url !== "/hr/employees/1") await ok(w.tokens.admin, url, "admin hr");
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "GET", url, token);
+      assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
+    }
+  }
+  await ok(w.tokens.mgr, "/hr/me", "manager hr self-view");
+  assert.equal((await probe(w.base, "GET", "/hr/employees", w.tokens.mgr)).status, 403, "a Manager has no hr:read");
+  await ok(w.tokens.mgr, "/hr/team/corrections", "manager approvals (own reports)");
+  await ok(w.tokens.mgr, "/hr/me/attendance", "manager own attendance");
+  await ok(w.tokens.mgr, "/hr/team/leave-requests", "manager leave approvals (own reports)");
+  await ok(w.tokens.mgr, "/hr/team/calendar?from=2026-03-01&to=2026-03-31", "manager team calendar");
+  await ok(w.tokens.mgr, "/hr/me/leave-requests", "manager own leave");
+  await ok(w.tokens.mgr, "/hr/me/leave-types", "manager active leave types");
+  for (const url of ["/hr/reports/attendance", "/hr/export/attendance.csv", "/hr/reports/leave", "/hr/staff", "/hr/attendance/open"]) assert.equal((await probe(w.base, "GET", url, w.tokens.mgr)).status, 403, `a Manager has no hr:read: ${url}`);
+  // The POST routes (clock, correction request/cancel/decide) are refused for portal roles and anonymous by the router gate.
+  for (const url of ["/hr/clock-in", "/hr/clock-out", "/hr/me/corrections", "/hr/me/corrections/1/cancel", "/hr/corrections/1/decide", "/hr/me/leave-requests", "/hr/me/leave-requests/1/cancel", "/hr/leave-requests/1/decide", "/hr/attendance/1/close"]) {
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "POST", url, token);
+      assert.ok(DENIED.has(r.status), `${role} POST ${url} -> ${r.status}`);
+    }
+  }
   // Staff reach every staff-only prefix, and a staff token sees the victim's rows the portal tokens are refused.
-  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
+  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/expenses.csv", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
     await ok(w.tokens.admin, url, "admin");
   }
   // The same victim rows through each portal token and the foreign Candidate: refused.
