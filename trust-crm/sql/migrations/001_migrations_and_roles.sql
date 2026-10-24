@@ -9,11 +9,10 @@ DECLARE
   c record;
 BEGIN
   FOR c IN
-    SELECT con.conname
-    FROM pg_constraint con
-    WHERE con.contype = 'c'
-      AND con.conrelid = to_regclass('users')
-      AND pg_get_constraintdef(con.oid) ILIKE '%role%'
+    SELECT s.conname
+    FROM (SELECT con.conname, con.oid FROM pg_constraint con
+           WHERE con.contype = 'c' AND con.conrelid = to_regclass('users') OFFSET 0) s
+    WHERE pg_get_constraintdef(s.oid) ILIKE '%role%'
   LOOP
     EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', c.conname);
   END LOOP;
