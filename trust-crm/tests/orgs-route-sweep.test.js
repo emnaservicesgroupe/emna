@@ -63,6 +63,9 @@ const ROUTE_RULES = [
   // ownership from js_candidate_accounts); Employer and Agency never reach it. First match wins, so it sits before the catch-all.
   { re: /^GET \/finance\/me(\/|$)/, allow: ["candidate"], why: "finance candidate self-view (/finance/me*)" },
   { re: /^\w+ \/finance\//, allow: NONE, why: "finance (staff permissions)" },
+  // hr (stage 5, routes/hr.js): /hr/me and every admin route sit behind requireStaff (an ACTIVE staff account); Candidate, Employer and
+  // Agency are refused on all of them, /hr/me included. Staff access is by permission / report line and is covered by tests/hr-*.test.js.
+  { re: /^\w+ \/hr\//, allow: NONE, why: "hr (active staff accounts only)" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -353,6 +356,16 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   for (const url of ["/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/invoices.csv"]) {
     assert.equal((await probe(w.base, "GET", url, attacker.token)).status, 403, `candidate GET ${url}`);
   }
+  // HR: staff reach /hr/me (any active staff) and the permission-gated admin reads; the portals and the Candidate are refused on all of them.
+  for (const url of ["/hr/me", "/hr/employees", "/hr/employees/1", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances"]) {
+    if (url !== "/hr/employees/1") await ok(w.tokens.admin, url, "admin hr");
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "GET", url, token);
+      assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
+    }
+  }
+  await ok(w.tokens.mgr, "/hr/me", "manager hr self-view");
+  assert.equal((await probe(w.base, "GET", "/hr/employees", w.tokens.mgr)).status, 403, "a Manager has no hr:read");
   // Staff reach every staff-only prefix, and a staff token sees the victim's rows the portal tokens are refused.
   for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/expenses.csv", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
     await ok(w.tokens.admin, url, "admin");
