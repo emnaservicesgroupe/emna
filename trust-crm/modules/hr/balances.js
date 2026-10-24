@@ -1,8 +1,10 @@
 // Leave balances (hr_leave_balances): HR sets entitled and adjusted days per (user, leave type, year). Used days are never
-// stored: they are derived from APPROVED leave requests (attributed to the year of their start date). Days travel as
+// stored: used_days = APPROVED requests, pending_days = PENDING requests (a range crossing New Year is split between the two
+// years, see leaveDays.yearShare); remaining_days = entitled + adjusted - used; available_days also subtracts pending. Days travel as
 // normalised decimal strings, all arithmetic is NUMERIC in SQL.
 const { logAudit } = require("../../utils/audit");
 const c = require("./common");
+const { yearShare } = require("./leaveDays");
 
 const { HttpError } = c;
 const db = () => require("../../db");
@@ -11,13 +13,17 @@ const SELECT = `
   SELECT b.id, b.user_id, b.leave_type_id, t.code AS leave_type_code, t.name_ar, t.name_en, t.name_fr, t.counts_against_balance, b.year,
          b.entitled_days::text AS entitled_days, b.adjusted_days::text AS adjusted_days,
          COALESCE(u.used, 0)::numeric(8,2)::text AS used_days,
-         (b.entitled_days + b.adjusted_days - COALESCE(u.used, 0))::numeric(8,2)::text AS remaining_days
+         COALESCE(u.pending, 0)::numeric(8,2)::text AS pending_days,
+         (b.entitled_days + b.adjusted_days - COALESCE(u.used, 0))::numeric(8,2)::text AS remaining_days,
+         (b.entitled_days + b.adjusted_days - COALESCE(u.used, 0) - COALESCE(u.pending, 0))::numeric(8,2)::text AS available_days
     FROM hr_leave_balances b
     JOIN hr_leave_types t ON t.id = b.leave_type_id
     LEFT JOIN LATERAL (
-      SELECT sum(r.days) AS used FROM hr_leave_requests r
-       WHERE r.user_id = b.user_id AND r.leave_type_id = b.leave_type_id AND r.status = 'approved'
-         AND r.start_date >= make_date(b.year, 1, 1) AND r.start_date <= make_date(b.year, 12, 31)
+      SELECT sum(${yearShare("r", "b.year")}) FILTER (WHERE r.status = 'approved') AS used,
+             sum(${yearShare("r", "b.year")}) FILTER (WHERE r.status = 'pending') AS pending
+        FROM hr_leave_requests r
+       WHERE r.user_id = b.user_id AND r.leave_type_id = b.leave_type_id AND r.status IN ('approved', 'pending')
+         AND r.start_date <= make_date(b.year, 12, 31) AND r.end_date >= make_date(b.year, 1, 1)
     ) u ON true`;
 
 /** Balances of one user for one year, with derived used / remaining. `runner` is a pool or a client. */

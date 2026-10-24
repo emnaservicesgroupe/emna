@@ -11,6 +11,7 @@
 const { logAudit } = require("../../utils/audit");
 const c = require("./common");
 const { nowParam, requireStaffUser, userTz, clockLock, ISO_WITH_OFFSET } = require("./attendance");
+const approvals = require("./approvals");
 
 const { HttpError } = c;
 const db = () => require("../../db");
@@ -122,9 +123,6 @@ async function myCorrections(user, query = {}) {
   return { rows, total };
 }
 
-/** hr:read holders (HR, Admin, SuperAdmin) see everyone; a hr:approve-only Manager sees direct reports (hr_employees.manager_user_id). */
-const seesAll = (user) => c.hasPerm(user, "hr:read");
-
 async function teamCorrections(user, query = {}) {
   c.requirePerm(user, "hr:approve");
   const status = parseStatusFilter(query, { def: "pending", allowAll: true });
@@ -135,10 +133,8 @@ async function teamCorrections(user, query = {}) {
     params.push(status);
     where.push(`k.status = $${params.length}`);
   }
-  if (!seesAll(user)) {
-    params.push(user.id);
-    where.push(`k.user_id IN (SELECT r.user_id FROM hr_employees r WHERE r.manager_user_id = $${params.length})`);
-  }
+  const scope = approvals.scopeSql(user, params, "k.user_id");
+  if (scope) where.push(scope);
   const filter = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const base = `FROM hr_attendance_corrections k JOIN users u ON u.id = k.user_id LEFT JOIN hr_employees e ON e.user_id = k.user_id ${filter}`;
   const total = (await db().query(`SELECT count(*)::int AS n ${base}`, params)).rows[0].n;
@@ -162,11 +158,7 @@ async function decide(user, rawId, input) {
   return c.inTransaction(async (client) => {
     const cur = (await client.query(`SELECT ${COR} FROM hr_attendance_corrections k WHERE k.id = $1 FOR UPDATE`, [id])).rows[0];
     if (!cur) throw new HttpError(404, "Correction not found");
-    if (cur.user_id === user.id) throw new HttpError(403, "You cannot decide your own correction; another approver must");
-    if (!seesAll(user)) {
-      const inScope = await client.query("SELECT 1 FROM hr_employees WHERE user_id = $1 AND manager_user_id = $2", [cur.user_id, user.id]);
-      if (!inScope.rowCount) throw new HttpError(404, "Correction not found");
-    }
+    await approvals.assertCanDecide(client, user, cur.user_id, { notFound: "Correction not found", own: "You cannot decide your own correction; another approver must" });
     if (cur.status !== "pending") throw new HttpError(409, `This correction is already ${cur.status}`);
     let attendance;
     if (approve) {

@@ -17,6 +17,15 @@
 //   GET   /team/corrections ?status   hr:approve (Manager: direct reports only; HR/Admin/SuperAdmin: everyone)
 //   POST  /corrections/:id/decide {decision:approved|rejected,note?}   hr:approve (404 outside scope, 403 own request, 409 decided / overlap)
 //   GET   /reports/attendance ?from&to&user_id, GET /export/attendance.csv ?from&to&user_id   hr:read
+// Leave (any active staff unless noted):
+//   POST  /me/leave-requests {leave_type_id,start_date,end_date,half_day_start?,half_day_end?,reason?<=500}   201 (status pending, or approved when the type needs no approval)
+//         days are computed server-side (schedule + holidays); 400 no working days / bad flags; 409 overlap / insufficient balance
+//   GET   /me/leave-requests ?status&year   own requests (with reason and decision note)
+//   POST  /me/leave-requests/:id/cancel     own pending, or own approved that has not started (409 otherwise)
+//   GET   /team/leave-requests ?status&year  hr:approve (Manager: direct reports only; HR/Admin/SuperAdmin: everyone); includes reasons (approver scope)
+//   POST  /leave-requests/:id/decide {decision:approved|rejected,note?}   hr:approve (404 outside scope, 403 own request, 409 decided / balance)
+//   GET   /team/calendar ?from&to           any active staff, range <= 93 days; names, leave type name and dates only, NEVER reasons / notes
+//   GET   /reports/leave ?year              hr:read, per employee and leave type: entitled, adjusted, approved, pending, remaining
 // The clock can be injected through the X-Test-Now header ONLY while NODE_ENV is "test" (never in any other environment).
 const express = require("express");
 const { requireStaff } = require("../middleware/staff");
@@ -30,6 +39,8 @@ const balances = require("../modules/hr/balances");
 const attendance = require("../modules/hr/attendance");
 const corrections = require("../modules/hr/corrections");
 const attendanceReports = require("../modules/hr/attendanceReports");
+const leaveRequests = require("../modules/hr/leaveRequests");
+const leaveCalendar = require("../modules/hr/leaveCalendar");
 const { HttpError } = require("../modules/jobsearch/httpError");
 
 const router = express.Router();
@@ -90,6 +101,14 @@ router.get(
     res.send(Buffer.from(out.csv, "utf8"));
   })
 );
+
+router.post("/me/leave-requests", asyncHandler(async (req, res) => res.status(201).json(await leaveRequests.createRequest(req.user, body(req), clock(req)))));
+router.get("/me/leave-requests", asyncHandler(async (req, res) => res.json(await leaveRequests.myRequests(req.user, req.query))));
+router.post("/me/leave-requests/:id/cancel", asyncHandler(async (req, res) => res.json(await leaveRequests.cancelRequest(req.user, req.params.id, clock(req)))));
+router.get("/team/leave-requests", checkPermission("hr:approve"), asyncHandler(async (req, res) => res.json(await leaveRequests.teamRequests(req.user, req.query))));
+router.post("/leave-requests/:id/decide", checkPermission("hr:approve"), asyncHandler(async (req, res) => res.json(await leaveRequests.decide(req.user, req.params.id, body(req)))));
+router.get("/team/calendar", asyncHandler(async (req, res) => res.json(await leaveCalendar.teamCalendar(req.user, req.query))));
+router.get("/reports/leave", checkPermission("hr:read"), asyncHandler(async (req, res) => res.json(await leaveCalendar.leaveReport(req.user, req.query))));
 
 // Errors that carry extra fields (e.g. since, needs_correction) keep them in the JSON body.
 router.use((err, _req, res, next) => (err instanceof HttpError && err.extra ? res.status(err.status).json({ error: err.message, ...err.extra }) : next(err)));
