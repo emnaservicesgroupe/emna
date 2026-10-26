@@ -10,6 +10,8 @@
 //     never any seeded private data (sentinel strings) - for ALL actors, allowed or not.
 // Staff are not swept (their permissions are covered by the per-module suites); a staff token is only used as a
 // positive control so "denied" can never be vacuous (the routes work, the roles are what is refused).
+// The ONE prefix every portal role and the Candidate may use is /chat/* (stage 6 messaging): each sees only its own conversation
+// (scoped in SQL, identical 404 otherwise), which tests/chat-api.test.js covers in depth and the seeded SWEEP-CHAT-* sentinels cover here.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -66,6 +68,9 @@ const ROUTE_RULES = [
   // hr (stage 5, routes/hr.js): /hr/me and every admin route sit behind requireStaff (an ACTIVE staff account); Candidate, Employer and
   // Agency are refused on all of them, /hr/me included. Staff access is by permission / report line and is covered by tests/hr-*.test.js.
   { re: /^\w+ \/hr\//, allow: NONE, why: "hr (active staff accounts only)" },
+  // chat (stage 6, routes/chat.js): Candidate, Employer and Agency are legitimate users of /chat/* ONLY (own conversation, identical 404 for any
+  // other id, no start for employers / agencies, no moderation). HR / Accountant are refused by the router; staff access is covered by tests/chat-api.test.js.
+  { re: /^\w+ \/chat\//, allow: ["employer", "agency", "candidate"], why: "chat (own conversations only; anonymous is 401)" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -228,6 +233,8 @@ async function buildWorld() {
   const w = await E.startWorld();
   await E.addStaff(w, "admin", "Admin");
   await E.addStaff(w, "mgr", "Manager");
+  await E.addStaff(w, "hrx", "HR");
+  await E.addStaff(w, "acctx", "Accountant");
   // Candidates: the victim is id 1 (fully onboarded: CV, profile, consent), the attacker id 2 (just an account).
   const victim = await E.onboard(w, "victim", "mgr");
   const attacker = await E.createCandidate(w, "attacker", "mgr");
@@ -276,8 +283,30 @@ async function buildWorld() {
   mark("SWEEP-ORG-AGENCY-B", "agencyB");
   mark("SWEEP-LEAD-AGENCY-A", "agency");
   mark("SWEEP-ORG-AGENCY-A", "agency");
+  // Chat (stage 6): one conversation per party with a staff message, a party message and a HIDDEN message nobody outside staff may ever see.
+  const chat = {};
+  const openChat = async (key, owner, type, subjectId, token) => {
+    const o = await w.http("POST", "/chat/conversations", w.tokens.mgr, { subject_type: type, subject_id: subjectId });
+    assert.equal(o.status, 201, JSON.stringify(o.body));
+    chat[key] = o.body.id;
+    const a = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, w.tokens.mgr, { body: `SWEEP-CHAT-STAFF-${owner}` });
+    const b = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, token, { body: `SWEEP-CHAT-${owner}` });
+    const h = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, w.tokens.mgr, { body: `SWEEP-CHAT-HIDDEN-${owner}` });
+    for (const r of [a, b, h]) assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal((await w.http("POST", `/chat/messages/${h.body.id}/hide`, w.tokens.mgr, { reason: "sweep" })).status, 200);
+    mark(`SWEEP-CHAT-STAFF-${owner}`, owner);
+    mark(`SWEEP-CHAT-${owner}`, owner);
+    mark(`SWEEP-CHAT-HIDDEN-${owner}`, "nobody");
+  };
+  await openChat("victim", "victim", "candidate", victim.id, victim.token);
+  await openChat("attacker", "candidate", "candidate", attacker.id, attacker.token);
+  await openChat("employerB", "employerB", "employer_request", empB.orgId, empB.token);
+  await openChat("employer", "employer", "employer_request", emp.orgId, emp.token);
+  await openChat("agencyB", "agencyB", "agency", agyB.orgId, agyB.token);
+  await openChat("agency", "agency", "agency", agy.orgId, agy.token);
+  assert.deepEqual([chat.victim, chat.attacker], [1, 2], "fixture assumption: chat conversation ids 1 (victim) and 2 (attacker)");
   const routes = walk(require("../app")._router.stack, "", []);
-  return { w, victim, attacker, emp, empB, agy, agyB, sentinels, routes };
+  return { w, victim, attacker, emp, empB, agy, agyB, sentinels, routes, chat };
 }
 
 /** Sentinel strings (other people's data) found in a response body that the actor does not own. */
@@ -300,7 +329,7 @@ test("sweep: every route is classified and every disallowed (route, role) answer
   assert.deepEqual([...unusedRules, ...unusedLists], [], "STALE classification entries that match no registered route");
   assert.equal(new Set([...JOBSEARCH_CANDIDATE, ...JOBSEARCH_STAFF]).size, JOBSEARCH_CANDIDATE.length + JOBSEARCH_STAFF.length, "no route listed twice");
   // Sanity: the enumeration really walked the nested routers (guards against a silent express-internals change).
-  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
+  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
   assert.ok(routes.length > 120, `enumerated ${routes.length} routes`);
 
   // 2. Every (route, actor, id-set) call.
@@ -392,6 +421,41 @@ test("sweep controls: the refused routes are alive for the roles that own them (
     }
   }
   assert.equal(victim.id, 1);
+
+  // Chat: the one prefix the portal roles and the Candidate DO reach - and only their own conversation. Staff with chat permissions see everything
+  // in scope; HR / Accountant are refused; every foreign id is the same 404 whose body names nothing.
+  const { chat } = await world();
+  for (const k of ["admin", "mgr"]) {
+    const r = await ok(w.tokens[k], "/chat/conversations?limit=50", `${k} chat list`);
+    assert.equal(r.json.rows.length, 6);
+    await ok(w.tokens[k], "/chat/unread-count", `${k} chat unread`);
+  }
+  for (const k of ["hrx", "acctx"]) for (const url of ["/chat/conversations", "/chat/unread-count", `/chat/conversations/${chat.victim}/messages`]) assert.equal((await probe(w.base, "GET", url, w.tokens[k])).status, 403, `${k} GET ${url}`);
+  const missing = await probe(w.base, "GET", "/chat/conversations/2000000000/messages", attacker.token);
+  assert.equal(missing.status, 404);
+  const parties = [["candidate", attacker.token, chat.attacker], ["employer", emp.token, chat.employer], ["agency", agy.token, chat.agency]];
+  for (const [role, token, own] of parties) {
+    const list = await ok(token, "/chat/conversations", `${role} chat list`);
+    assert.deepEqual(list.json.rows.map((r) => r.id), [own], `${role} sees only its own conversation`);
+    const msgs = await ok(token, `/chat/conversations/${own}/messages`, `${role} chat thread`);
+    assert.equal(msgs.json.rows.length, 3);
+    assert.ok(msgs.text.includes(`SWEEP-CHAT-${role}`), "control: the party sees its own message");
+    assert.ok(!msgs.text.includes("SWEEP-CHAT-HIDDEN"), "a hidden message is a stub");
+    assert.ok(msgs.json.rows.some((m) => m.hidden === true && Object.keys(m).length === 3));
+    for (const other of Object.values(chat).filter((x) => x !== own)) {
+      for (const [m, u] of [["GET", `/chat/conversations/${other}/messages`], ["POST", `/chat/conversations/${other}/messages`], ["POST", `/chat/conversations/${other}/read`]]) {
+        const r = await probe(w.base, m, u, token, m === "POST" ? { body: JSON.stringify({ body: "intrusion", message_id: 1 }) } : {});
+        assert.equal(r.status, 404, `${role} ${m} ${u} -> ${r.status}`);
+        assert.equal(r.text, missing.text, "identical 404 body");
+      }
+    }
+    // No moderation and no cold start for portal roles; Candidate may only open its own.
+    for (const u of [`/chat/conversations/${own}/close`, `/chat/conversations/${own}/reopen`, "/chat/messages/1/hide", "/chat/messages/1/unhide"]) assert.equal((await probe(w.base, "POST", u, token, { body: JSON.stringify({ reason: "x" }) })).status, 403, `${role} POST ${u}`);
+  }
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", emp.token, { body: JSON.stringify({ subject_type: "employer_request", subject_id: emp.orgId }) })).status, 403);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", agy.token, { body: JSON.stringify({ subject_type: "agency", subject_id: agy.orgId }) })).status, 403);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "candidate", subject_id: victim.id }) })).status, 404);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "agency", subject_id: 1 }) })).status, 403);
 });
 
 test("sweep: the inbound mail webhook rejects anything unsigned or wrongly signed, for every actor", async () => {
