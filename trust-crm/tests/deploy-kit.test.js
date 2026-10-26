@@ -223,7 +223,7 @@ function checkConfig(cfg) {
   assert.ok(cfg.services.db.healthcheck && cfg.services.db.healthcheck.test);
 }
 
-test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no compression of /jobsearch/events), security headers, HSTS without includeSubDomains, / reaches the app (public website)", () => {
+test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no compression of /jobsearch/events and /chat/events), security headers, HSTS without includeSubDomains, / reaches the app (public website)", () => {
   const raw = read(path.join(KIT, "Caddyfile"));
   const c = raw.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(/\s#.*$/gm, "");
   assert.match(c, /^\{\$SITE_ADDRESS\} \{/m);
@@ -244,7 +244,8 @@ test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no comp
   assert.match(c, /import \/tmp\/caddy-global\.d\/\*\.caddy/);
   // live events (SSE): flushed immediately and never compressed (verified through Caddy in the Task 20 sandbox run)
   assert.match(c, /reverse_proxy app:5000 \{\s*flush_interval -1\s*\}/);
-  assert.match(c, /@compress not path \/jobsearch\/events\s*\n\s*encode @compress zstd gzip/);
+  // messaging (stage 6) streams too: /chat/events must be excluded from compression as well (a compressed stream is buffered)
+  assert.match(c, /@compress not path \/jobsearch\/events \/chat\/events\s*\n\s*encode @compress zstd gzip/);
 });
 
 test(".env.production.example: every variable preflight needs; safe sandbox defaults; no secret values; template + generated secrets passes the preflight", () => {

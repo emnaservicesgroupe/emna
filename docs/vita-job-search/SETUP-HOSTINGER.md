@@ -284,6 +284,13 @@ Everything below stays off until you do it; follow the detailed pages:
   or database, included in the normal backup and switched on by the normal update. The only settings are optional: `HR_TIMEZONE` (default `Africa/Tunis`; set
   it if your staff work in another timezone), `HR_MAX_OPEN_HOURS` and `HR_EXPORT_MAX_ROWS`. Schedules, leave types, holidays and entitlements are entered by HR; nothing
   is preloaded. Setup order and daily use: [../vita-hr/SETUP.md](../vita-hr/SETUP.md).
+- **Messaging** (text messages between staff and candidates, employers and agencies, with unread counts and e-mail nudges) is part of the same VITA app too: no extra
+  service, container or database, included in the normal backup and switched on by the normal update. It uses the same mail settings as above (nudges are only
+  *recorded* in the sandbox mailbox until real mail is on) and **WhatsApp is not available** (it needs your provider account and approved templates). Live updates use a
+  server-sent-events stream at `/chat/events` (like `/jobsearch/events`): the bundled Caddy already flushes immediately and does not compress that path. If you put
+  **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/chat/events` and `/jobsearch/events`, or the page falls back to
+  polling every 30 seconds. Because the stream lives inside the app process, run **one** app container. Optional settings (`CHAT_RATE_PER_MIN`, `CHAT_CANDIDATE_CAN_START`,
+  `CHAT_NUDGE_COOLDOWN_MIN`, `CHAT_SSE_*`) and the daily workflow: [../vita-messaging/SETUP.md](../vita-messaging/SETUP.md).
 
 After every `.env` change: `docker compose up -d`. If a setting is wrong, the app does not start and
 `./logs.sh app` lists **every** problem (setting names only, never values).

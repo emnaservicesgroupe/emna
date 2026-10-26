@@ -33,8 +33,9 @@
 		max_size {$CADDY_MAX_BODY:12MB}
 	}
 
-	# Compress everything except the live event stream (server-sent events must not be buffered).
-	@compress not path /jobsearch/events
+	# Compress everything except the live event streams (server-sent events must not be buffered):
+	# /jobsearch/events (job search) and /chat/events (messaging).
+	@compress not path /jobsearch/events /chat/events
 	encode @compress zstd gzip
 
 	header {
@@ -53,7 +54,7 @@
 	# status for API clients. Staff and candidates reach the VITA web interface at /vita/ (linked from the site).
 
 	reverse_proxy app:5000 {
-		# flush immediately: needed for live events (GET /jobsearch/events)
+		# flush immediately: needed for live events (GET /jobsearch/events and GET /chat/events)
 		flush_interval -1
 	}
 }
