@@ -78,7 +78,7 @@ async function annualBalance(key) {
 test("A1: HR configures schedule, leave types, holiday, profiles with managers, balances", async () => {
   // nothing statutory is preloaded: a fresh installation has no schedule, leave type, holiday, profile or balance
   for (const t of ["hr_schedules", "hr_leave_types", "hr_holidays", "hr_employees", "hr_leave_balances", "hr_attendance"]) assert.equal(await w.count(`SELECT count(*) AS n FROM ${t}`), 0, `${t} starts empty`);
-  const noColumns = await w.q("SELECT table_name, column_name FROM information_schema.columns WHERE table_name LIKE 'hr\\_%' AND column_name ~* '(salary|wage|pay|passport|national|id_number|medical|health|diagnos|latitude|longitude|gps|photo|biometric|fingerprint|performance)'");
+  const noColumns = await w.q("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name LIKE 'hr\\_%' AND column_name ~* '(salary|wage|pay|passport|national|id_number|medical|health|diagnos|latitude|longitude|gps|photo|biometric|fingerprint|performance)'");
   assert.deepEqual(noColumns.rows, [], "no salary / ID / medical / location / biometric / performance column exists in the HR tables");
   const day = { start: "09:00", end: "17:30", break_minutes: 60 };
   const sch = await hr("POST", "/hr/schedules", "hr", { name: "Office hours", weekly: { mon: day, tue: day, wed: day, thu: day, fri: day, sat: null, sun: null }, grace_minutes: 10 });

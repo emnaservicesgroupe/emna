@@ -519,7 +519,7 @@ test("migration 020: idempotent, adds the stored year split, backfills rows exac
   withShared(async (pool) => {
     const sql = fs.readFileSync(path.join(ROOT, "sql", "migrations", "020_hr_leave_year_split.sql"), "utf8");
     assert.equal((await pool.query("SELECT 1 FROM schema_migrations WHERE name='020_hr_leave_year_split.sql'")).rowCount, 1);
-    const cols = await pool.query("SELECT column_name, is_nullable, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name='hr_leave_requests' AND column_name LIKE 'days_year_%' ORDER BY 1");
+    const cols = await pool.query("SELECT column_name, is_nullable, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='hr_leave_requests' AND column_name LIKE 'days_year_%' ORDER BY 1");
     assert.deepEqual(cols.rows.map((r) => [r.column_name, r.is_nullable, r.numeric_precision, r.numeric_scale]), [["days_year_end", "YES", 6, 2], ["days_year_start", "YES", 6, 2]]);
     const u = await user(pool);
     const lt = await leaveType(pool);
@@ -536,5 +536,5 @@ test("migration 020: idempotent, adds the stored year split, backfills rows exac
     // one constraint: both or neither, never summing to something else
     await assert.rejects(pool.query("UPDATE hr_leave_requests SET days_year_start = 1, days_year_end = 1 WHERE id=$1", [cross]), CHECK);
     await assert.rejects(pool.query("UPDATE hr_leave_requests SET days_year_start = 10 WHERE id=$1", [cross]), CHECK);
-    assert.equal((await pool.query("SELECT 1 FROM pg_constraint WHERE conname='hr_leave_year_split_check'")).rowCount, 1);
+    assert.equal((await pool.query("SELECT 1 FROM pg_constraint WHERE conname='hr_leave_year_split_check' AND conrelid=to_regclass('hr_leave_requests')")).rowCount, 1);
   }));
