@@ -351,6 +351,31 @@ code to the manager's direct reports (never their own requests); HR, Admin and S
 | Agency | — | — | — |
 <!-- hr-permission-matrix:end -->
 
+### Messaging permissions (Stage 6)
+
+Who may use VITA messaging at all. Candidate, Employer and Agency users hold no permission: they are authorised by
+ownership (their own conversation / their organisation's thread) and reach only `/chat/*`. HR and Accountant hold
+none either; HR can still take part in an internal `staff` room when explicitly added as a participant (service
+rule, not a permission). Staff see candidate / organisation conversations only for people they may serve
+(assigned staff, Admin, Manager).
+
+<!-- chat-permission-matrix:start -->
+| Role | chat:read | chat:write | chat:moderate |
+|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ |
+| Admin | ✓ | ✓ | ✓ |
+| Manager | ✓ | ✓ | ✓ |
+| Receptionist | ✓ | ✓ | — |
+| Accountant | — | — | — |
+| HR | — | — | — |
+| Agent | ✓ | ✓ | — |
+| Candidate | — | — | — |
+| Employer | — | — | — |
+| Agency | — | — | — |
+<!-- chat-permission-matrix:end -->
+
+`chat:moderate` (Admin, Manager, SuperAdmin) hides / unhides a message with a reason and closes / reopens a conversation.
+
 What each permission allows (always limited to the candidates the user may see):
 
 - **jobsearch:read** — applications, matches, messages released to staff, interviews, dashboard, reports
