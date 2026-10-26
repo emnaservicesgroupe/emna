@@ -62,7 +62,7 @@ test("portal.html: read-only 'My payments' step with the staff-contact note; no 
   for (const m of html.matchAll(/data-i18n(?:-[a-z-]+)?="([^"]+)"/g)) for (const l of LANGS) if (!(m[1] in I18N.dictionaries[l])) missing.push(`${l}:${m[1]}`);
   assert.deepEqual(missing, []);
   const js = read("portal.js");
-  assert.match(js, /var STEPS = \["upload", "review", "prefs", "consent", "status", "payments"\]/);
+  assert.match(js, /var STEPS = \["upload", "review", "prefs", "consent", "status", "payments", "chat"\]/);
   assert.match(js, /V\.api\("GET", "\/finance\/me"\)/);
   assert.match(js, /V\.download\("\/finance\/me\/invoices\/" \+ [^,]+ \+ "\/print\?lang=" \+ V\.getLang\(\)/);
   assert.doesNotMatch(js, /"\/finance\/(?!me)/, "the portal only reaches /finance/me*");

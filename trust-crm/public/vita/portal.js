@@ -13,7 +13,7 @@
   var CURRENCIES = ["CAD", "EUR", "ALL", "RON", "USD", "GBP", "TND", "MAD", "DZD", "EGP"];
   var SCALARS = ["name", "email", "phone", "profession"];
   var LISTS = ["skills", "education", "certificates"];
-  var STEPS = ["upload", "review", "prefs", "consent", "status", "payments"];
+  var STEPS = ["upload", "review", "prefs", "consent", "status", "payments", "chat"];
 
   var S = {
     session: null,
@@ -29,6 +29,7 @@
     events: null,
     appDetail: null,
   };
+  var chat = null; // messaging panel (chat-panel.js); runs while the candidate is signed in
 
   function errorBox(err) { return h("p", { class: "notice bad", attrs: { role: "alert" }, text: V.errorMessage(err) }); }
   function base() { return "/jobsearch/candidates/" + S.candidateId; }
@@ -36,6 +37,7 @@
   // ================================================================ login (email OTP)
   function showLogin() {
     if (S.events) { S.events.stop(); S.events = null; }
+    if (chat) chat.stop();
     S.session = null;
     S.candidateId = null;
     $("#app-view").hidden = true;
@@ -121,6 +123,8 @@
       $("#app-view").hidden = false;
       $("#logout").hidden = false;
       initStepper();
+      if (!chat) chat = window.VITA_CHAT_PORTAL.mount({ root: $("#chat-root"), kind: "candidate", badge: $("#chat-tab-badge") });
+      chat.start();
       S.events = V.connectEvents({
         onEvent: function () { refreshSoon(); },
         onStatus: V.liveIndicator($("#live-status")),
@@ -204,6 +208,7 @@
     if (step === "consent") renderConsent();
     if (step === "status") renderStatus();
     if (step === "payments") loadPayments();
+    if (step === "chat" && chat) chat.activate();
     if (focus) $("#step-" + step).focus();
   }
 

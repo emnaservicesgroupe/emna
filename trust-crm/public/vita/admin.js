@@ -91,7 +91,7 @@
 
   // ================================================================ extension API (crm-*.js)
   // Extra tabs/panels live in their own scripts (crm-leads.js, crm-sitejobs.js, crm-candidate.js), loaded after this file.
-  // registerTab(name, {init, load, visible}) wires #tab-<name>/#panel-<name>; onCandidate(fn) runs when the dashboard
+  // registerTab(name, {init, load, visible, onStart, onStop}) wires #tab-<name>/#panel-<name> (onStart / onStop: sign-in / sign-out); onCandidate(fn) runs when the dashboard
   // opens a candidate card, so CRM code can add its section without this file knowing about it.
   var EXT = {};
   var candidateListeners = [];
@@ -104,8 +104,19 @@
   };
 
   // ================================================================ login / session
+  /** Runs def[name]() of every extension tab; onStart only for tabs the signed-in role may use. A failing hook never blocks the console. */
+  function extHook(name) {
+    Object.keys(EXT).forEach(function (tab) {
+      var def = EXT[tab];
+      if (typeof def[name] !== "function") return;
+      if (name === "onStart" && def.visible && !def.visible()) return;
+      try { def[name](); } catch (e) { /* reported by the tab itself */ }
+    });
+  }
+
   function showLogin() {
     if (S.events) { S.events.stop(); S.events = null; }
+    extHook("onStop");
     S.session = null;
     $("#app-view").hidden = true;
     $("#logout").hidden = true;
@@ -169,6 +180,7 @@
         renderWho();
         setupTabs();
         applyRoleTabs();
+        extHook("onStart"); // extension tabs with a session-long job (the Messages stream and its unread badge)
         // The live stream needs jobsearch:read; an Accountant / HR user works in their own tabs and has no stream.
         if (hasJobsearch()) S.events = V.connectEvents({
           onEvent: function () { refreshSoon(); },

@@ -19,12 +19,13 @@
   // Mirror of the permissions that matter to this UI (middleware/role.js; tests compare the two).
   var PERMS = {
     SuperAdmin: ["*"],
-    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export", "hr:read", "hr:write", "hr:approve"],
-    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:export", "hr:approve"],
-    Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read"],
-    Agent: ["candidates:read", "candidates:write", "leads:read"],
+    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export", "hr:read", "hr:write", "hr:approve", "chat:read", "chat:write", "chat:moderate"],
+    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:export", "hr:approve", "chat:read", "chat:write", "chat:moderate"],
+    Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "chat:read", "chat:write"],
+    Agent: ["candidates:read", "candidates:write", "leads:read", "chat:read", "chat:write"],
     // Accountant uses only the Accounting tab (finance:* and the candidate lookup); see public/vita/fin-util.js.
     Accountant: ["candidates:read", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export"],
+    // Messaging (stage 6): Accountant and HR hold no chat:* (HR joins internal staff rooms only as an explicit participant).
     // HR (stage 5) works in the HR tab; hr:approve for a Manager is limited to their direct reports by the server.
     HR: ["candidates:read", "hr:read", "hr:write", "hr:approve"],
   };
@@ -41,6 +42,10 @@
   function canOrgsWrite(role) { return can(role, "orgs:write"); }
   function canPresent(role) { return can(role, "orgs:write") && can(role, "candidates:read"); }
   function canRecordConsent(role) { return can(role, "candidates:write"); }
+  // Messaging: the Messages tab needs chat:read; sending needs chat:write; hiding / closing needs chat:moderate (the server decides).
+  function canChatRead(role) { return can(role, "chat:read"); }
+  function canChatWrite(role) { return can(role, "chat:write"); }
+  function canChatModerate(role) { return can(role, "chat:moderate"); }
   function canCreateSiteJob(role) { return can(role, "orgs:write") && can(role, "sitejobs:write"); }
 
   function str(v) { return v === null || v === undefined ? "" : String(v); }
@@ -218,6 +223,7 @@
     APPLY_MODES: APPLY_MODES, NOTE_MAX: NOTE_MAX, PUBLISH_REQUIRED: PUBLISH_REQUIRED,
     can: can, canConvert: canConvert, canAssign: canAssign, canSiteJobs: canSiteJobs,
     canOrgsRead: canOrgsRead, canOrgsWrite: canOrgsWrite, canPresent: canPresent, canRecordConsent: canRecordConsent, canCreateSiteJob: canCreateSiteJob,
+    canChatRead: canChatRead, canChatWrite: canChatWrite, canChatModerate: canChatModerate,
     parseApplyMode: parseApplyMode, buildApplyMode: buildApplyMode, toLocalInput: toLocalInput, fromLocalInput: fromLocalInput,
     siteJobPayload: siteJobPayload, diffPayload: diffPayload, publishBlockers: publishBlockers,
     leadQuery: leadQuery, leadCanConvert: leadCanConvert, convertPayload: convertPayload,

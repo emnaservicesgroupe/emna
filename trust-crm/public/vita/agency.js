@@ -12,6 +12,8 @@
   var FORM_IDS = { full_name: "reg-name", email: "reg-email", phone: "reg-phone", country: "reg-country", profession: "reg-profession", message: "reg-message", passport_number: "reg-passport", consent_attested: "reg-consent" };
   var S = { item: null, org: null, tab: "register", page: 1, total: 0, loaded: false, openId: null, tabs: null };
 
+  var chat = null; // messaging panel (chat-panel.js); runs while the agency is signed in
+
   function statusText(item) {
     var key = O.agencyStageKey(item);
     return key ? t(key) : String(item.status_text || "—");
@@ -20,6 +22,7 @@
 
   // ================================================================ session
   function showLogin() {
+    if (chat) chat.stop();
     S.org = null;
     S.loaded = false;
     C.showLogin();
@@ -37,7 +40,9 @@
       }
       S.org = me.org;
       C.showApp(me.org && me.org.name);
-      if (!S.tabs) S.tabs = C.tabs($("#tabs"), function (name) { S.tab = name; if (name === "candidates") loadList(); });
+      if (!chat) chat = window.VITA_CHAT_PORTAL.mount({ root: $("#chat-root"), kind: "agency", badge: $("#chat-tab-badge") });
+      chat.start();
+      if (!S.tabs) S.tabs = C.tabs($("#tabs"), function (name) { S.tab = name; if (name === "candidates") loadList(); else if (name === "chat" && chat) chat.activate(); });
       S.tabs.select(S.tab, false);
     }).catch(function (err) {
       if (err && err.status === 403) {
