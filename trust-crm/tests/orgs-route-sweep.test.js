@@ -329,7 +329,7 @@ test("sweep: every route is classified and every disallowed (route, role) answer
   assert.deepEqual([...unusedRules, ...unusedLists], [], "STALE classification entries that match no registered route");
   assert.equal(new Set([...JOBSEARCH_CANDIDATE, ...JOBSEARCH_STAFF]).size, JOBSEARCH_CANDIDATE.length + JOBSEARCH_STAFF.length, "no route listed twice");
   // Sanity: the enumeration really walked the nested routers (guards against a silent express-internals change).
-  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
+  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
   assert.ok(routes.length > 120, `enumerated ${routes.length} routes`);
 
   // 2. Every (route, actor, id-set) call.
@@ -456,6 +456,26 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   assert.equal((await probe(w.base, "POST", "/chat/conversations", agy.token, { body: JSON.stringify({ subject_type: "agency", subject_id: agy.orgId }) })).status, 403);
   assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "candidate", subject_id: victim.id }) })).status, 404);
   assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "agency", subject_id: 1 }) })).status, 403);
+
+  // Realtime / preferences / channels (Task 3). The SSE probe aborts as soon as the headers arrive, so a refusal or an opened stream both return promptly.
+  for (const [role, token] of parties.map(([r, t]) => [r, t]).concat([["mgr", w.tokens.mgr], ["admin", w.tokens.admin]])) {
+    const ev = await probe(w.base, "GET", "/chat/events", token);
+    assert.equal(ev.status, 200, `${role} opens /chat/events`);
+    assert.equal(ev.stream, true);
+    assert.equal((await probe(w.base, "GET", "/chat/prefs", token)).status, 200, `${role} GET /chat/prefs`);
+    assert.equal((await probe(w.base, "PUT", "/chat/prefs", token, { body: JSON.stringify({ email_nudges: true }) })).status, 200, `${role} PUT /chat/prefs`);
+    assert.equal((await probe(w.base, "PUT", "/chat/prefs", token, { body: JSON.stringify({ email_nudges: "yes" }) })).status, 400);
+  }
+  for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token]]) assert.equal((await probe(w.base, "GET", "/chat/channels", token)).status, 403, `${role} GET /chat/channels`);
+  assert.equal((await probe(w.base, "GET", "/chat/channels", w.tokens.mgr)).status, 200);
+  for (const [m, u] of [["GET", "/chat/events"], ["GET", "/chat/prefs"], ["PUT", "/chat/prefs"], ["GET", "/chat/channels"]]) {
+    assert.equal((await probe(w.base, m, u, null)).status, 401, `anon ${m} ${u}`);
+    for (const k of ["hrx", "acctx"]) {
+      const r = await probe(w.base, m, u, w.tokens[k], m === "PUT" ? { body: JSON.stringify({ email_nudges: true }) } : {});
+      assert.equal(r.status, 403, `${k} ${m} ${u}`);
+      assert.equal(r.stream, false, "a refused request never opens a stream");
+    }
+  }
 });
 
 test("sweep: the inbound mail webhook rejects anything unsigned or wrongly signed, for every actor", async () => {

@@ -9,6 +9,9 @@
 //   GET  /unread-count                                      {unread, conversations}
 //   POST /conversations/:id/close | reopen                  chat:moderate
 //   POST /messages/:id/hide {reason} | unhide {reason?}     chat:moderate
+//   GET  /events                                            SSE (fetch + Authorization header, Last-Event-ID replay, ids only, per-user cap -> 429); see modules/chat/hub.js
+//   GET | PUT /prefs {email_nudges: boolean}                e-mail nudge opt-out, any allowed actor
+//   GET  /channels                                          honest channel status (staff only): in_app, email (mail adapter), whatsapp requires_setup
 // Out-of-scope and nonexistent ids answer the identical 404 for every actor; malformed ids are a 400. There is no edit or delete endpoint:
 // messages are immutable (the database also refuses it).
 const express = require("express");
@@ -19,6 +22,9 @@ const db = require("../db");
 const scope = require("../modules/chat/scope");
 const conversations = require("../modules/chat/conversations");
 const messages = require("../modules/chat/messages");
+const hub = require("../modules/chat/hub");
+const prefs = require("../modules/chat/prefs");
+const channels = require("../modules/chat/channels");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : null);
@@ -54,6 +60,33 @@ router.post("/conversations/:id/close", moderator, asyncHandler(async (req, res)
 router.post("/conversations/:id/reopen", moderator, asyncHandler(async (req, res) => res.json(await conversations.setStatus(req.chat, req.params.id, "open"))));
 router.post("/messages/:id/hide", moderator, asyncHandler(async (req, res) => res.json(await messages.setHidden(req.chat, req.params.id, body(req), true))));
 router.post("/messages/:id/unhide", moderator, asyncHandler(async (req, res) => res.json(await messages.setHidden(req.chat, req.params.id, body(req), false))));
+
+router.get(
+  "/events",
+  asyncHandler(async (req, res) => {
+    const raw = req.get("Last-Event-ID");
+    let lastEventId = null;
+    if (raw !== undefined && raw !== "") {
+      if (!/^\d{1,18}$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new HttpError(400, "Last-Event-ID must be a numeric event id");
+      lastEventId = Number(raw);
+    }
+    try {
+      await hub.subscribe(req.chat, req, res, lastEventId);
+    } catch (err) {
+      if (err instanceof hub.LimitError && !res.headersSent) throw new HttpError(err.status, err.message);
+      throw err;
+    }
+  })
+);
+router.get("/prefs", asyncHandler(async (req, res) => res.json(await prefs.getPrefs(req.chat))));
+router.put("/prefs", asyncHandler(async (req, res) => res.json(await prefs.setPrefs(req.chat, body(req)))));
+router.get(
+  "/channels",
+  asyncHandler(async (req, res) => {
+    if (req.chat.kind !== "staff") throw new HttpError(403, "Access denied");
+    res.json(await channels.channels());
+  })
+);
 
 router.use((err, _req, res, next) => {
   if (err && err.retryAfter) res.set("Retry-After", String(err.retryAfter));

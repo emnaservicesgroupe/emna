@@ -4,6 +4,7 @@ const { logAudit } = require("../../utils/audit");
 const { HttpError } = require("../jobsearch/httpError");
 const scope = require("./scope");
 const c = require("./common");
+const hub = require("./hub");
 
 const OPEN_TYPES = ["candidate", "employer_request", "agency"];
 
@@ -129,7 +130,7 @@ async function openConversation(actor0, input) {
 async function setStatus(actor0, rawId, status) {
   const id = c.pathId(rawId);
   if (actor0.kind !== "staff" || !actor0.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
-  return c.inTransaction(async (client) => {
+  const result = await c.inTransaction(async (client) => {
     const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
     if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
     const conv = await loadVisible(client, actor, id, { lock: true });
@@ -139,6 +140,8 @@ async function setStatus(actor0, rawId, status) {
     await logAudit({ client, userId: actor.userId, action: status === "closed" ? "chat.conversation.close" : "chat.conversation.reopen", tableName: "chat_conversations", recordId: String(id), oldData: { status: conv.status }, newData: { status } });
     return { ...out, status, changed: true };
   });
+  if (result.changed) hub.publish({ kind: status === "closed" ? "closed" : "reopened", conversation_id: id });
+  return result;
 }
 
 async function unreadFor(runner, actor, conversationId) {
@@ -155,7 +158,7 @@ async function unreadFor(runner, actor, conversationId) {
 async function markRead(actor, rawId, input) {
   const id = c.pathId(rawId);
   const body = c.bodyObject(input);
-  return c.inTransaction(async (client) => {
+  const result = await c.inTransaction(async (client) => {
     await loadVisible(client, actor, id);
     const messageId = c.parseId(body.message_id, { label: "message_id" });
     const m = await client.query("SELECT 1 FROM chat_messages WHERE id = $1 AND conversation_id = $2", [messageId, id]);
@@ -170,6 +173,9 @@ async function markRead(actor, rawId, input) {
     );
     return { conversation_id: id, last_read_message_id: c.num(up.rows[0].last_read_message_id), unread_count: await unreadFor(client, actor, id) };
   });
+  // Delivered only to the reader's own streams (other tabs refresh their unread badge); the other side never learns that a message was read.
+  hub.publish({ kind: "read", conversation_id: id, message_id: result.last_read_message_id, user_id: actor.userId });
+  return result;
 }
 
 /** GET /chat/unread-count -> {unread, conversations}: unread, non-hidden messages of others in the conversations the viewer can see. */

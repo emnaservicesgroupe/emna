@@ -6,6 +6,8 @@ const hr = require("../hr/common");
 const scope = require("./scope");
 const c = require("./common");
 const { loadVisible } = require("./conversations");
+const hub = require("./hub");
+const nudges = require("./nudges");
 
 const RATE_LOCK_KEY = 4217; // advisory-lock namespace: one lock per sending user serialises the rate check with the insert
 const WINDOW_SECONDS = 60;
@@ -55,7 +57,7 @@ async function listMessages(actor, rawId, query) {
 async function sendMessage(actor0, rawId, input) {
   const id = c.pathId(rawId);
   const { text, length } = c.messageText(c.bodyObject(input).body);
-  return c.inTransaction(async (client) => {
+  const sent = await c.inTransaction(async (client) => {
     const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
     if (!actor.perms.write) throw new HttpError(403, "Permission denied: chat:write");
     await client.query("SELECT pg_advisory_xact_lock($1, $2)", [RATE_LOCK_KEY, actor.userId]);
@@ -75,8 +77,12 @@ async function sendMessage(actor0, rawId, input) {
     const m = ins.rows[0];
     await client.query("UPDATE chat_conversations SET last_message_id = $2, last_message_at = $3 WHERE id = $1", [id, m.id, m.created_at]);
     await logAudit({ client, userId: actor.userId, action: "chat.message.send", tableName: "chat_messages", recordId: String(m.id), newData: { conversation_id: id, sender_role: actor.role, length } });
-    return c.shapeMessage({ ...m, sender_name: actor.name }, actor);
+    return { out: c.shapeMessage({ ...m, sender_name: actor.name }, actor), conversationId: id, messageId: Number(m.id), senderRole: actor.role };
   });
+  // After the commit (a failed send never publishes or e-mails). Neither can fail the request: publish never throws, the nudge logs and resolves.
+  hub.publish({ kind: "message", conversation_id: sent.conversationId, message_id: sent.messageId });
+  nudges.schedule({ conversationId: sent.conversationId, senderRole: sent.senderRole });
+  return sent.out;
 }
 
 /**
@@ -87,12 +93,12 @@ async function setHidden(actor0, rawId, input, hide) {
   const id = c.pathId(rawId);
   if (actor0.kind !== "staff" || !actor0.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
   const reason = c.reasonText(c.bodyObject(input).reason, { required: hide });
-  return c.inTransaction(async (client) => {
+  const done = await c.inTransaction(async (client) => {
     const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
     if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
     const sc = scope.conversationVisibleSql(actor, "c", 1);
     const found = await client.query(
-      `SELECT m.id, m.hidden_at, m.hidden_reason FROM chat_messages m JOIN chat_conversations c ON c.id = m.conversation_id
+      `SELECT m.id, m.conversation_id, m.hidden_at, m.hidden_reason FROM chat_messages m JOIN chat_conversations c ON c.id = m.conversation_id
         WHERE m.id = $1 AND ${sc.clause} FOR UPDATE OF m`,
       [id, ...sc.params]
     );
@@ -114,8 +120,10 @@ async function setHidden(actor0, rawId, input, hide) {
       });
     }
     const r = await client.query(`SELECT ${c.messageColumns(actor)} FROM chat_messages m LEFT JOIN users u ON u.id = m.sender_user_id WHERE m.id = $1`, [id]);
-    return { ...c.shapeMessage(r.rows[0], actor), changed };
+    return { out: { ...c.shapeMessage(r.rows[0], actor), changed }, changed, conversationId: Number(cur.conversation_id) };
   });
+  if (done.changed) hub.publish({ kind: "hidden", conversation_id: done.conversationId, message_id: id });
+  return done.out;
 }
 
 module.exports = { listMessages, sendMessage, setHidden, RateLimitError, ratePerMinute };
