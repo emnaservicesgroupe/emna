@@ -26,6 +26,7 @@ const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler"
 const publicRoutes = require("./routes/public");
 const crmRoutes = require("./routes/crm");
 const employerPortalRoutes = require("./routes/employerPortal");
+const mcpTokenRoutes = require("./routes/mcpTokens");
 const agencyPortalRoutes = require("./routes/agencyPortal");
 const { mountVita } = require("./routes/vitaStatic");
 const { mountSite, siteHome } = require("./routes/siteStatic");
@@ -53,6 +54,8 @@ app.use("/agency", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/finance", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use("/hr", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use("/chat", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
+// PAT management: tiny bodies (a name and a day count).
+app.use("/mcp-tokens", express.json({ limit: "2kb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 // Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
@@ -100,6 +103,8 @@ app.use("/finance", financeV2Routes);
 app.use("/hr", hrRoutes);
 // Messaging (stage 6): staff, Candidate, Employer and Agency accounts, each scoped to their own conversations in SQL.
 app.use("/chat", chatRoutes);
+// MCP personal access tokens (stage 7): JWT of staff with mcp:use only. /mcp itself (Task 3) is the ONLY route that accepts a PAT.
+app.use("/mcp-tokens", mcpTokenRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
 // Employer / Agency tokens never reach any /jobsearch handler (except GET /auth/me and the OTP routes).

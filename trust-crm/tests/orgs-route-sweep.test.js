@@ -71,6 +71,9 @@ const ROUTE_RULES = [
   // chat (stage 6, routes/chat.js): Candidate, Employer and Agency are legitimate users of /chat/* ONLY (own conversation, identical 404 for any
   // other id, no start for employers / agencies, no moderation). HR / Accountant reach the router but see only staff rooms they were added to (empty list, identical 404); staff access is covered by tests/chat-api.test.js.
   { re: /^\w+ \/chat\//, allow: ["employer", "agency", "candidate"], why: "chat (own conversations only; anonymous is 401)" },
+  // mcp-tokens (stage 7, routes/mcpTokens.js): personal access token management = a normal JWT of an active staff account holding mcp:use
+  // (Admin, Manager, SuperAdmin). Every other staff role, Candidate, Employer, Agency and anonymous are refused; a PAT bearer is 401 (see PAT_EXEMPT).
+  { re: /^\w+ \/mcp-tokens(\/|$)/, allow: NONE, why: "mcp token management (staff with mcp:use)" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -156,6 +159,11 @@ const JOBSEARCH_STAFF = [
   "POST /jobsearch/automation-rules",
   "DELETE /jobsearch/automation-rules/:id",
 ];
+
+// Routes that accept a personal access token (PAT, "vita_pat_..." bearer). It is the ONLY place a PAT is valid: every other authenticated route
+// must answer it 401 (middleware/auth.js verifyToken). Task 3 adds POST /mcp; until then no registered route matches and 404 is fine.
+// Deliberately NOT in ROUTE_RULES: that table fails on a rule matching no route.
+const PAT_EXEMPT = [/^\w+ \/mcp$/];
 
 function classify(key) {
   for (const r of ROUTE_RULES) if (r.re.test(key)) return r;
@@ -329,7 +337,7 @@ test("sweep: every route is classified and every disallowed (route, role) answer
   assert.deepEqual([...unusedRules, ...unusedLists], [], "STALE classification entries that match no registered route");
   assert.equal(new Set([...JOBSEARCH_CANDIDATE, ...JOBSEARCH_STAFF]).size, JOBSEARCH_CANDIDATE.length + JOBSEARCH_STAFF.length, "no route listed twice");
   // Sanity: the enumeration really walked the nested routers (guards against a silent express-internals change).
-  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
+  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "POST /mcp-tokens", "GET /mcp-tokens", "DELETE /mcp-tokens/:id", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
   assert.ok(routes.length > 120, `enumerated ${routes.length} routes`);
 
   // 2. Every (route, actor, id-set) call.
@@ -486,6 +494,55 @@ test("sweep controls: the refused routes are alive for the roles that own them (
       assert.equal(r.status, 200, `${k} ${m} ${u}`); // staff accounts: prefs, channel status and their own (room-only) event stream
     }
   }
+});
+
+test("sweep controls (mcp-tokens): staff with mcp:use reach it; other staff, portals, Candidate and anonymous are refused", async () => {
+  const { w, emp, agy, attacker } = await world();
+  for (const k of ["admin", "mgr", "super"]) {
+    const r = await probe(w.base, "GET", "/mcp-tokens", w.tokens[k]);
+    assert.equal(r.status, 200, `${k} GET /mcp-tokens -> ${r.status}`);
+    assert.equal(r.json.mcp_enabled, false);
+  }
+  for (const [role, token] of [["hrx", w.tokens.hrx], ["acctx", w.tokens.acctx], ["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+    for (const [m, url] of [["GET", "/mcp-tokens"], ["POST", "/mcp-tokens"], ["DELETE", "/mcp-tokens/1"]]) {
+      const r = await probe(w.base, m, url, token, m === "POST" ? { body: JSON.stringify({ name: "sweep" }) } : {});
+      assert.ok(DENIED.has(r.status), `${role} ${m} ${url} -> ${r.status}`);
+      assert.ok(isErrorOnly(r), `${role} ${m} ${url}: error-only body`);
+    }
+  }
+});
+
+test("sweep: a PAT bearer is 401 on EVERY authenticated route (only /mcp, once it exists, accepts one)", async () => {
+  const { w, routes } = await world();
+  const made = await probe(w.base, "POST", "/mcp-tokens", w.tokens.admin, { body: JSON.stringify({ name: "sweep-pat" }) });
+  assert.equal(made.status, 201, made.text);
+  const pat = made.json.secret;
+  assert.match(pat, /^vita_pat_/);
+  const keyOf = (r) => `${r.method} ${r.template}`;
+  const checked = [];
+  const offenders = [];
+  for (const r of routes) {
+    const key = keyOf(r);
+    if (PAT_EXEMPT.some((re) => re.test(key))) continue; // /mcp: arrives with Task 3 (404 while it does not exist)
+    // Unauthenticated-by-design routes (public API, login, OTP, healthz, static mounts) never read the bearer, so a PAT there is simply ignored.
+    if (classify(key).allow.includes("anon")) continue;
+    for (const id of /:\w+/.test(r.template) ? [1, 2] : [1]) {
+      const url = fill(r.template, id);
+      for (const header of [{ authorization: `Bearer ${pat}` }, { authorization: pat }]) {
+        const res = await probe(w.base, r.method, url, null, { headers: header });
+        checked.push(key);
+        if (res.status !== 401) offenders.push(`${r.method} ${url} with PAT -> ${res.status}`);
+        else if (!res.stream && !isErrorOnly(res)) offenders.push(`${r.method} ${url}: refusal body is not error-only`);
+        if (res.text.includes(pat)) offenders.push(`${r.method} ${url}: echoes the PAT`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `\n${offenders.join("\n  ")}`);
+  for (const must of ["GET /candidates/all", "GET /finance/dashboard", "GET /hr/me", "GET /chat/conversations", "GET /jobsearch/auth/me", "GET /mcp-tokens", "POST /mcp-tokens", "DELETE /mcp-tokens/:id", "POST /jobsearch/inbound/mail"]) assert.ok(checked.includes(must), `PAT checked on ${must}`);
+  assert.ok(checked.length > 150, `made ${checked.length} PAT calls`);
+  // The same PAT is valid for the token service itself (it was not rejected for being malformed) and its owner's JWT still works.
+  assert.ok(await require("../modules/mcp/tokens").authenticate(pat));
+  assert.equal((await probe(w.base, "GET", "/candidates/all", w.tokens.admin)).status, 200);
 });
 
 test("sweep: the inbound mail webhook rejects anything unsigned or wrongly signed, for every actor", async () => {

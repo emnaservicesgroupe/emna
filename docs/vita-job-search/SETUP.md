@@ -375,6 +375,29 @@ no moderation. Staff see candidate / organisation conversations only for people 
 | Agency | — | — | — |
 <!-- chat-permission-matrix:end -->
 
+### MCP assistant access (`mcp:use`)
+
+Who may create personal access tokens (PAT) for the read-only MCP server (stage 7, `/mcp-tokens`). Only Admin, Manager and
+SuperAdmin hold it; everybody else, and every Candidate / Employer / Agency account, is refused. A PAT works **only** on `/mcp`:
+every other route answers `401` to a `vita_pat_...` bearer, and the token endpoints themselves need a normal login. Tokens are
+personal, shown once, hashed at rest, expire (default 30 days, max 90), max 5 active per user, and stop working the moment the
+owner is deactivated or loses `mcp:use`. `MCP_ENABLED` (default off) switches the `/mcp` server itself; token management works either way.
+
+<!-- mcp-permission-matrix:start -->
+| Role | mcp:use |
+|---|---|
+| SuperAdmin | ✓ |
+| Admin | ✓ |
+| Manager | ✓ |
+| Receptionist | — |
+| Accountant | — |
+| HR | — |
+| Agent | — |
+| Candidate | — |
+| Employer | — |
+| Agency | — |
+<!-- mcp-permission-matrix:end -->
+
 `chat:moderate` (Admin, Manager, SuperAdmin) hides / unhides a message with a reason and closes / reopens a conversation.
 
 What each permission allows (always limited to the candidates the user may see):

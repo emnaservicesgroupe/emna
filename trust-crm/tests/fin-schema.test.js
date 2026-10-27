@@ -228,7 +228,7 @@ test("DB with conforming legacy invoices/payments migrates cleanly, rows untouch
     await pay(pool, i, c, "cash");
     await pool.query("INSERT INTO expenses (title,amount) VALUES ('rent',12.50)");
     const before = await snapshot(pool);
-    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql"]);
+    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql", "023_mcp_tokens.sql"]);
     assert.deepEqual(await snapshot(pool), before, "no legacy value changed (all of it already conformed, so 017 normalises nothing)");
     const nul = await pool.query("SELECT count(*)::int n FROM invoices WHERE number IS NOT NULL OR subtotal IS NOT NULL OR issued_at IS NOT NULL");
     assert.equal(nul.rows[0].n, 0, "new columns stay NULL on legacy rows");
@@ -271,7 +271,7 @@ test("DB with non-conforming legacy rows: 016 leaves them alone, 017 normalises 
     assert.deepEqual(await constraintState(pool, "invoices_currency_check"), [{ convalidated: false }]);
     assert.equal((await pool.query("SELECT convalidated FROM pg_constraint WHERE conname='payments_method_check' AND conrelid = to_regclass('payments')")).rows[0].convalidated, false);
 
-    assert.deepEqual(await db.runAll(), ["017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql"]);
+    assert.deepEqual(await db.runAll(), ["017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql", "023_mcp_tokens.sql"]);
     const after = await snapshot(pool);
     // the invoice with the legacy status 'Unpaid' cannot be updated (NOT VALID checks re-run on UPDATE): its currency was already fine
     assert.deepEqual(after.invoices.map((r) => r.currency), ["TND", "TND", "EUR", "TN"]);
@@ -333,7 +333,7 @@ test("017 ledger backfill: opening rows for pre-016 invoices, payments and expen
     await pool.query("INSERT INTO payments (invoice_id,candidate_id,amount_paid,payment_method,is_deleted) VALUES ($1,$2,3,'cash',true)", [i2, c]);
     const e1 = (await pool.query("INSERT INTO expenses (title,amount,currency,created_by,created_at) VALUES ('rent',55.5,'tnd',$1,$2) RETURNING id", [u, stamp])).rows[0].id;
     await pool.query("INSERT INTO expenses (title,amount,is_deleted) VALUES ('gone',5,true)");
-    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql"]);
+    assert.deepEqual(await db.runAll(), ["016_accounting.sql", "017_accounting_fixes.sql", "018_hr.sql", "019_hr_attendance_reports.sql", "020_hr_leave_year_split.sql", "021_chat.sql", "022_chat_hardening.sql", "023_mcp_tokens.sql"]);
 
     const rows = async () => (await pool.query("SELECT kind, ref_table, ref_id::int, candidate_id, currency, debit::text d, credit::text cr, actor_id, entry_at = $1::timestamp AS at_created FROM fin_ledger ORDER BY id", [stamp])).rows;
     const got = await rows();
