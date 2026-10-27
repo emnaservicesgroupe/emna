@@ -291,6 +291,11 @@ Everything below stays off until you do it; follow the detailed pages:
   **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/chat/events` and `/jobsearch/events`, or the page falls back to
   polling every 30 seconds. Because the stream lives inside the app process, run **one** app container. Optional settings (`CHAT_RATE_PER_MIN`, `CHAT_CANDIDATE_CAN_START`,
   `CHAT_NUDGE_COOLDOWN_MIN`, `CHAT_SSE_*`) and the daily workflow: [../vita-messaging/SETUP.md](../vita-messaging/SETUP.md).
+- **Assistant access (MCP)** lets Claude Desktop or Claude Code read VITA data through a read-only endpoint at `/mcp`, with personal access tokens created in the staff console. It is part of
+  the same app (no extra service or database) and **off by default**: add `MCP_ENABLED=true` to `.env` and run `docker compose up -d` to switch it on. The bundled Caddy already leaves `/mcp`
+  uncompressed and flushes immediately; if you put **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/mcp` too, and do not cache it. Rate limits are
+  kept in the app process (they reset on restart), so run **one** app container. Settings (`MCP_RATE_PER_MIN`, `MCP_MAX_CONCURRENT`, `MCP_REQUEST_TIMEOUT_MS`, `MCP_TOOL_TIMEOUT_MS`,
+  `MCP_TOKEN_DEFAULT_DAYS`), connection steps and the security model: [../vita-mcp/SETUP.md](../vita-mcp/SETUP.md).
 
 After every `.env` change: `docker compose up -d`. If a setting is wrong, the app does not start and
 `./logs.sh app` lists **every** problem (setting names only, never values).

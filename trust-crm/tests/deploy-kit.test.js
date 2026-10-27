@@ -245,7 +245,10 @@ test("Caddyfile: {$SITE_ADDRESS}, reverse_proxy app:5000 (flush for SSE, no comp
   // live events (SSE): flushed immediately and never compressed (verified through Caddy in the Task 20 sandbox run)
   assert.match(c, /reverse_proxy app:5000 \{\s*flush_interval -1\s*\}/);
   // messaging (stage 6) streams too: /chat/events must be excluded from compression as well (a compressed stream is buffered)
-  assert.match(c, /@compress not path \/jobsearch\/events \/chat\/events\s*\n\s*encode @compress zstd gzip/);
+  assert.match(c, /@compress not path \/jobsearch\/events \/chat\/events \/mcp\s*\n\s*encode @compress zstd gzip/);
+  // assistant access (stage 7): /mcp is excluded from compression/buffering too, and MCP stays off unless the owner enables it
+  const mcpEnv = envTemplate();
+  assert.ok(!("MCP_ENABLED" in mcpEnv) || mcpEnv.MCP_ENABLED === "false", "MCP is off by default in the production template");
 });
 
 test(".env.production.example: every variable preflight needs; safe sandbox defaults; no secret values; template + generated secrets passes the preflight", () => {

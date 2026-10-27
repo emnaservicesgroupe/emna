@@ -396,28 +396,83 @@ test("global concurrency cap: the call over MCP_MAX_CONCURRENT gets 503 + Retry-
   });
 });
 
-test("timeouts: the request deadline answers 504 and frees the slot; a slow tool is cut by the tool timeout", async () => {
-  await enabled({ MCP_REQUEST_TIMEOUT_MS: "300", MCP_TOOL_TIMEOUT_MS: "5000", MCP_RATE_PER_MIN: "1000" }, async (w) => {
+// Deterministic by construction: the handler never resolves until the test says so, so the ONLY thing that can end the exchange is the
+// server's own deadline; the assertions are about ordering (answer before the tool finished), never about elapsed wall-clock time.
+test("request deadline answers 504 while the tool is still pending, frees the slot, audits once and leaves no timer behind", { timeout: 60000 }, async () => {
+  await enabled({ MCP_REQUEST_TIMEOUT_MS: "250", MCP_TOOL_TIMEOUT_MS: "30000", MCP_RATE_PER_MIN: "1000" }, async (w) => {
     let release;
     const gate = new Promise((r) => (release = r));
-    w.route.__test.setTools([customTool("hang", async () => (await gate, { late: true }))]);
+    let toolFinished = false;
+    let toolFinishedAt;
+    const done = new Promise((r) => (toolFinishedAt = r));
+    w.route.__test.setTools([customTool("hang", async () => {
+      await gate;
+      toolFinished = true;
+      toolFinishedAt();
+      return { late: true };
+    })]);
     const { secret, user } = await w.login();
     const before = await w.lastAuditId();
-    const started = Date.now();
-    const r = await w.call(secret, "hang");
+    // Spy only on the server's deadline timer (a delay value nobody else uses); the response must have cleared/fired it by the time it is sent.
+    const realSet = global.setTimeout;
+    const spied = [];
+    global.setTimeout = function (fn, ms, ...rest) {
+      const t = realSet.call(this, fn, ms, ...rest);
+      if (ms === 250) spied.push(t);
+      return t;
+    };
+    let r;
+    try {
+      r = await w.call(secret, "hang");
+    } finally {
+      global.setTimeout = realSet;
+    }
     assert.equal(r.status, 504);
     assert.deepEqual(r.json, { error: "Request timed out" });
-    assert.ok(Date.now() - started < 2500, "answered at the deadline, not when the tool finished");
-    await until(() => w.route.__test.inflight() === 0);
-    release(); // the tool finishes late: its single audit row is written, the answer is discarded
-    const rows = await until(async () => {
+    assert.equal(toolFinished, false, "answered by the deadline while the tool was still pending");
+    await until(() => w.route.__test.inflight() === 0, 20000);
+    const first = await until(async () => {
       const x = await w.audits(before);
       return x.length ? x : null;
-    });
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].user_id, user.id);
+    }, 20000);
+    assert.equal(first.length, 1);
+    assert.equal(first[0].user_id, user.id);
+    assert.equal(first[0].new_data.outcome, "error");
+    assert.ok(spied.length >= 1 && spied.every((t) => t._destroyed), "the deadline timer is no longer pending");
+    release(); // the tool finishes late: its result is discarded and it adds NO second audit row
+    await done;
+    await new Promise((r2) => setTimeout(r2, 300));
+    assert.equal((await w.audits(before)).length, 1, "exactly one audit row per call, also when the tool finishes after the deadline");
+    assert.equal(w.route.__test.inflight(), 0);
   });
-  await enabled({ MCP_TOOL_TIMEOUT_MS: "150", MCP_REQUEST_TIMEOUT_MS: "10000", MCP_RATE_PER_MIN: "1000" }, async (w) => {
+});
+
+test("a call that finishes in time clears its deadline timer", { timeout: 60000 }, async () => {
+  await enabled({ MCP_REQUEST_TIMEOUT_MS: "61234", MCP_RATE_PER_MIN: "1000" }, async (w) => {
+    w.route.__test.setTools([customTool("quick", async () => ({ ok: true }))]);
+    const { secret } = await w.login();
+    const realSet = global.setTimeout;
+    const spied = [];
+    global.setTimeout = function (fn, ms, ...rest) {
+      const t = realSet.call(this, fn, ms, ...rest);
+      if (ms === 61234) spied.push(t);
+      return t;
+    };
+    let r;
+    try {
+      r = await w.call(secret, "quick");
+    } finally {
+      global.setTimeout = realSet;
+    }
+    assert.equal(r.status, 200);
+    await until(() => w.route.__test.inflight() === 0, 20000);
+    assert.equal(spied.length, 1);
+    await until(() => spied[0]._destroyed, 20000);
+  });
+});
+
+test("a slow tool is cut by the tool timeout and reported as an error result", { timeout: 60000 }, async () => {
+  await enabled({ MCP_TOOL_TIMEOUT_MS: "150", MCP_REQUEST_TIMEOUT_MS: "100000", MCP_RATE_PER_MIN: "1000" }, async (w) => {
     let release;
     const gate = new Promise((r) => (release = r));
     w.route.__test.setTools([customTool("hang", async () => (await gate, { late: true }))]);

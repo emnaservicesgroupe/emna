@@ -120,18 +120,20 @@ async function audit(req, rec) {
 async function handle(req, res) {
   const { auth, message } = req.mcp;
   const isCall = message.method === "tools/call";
-  let handled = false;
+  let audited = false; // exactly ONE audit row per tools/call: the first of (the tool finishing, the exchange closing early) wins
   const mcp = createServer(auth.user, {
     tools: testTools || TOOLS,
     onCall: async (rec) => {
-      handled = true;
+      if (audited) return; // the deadline already recorded this call (outcome error); a late tool result adds nothing
+      audited = true;
       await audit(req, rec);
     },
   });
   // The SDK refuses a call before our handler (unknown tool, invalid arguments, malformed request), or the deadline passes: still one audit row.
   res.once("close", () => {
     mcp.close().catch(() => {});
-    if (!isCall || handled) return;
+    if (!isCall || audited) return;
+    audited = true;
     const p = message.params && typeof message.params === "object" ? message.params : {};
     const tool = typeof p.name === "string" && KNOWN_TOOLS().has(p.name) ? p.name : "(unknown)";
     audit(req, { tool, args_digest: argsDigest(p.arguments), rows: null, outcome: "error", duration_ms: Date.now() - req.mcp.started }).catch((err) => log("call audit not written", err));
