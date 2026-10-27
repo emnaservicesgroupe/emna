@@ -9,7 +9,9 @@
 //   - The text is neutral and trilingual (the user's language is not stored): it never contains the message, the sender, the subject name,
 //     or any promise of employment / visa. A link to the portal is added only when SITE_BASE_URL is an http(s) URL.
 //   - It runs after the commit, off the request path (fire-and-forget, tracked for tests), and NEVER throws into the send: failures are logged
-//     (error code only). A failed delivery gives the cooldown slot back, so a provider outage does not silence later nudges.
+//     (error code only). A failed or refused delivery keeps the slot held for CHAT_NUDGE_FAILURE_BACKOFF_MIN minutes (default 5; 0 = give it
+//     back at once) instead of releasing it: a provider outage is retried by later messages at most once per backoff, not once per message,
+//     and a recovered provider is not silenced for the whole cooldown.
 //   - Delivery goes through the mail adapter facade (MAIL_PROVIDER sandbox by default: only *@test.invalid style allow-listed addresses are accepted).
 const db = require("../../db");
 const mail = require("../jobsearch/mail");
@@ -34,6 +36,12 @@ function cooldownMinutes() {
   const raw = String(process.env.CHAT_NUDGE_COOLDOWN_MIN ?? "").trim();
   if (!/^\d{1,5}$/.test(raw)) return 15; // unset / blank / malformed -> the default; "0" explicitly disables the cooldown
   return Math.min(Number(raw), 7 * 24 * 60);
+}
+
+function failureBackoffMinutes() {
+  const raw = String(process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN ?? "").trim();
+  if (!/^\d{1,6}$/.test(raw)) return 5; // unset / blank / malformed -> the default; "0" gives the slot back immediately
+  return Math.min(Number(raw), 24 * 60);
 }
 
 function portalUrl() {
@@ -89,9 +97,20 @@ async function claim(conversationId, userId, now, minutes) {
   return r.rowCount > 0;
 }
 
-/** Gives the slot back after a failed delivery (only if nobody claimed it since). */
-async function release(conversationId, userId, now) {
-  await db.query("DELETE FROM chat_nudges WHERE conversation_id = $1 AND user_id = $2 AND last_sent_at = $3", [conversationId, userId, now]);
+/**
+ * After a failed delivery: keeps the slot claimed so that it can be claimed again `backoff` minutes after `claimedAt` (the claim succeeds
+ * when last_sent_at <= now - cooldown, so the stored time is claimedAt + backoff - cooldown). Only if nobody claimed it since.
+ * backoff 0 deletes the slot (the old behaviour).
+ */
+async function holdAfterFailure(conversationId, userId, claimedAt, cooldown, backoff) {
+  if (backoff <= 0) {
+    await db.query("DELETE FROM chat_nudges WHERE conversation_id = $1 AND user_id = $2 AND last_sent_at = $3", [conversationId, userId, claimedAt]);
+    return;
+  }
+  await db.query(
+    "UPDATE chat_nudges SET last_sent_at = $3::timestamptz + make_interval(mins => $4::int - $5::int) WHERE conversation_id = $1 AND user_id = $2 AND last_sent_at = $3",
+    [conversationId, userId, claimedAt, backoff, cooldown]
+  );
 }
 
 /**
@@ -103,6 +122,7 @@ async function nudge({ conversationId, senderRole }) {
   try {
     if (EXTERNAL_ROLES.has(senderRole)) return out; // external -> staff: in-app unread only
     const minutes = cooldownMinutes();
+    const backoff = failureBackoffMinutes();
     const body = buildMessage();
     for (const rcpt of await recipients(conversationId)) {
       let claimedAt = null;
@@ -117,12 +137,12 @@ async function nudge({ conversationId, senderRole }) {
         if (res && res.accepted) out.sent += 1;
         else {
           out.skipped += 1;
-          await release(conversationId, rcpt.id, claimedAt);
+          await holdAfterFailure(conversationId, rcpt.id, claimedAt, minutes, backoff);
         }
       } catch (err) {
         out.skipped += 1;
         console.error("chat nudge failed:", (err && (err.code || err.name)) || "unknown");
-        if (claimedAt) await release(conversationId, rcpt.id, claimedAt).catch(() => {});
+        if (claimedAt) await holdAfterFailure(conversationId, rcpt.id, claimedAt, minutes, backoff).catch(() => {});
       }
     }
   } catch (err) {
@@ -147,4 +167,4 @@ const setClock = (fn) => {
   clock = typeof fn === "function" ? fn : () => new Date();
 };
 
-module.exports = { nudge, schedule, idle, setClock, buildMessage, cooldownMinutes };
+module.exports = { nudge, schedule, idle, setClock, buildMessage, cooldownMinutes, failureBackoffMinutes };

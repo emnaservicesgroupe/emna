@@ -193,17 +193,23 @@ const cleanMail = async (w) => {
 };
 
 // ================================================================================================ routes: auth and roles
-test("new routes: anonymous 401, malformed token 400, HR / Accountant 403, channels staff-only, prefs for every allowed actor", async () => {
+test("new routes: anonymous 401, malformed token 400, HR / Accountant reach them (stream, prefs, channels) but only see their staff rooms, prefs for every allowed actor", async () => {
   const f = await fx();
   const { w } = f;
   for (const [m, u] of [["GET", "/chat/events"], ["GET", "/chat/prefs"], ["PUT", "/chat/prefs"], ["GET", "/chat/channels"]]) {
     assert.equal((await w.http(m, u, null, m === "PUT" ? {} : undefined)).status, 401, `anon ${m} ${u}`);
     assert.equal((await w.http(m, u, "not-a-token", m === "PUT" ? {} : undefined)).status, 400, `bad token ${m} ${u}`);
-    for (const k of ["hr", "acct"]) assert.equal((await w.http(m, u, w.T[k], m === "PUT" ? { email_nudges: true } : undefined)).status, 403, `${k} ${m} ${u}`);
+  }
+  for (const k of ["hr", "acct"]) {
+    assert.equal((await w.http("GET", "/chat/prefs", w.T[k])).status, 200, `${k} prefs`);
+    assert.equal((await w.http("PUT", "/chat/prefs", w.T[k], { email_nudges: false })).status, 200, `${k} prefs`);
+    assert.equal((await w.http("GET", "/chat/channels", w.T[k])).status, 200, `${k} channels (staff)`);
   }
   const hrStream = await openSse(w.T.hr);
-  assert.equal(hrStream.status, 403);
-  assert.equal(hub.stats().subscribers, 0);
+  assert.equal(hrStream.status, 200);
+  assert.equal(hub.stats().subscribers, 1);
+  hrStream.close();
+  await until(() => hub.stats().subscribers === 0, 3000, "the HR stream to be released");
   // Prefs: every allowed role.
   for (const tok of [w.T.mgr, w.T.agent1, w.T.admin, f.candA.token, f.empA.token, f.agyA.token]) {
     const g = await w.http("GET", "/chat/prefs", tok);
@@ -353,6 +359,187 @@ test("access revoked mid-stream: reassignment stops delivery at once, suspended 
   await st.waitEnded(3000);
 });
 
+// ================================================================================================ fan-out cost
+/** Counts the SQL statements the pool receives while `fn` runs (a spy on pool.query). */
+async function spyQueries(w, fn) {
+  const log = [];
+  const orig = w.pool.query;
+  w.pool.query = function spy(...args) {
+    log.push(typeof args[0] === "string" ? args[0] : args[0] && args[0].text);
+    return orig.apply(this, args);
+  };
+  try {
+    await fn();
+  } finally {
+    w.pool.query = orig;
+  }
+  return log;
+}
+const isAccess = (q) => /chat:subscriber-access/.test(q);
+const isAccountRead = (q) => /FROM users WHERE id = \$1/.test(q) && /is_active/.test(q);
+
+test("fan-out cost: the visibility step is ONE query per event whatever the number of streams (50 and 100 streams without access => 1 query, nothing else)", async () => {
+  const f = await fx();
+  const { w } = f;
+  const outsiders = [];
+  for (let i = 0; i < 50; i += 1) outsiders.push(await w.mkCandidate(`FAN${i}`, w.id.agent2));
+  for (const o of outsiders) await openSse(o.token);
+  assert.equal(hub.stats().subscribers, 50);
+  let log = await spyQueries(w, async () => {
+    hub.publish({ kind: "closed", conversation_id: f.cvA });
+    await hub.idle();
+  });
+  assert.equal(log.length, 1, `exactly one statement for 50 streams without access, got: ${log.map((q) => q.slice(0, 60))}`);
+  assert.ok(isAccess(log[0]));
+  // twice as many streams: still one
+  for (let i = 50; i < 100; i += 1) await openSse((await w.mkCandidate(`FAN${i}`, w.id.agent2)).token);
+  assert.equal(hub.stats().subscribers, 100);
+  log = await spyQueries(w, async () => {
+    hub.publish({ kind: "hidden", conversation_id: f.cvA, message_id: 1 });
+    await hub.idle();
+  });
+  assert.equal(log.length, 1, "100 streams: still one statement");
+  // with one recipient among them: one visibility query + that recipient's own (cached) account check, never one per stream
+  const rec = await openSse(f.candA.token);
+  await hub.idle();
+  log = await spyQueries(w, async () => {
+    hub.publish({ kind: "reopened", conversation_id: f.cvA });
+    await hub.idle();
+  });
+  assert.equal(log.filter(isAccess).length, 1);
+  assert.equal(log.filter(isAccountRead).length, 0, "the recipient's account was checked at connect time: cached");
+  assert.ok(log.length <= 2, `at most the visibility query plus one account read, got ${log.length}`);
+  await rec.waitFor((d) => d.kind === "reopened" && d.conversation_id === f.cvA);
+  assert.deepEqual(outsiders.length, 50);
+});
+
+test("fan-out: delivery order per stream equals publish order, and an event reaches only the users the single query allowed", async () => {
+  const f = await fx();
+  const { w } = f;
+  const cand = await openSse(f.candA.token);
+  const other = await openSse(f.candB.token);
+  const mgr = await openSse(w.T.mgr);
+  for (let i = 1; i <= 30; i += 1) hub.publish({ kind: "message", conversation_id: f.cvA, message_id: 5000 + i });
+  await settle();
+  assert.deepEqual(cand.frames.map((fr) => fr.data.message_id), Array.from({ length: 30 }, (_, i) => 5001 + i));
+  assert.deepEqual(mgr.frames.map((fr) => fr.data.message_id), Array.from({ length: 30 }, (_, i) => 5001 + i));
+  assert.deepEqual(other.frames, [], "candidate B is not a recipient");
+});
+
+test("account re-check cache: CHAT_SSE_RECHECK_MS bounds the per-stream reads (clock-driven), the heartbeat and a cache clear always re-read, a revocation is never delayed", async () => {
+  const f = await fx();
+  const { w } = f;
+  let now = 1_000_000;
+  hub.setClock(() => now);
+  try {
+    assert.equal(process.env.CHAT_SSE_RECHECK_MS, undefined);
+    const c1 = await w.mkCandidate("CACHE", w.id.agent1);
+    const cv = await w.openConv("candidate", c1.id);
+    const s = await openSse(c1.token);
+    const ev = (n) => hub.publish({ kind: "message", conversation_id: cv, message_id: 9000 + n });
+    // inside the 5 s window: eight events, zero account reads
+    let log = await spyQueries(w, async () => {
+      for (let i = 0; i < 8; i += 1) ev(i);
+      await hub.idle();
+    });
+    assert.equal(log.filter(isAccountRead).length, 0, "cached");
+    assert.equal(log.filter(isAccess).length, 8, "but the visibility query runs once per event");
+    await until(() => s.frames.length === 8, 3000, "eight frames");
+    // 5 s later: exactly one read, then cached again
+    now += 5000;
+    log = await spyQueries(w, async () => {
+      ev(20);
+      ev(21);
+      await hub.idle();
+    });
+    assert.equal(log.filter(isAccountRead).length, 1, "window expired: one re-read for the stream");
+    now += 4999;
+    log = await spyQueries(w, async () => {
+      ev(22);
+      await hub.idle();
+    });
+    assert.equal(log.filter(isAccountRead).length, 0, "4.999 s after the last read: still cached");
+    // test hook: clearing the cache forces the next delivery to re-read
+    hub.clearRecheckCache();
+    log = await spyQueries(w, async () => {
+      ev(23);
+      await hub.idle();
+    });
+    assert.equal(log.filter(isAccountRead).length, 1, "cleared");
+    // the setting
+    process.env.CHAT_SSE_RECHECK_MS = "100";
+    now += 101;
+    log = await spyQueries(w, async () => {
+      ev(24);
+      await hub.idle();
+    });
+    assert.equal(log.filter(isAccountRead).length, 1, "CHAT_SSE_RECHECK_MS=100 honoured");
+    delete process.env.CHAT_SSE_RECHECK_MS;
+    // a revoked account is cut off at once, INSIDE the cache window: no frame, stream closed
+    await settle();
+    const frames = s.frames.length;
+    await w.q("UPDATE users SET is_active = false WHERE id = $1", [c1.userId]);
+    ev(30);
+    await s.waitEnded();
+    assert.equal(s.frames.length, frames, "nothing delivered after the revocation");
+    // token version bump (logout) on a versioned portal token: same, no heartbeat needed
+    const c2 = await w.mkCandidate("CACHE2", w.id.agent1);
+    const cv2 = await w.openConv("candidate", c2.id);
+    const s2 = await openSse(c2.token);
+    hub.publish({ kind: "message", conversation_id: cv2, message_id: 9100 });
+    await s2.waitFor((d) => d.message_id === 9100);
+    await w.q("UPDATE users SET token_version = token_version + 1 WHERE id = $1", [c2.userId]);
+    hub.publish({ kind: "message", conversation_id: cv2, message_id: 9101 });
+    await s2.waitEnded();
+    assert.ok(!s2.find((d) => d.message_id === 9101));
+    // the heartbeat re-reads the account every time, cache or not (the clock is frozen, so the cache never expires)
+    process.env.CHAT_SSE_HEARTBEAT_MS = "60";
+    const c3 = await w.mkCandidate("CACHE3", w.id.agent1);
+    const s3 = await openSse(c3.token);
+    log = await spyQueries(w, async () => {
+      await until(() => s3.comments.filter((c) => c.includes("heartbeat")).length >= 4, 4000, "four heartbeats");
+    });
+    const beats = s3.comments.filter((c) => c.includes("heartbeat")).length;
+    assert.ok(log.filter(isAccountRead).length >= beats - 1, `each heartbeat re-reads the account (${log.filter(isAccountRead).length} reads for ${beats} beats)`);
+    await w.q("UPDATE users SET is_active = false WHERE id = $1", [c3.userId]);
+    await s3.waitEnded(2000);
+  } finally {
+    hub.setClock();
+    delete process.env.CHAT_SSE_RECHECK_MS;
+    delete process.env.CHAT_SSE_HEARTBEAT_MS;
+  }
+});
+
+test("staff rooms over SSE: events reach only explicit participants (HR included) and stop the moment a participant is removed", async () => {
+  const f = await fx();
+  const { w } = f;
+  const room = await w.http("POST", "/chat/conversations", w.T.mgr, { subject_type: "staff", title: "RT room", participant_user_ids: [w.id.hr, w.id.agent1] });
+  assert.equal(room.status, 201, room.text);
+  const rid = room.body.id;
+  const S = { mgr: await openSse(w.T.mgr), hr: await openSse(w.T.hr), agent1: await openSse(w.T.agent1), acct: await openSse(w.T.acct), admin: await openSse(w.T.admin), agent2: await openSse(w.T.agent2) };
+  const m1 = await w.send(w.T.hr, rid, "from hr");
+  assert.equal(m1.status, 201, m1.text);
+  for (const k of ["mgr", "hr", "agent1"]) await S[k].waitFor((d) => d.message_id === m1.body.id);
+  await settle();
+  for (const k of ["acct", "admin", "agent2"]) assert.deepEqual(ofConv(S[k], rid), [], `${k} gets nothing`);
+  assert.equal((await w.http("DELETE", `/chat/conversations/${rid}/participants/${w.id.hr}`, w.T.mgr)).status, 200);
+  const m2 = await w.send(w.T.mgr, rid, "after removal");
+  await S.agent1.waitFor((d) => d.message_id === m2.body.id);
+  await settle();
+  assert.ok(!S.hr.find((d) => d.message_id === m2.body.id), "the removed HR user gets nothing, at once");
+  assert.ok(!S.hr.ended, "removal from a room does not end the stream");
+  // adding an Agent to an employer thread opens the live stream for that thread at once
+  const ag2 = await w.http("POST", `/chat/conversations/${f.evA}/participants`, w.T.mgr, { user_id: w.id.agent2 });
+  assert.equal(ag2.status, 201);
+  const m3 = await w.send(w.T.mgr, f.evA, "employer thread, agent2 added");
+  await S.agent2.waitFor((d) => d.message_id === m3.body.id);
+  await w.http("DELETE", `/chat/conversations/${f.evA}/participants/${w.id.agent2}`, w.T.mgr);
+  const m4 = await w.send(w.T.mgr, f.evA, "agent2 removed again");
+  await S.mgr.waitFor((d) => d.message_id === m4.body.id);
+  await settle();
+  assert.ok(!S.agent2.find((d) => d.message_id === m4.body.id));
+});
+
 // ================================================================================================ replay
 test("Last-Event-ID replay is derived from chat_messages: only visible conversations, hidden as kind hidden, newest 200", async () => {
   const f = await fx();
@@ -375,11 +562,12 @@ test("Last-Event-ID replay is derived from chat_messages: only visible conversat
   assert.equal((await w.http("POST", `/chat/messages/${v1.body.id}/hide`, w.T.mgr, { reason: "r" })).status, 200);
   const re = await openSse(candP.token, { lastEventId: lastSeen });
   await settle();
-  assert.deepEqual(re.frames.map((fr) => [fr.data.kind, fr.data.message_id]), [["hidden", v1.body.id], ["message", v2.body.id]]);
+  // The replay overlaps by 2 minutes (ids are not commit-ordered): the already-seen message comes again and the client dedupes by id.
+  assert.deepEqual(re.frames.map((fr) => [fr.data.kind, fr.data.message_id]), [["message", base.body.id], ["hidden", v1.body.id], ["message", v2.body.id]]);
   assert.ok(!re.frames.some((fr) => [x1.body.id, x2.body.id].includes(fr.data.message_id)));
   assert.ok(!re.raw.includes("SECRET-REPLAY"));
-  assert.equal(re.frames[0].id, null, "only message events carry an SSE id");
-  assert.equal(re.frames[1].id, String(v2.body.id));
+  assert.equal(re.frames[1].id, null, "only message events carry an SSE id");
+  assert.equal(re.frames[2].id, String(v2.body.id));
   // staff with the right scope replays the staff view of the same range; the unassigned agent gets nothing of P
   const stf = await openSse(w.T.agent1, { lastEventId: lastSeen });
   const stf2 = await openSse(w.T.agent2, { lastEventId: lastSeen });
@@ -405,6 +593,71 @@ test("Last-Event-ID replay is derived from chat_messages: only visible conversat
   const live = await w.send(w.T.mgr, cvCap, "live");
   await capped.waitFor((d) => d.message_id === live.body.id);
   assert.equal(capped.frames.filter((fr) => fr.data.message_id === live.body.id).length, 1);
+});
+
+test("replay survives out-of-order commits: a lower id that commits AFTER a higher one is replayed (2-minute overlap), older ones are not, 200 cap holds", async () => {
+  const f = await fx();
+  const { w } = f;
+  const cand = await w.mkCandidate("OOO", w.id.agent1);
+  const cv = await w.openConv("candidate", cand.id);
+  const ins = (client, body, createdAtSql = "clock_timestamp()") =>
+    client.query(`INSERT INTO chat_messages (conversation_id, sender_user_id, sender_role, body, created_at) VALUES ($1,$2,'Manager',$3, ${createdAtSql}) RETURNING id`, [cv, w.id.mgr, body]);
+  // an old message (10 minutes ago, committed) that must NOT come back through the overlap
+  const old = Number((await ins(w.pool, "old", "clock_timestamp() - interval '10 minutes'")).rows[0].id);
+  // two concurrent transactions: A takes the lower id but commits second
+  const a = await w.pool.connect();
+  const b = await w.pool.connect();
+  let idA;
+  let idB;
+  try {
+    await a.query("BEGIN");
+    await b.query("BEGIN");
+    idA = Number((await ins(a, "A: lower id, commits late")).rows[0].id);
+    idB = Number((await ins(b, "B: higher id, commits first")).rows[0].id);
+    assert.ok(idA < idB, "A has the lower id");
+    await b.query("COMMIT");
+    // the client has seen B (Last-Event-ID = idB); A is still invisible to everybody
+    const first = await openSse(cand.token, { lastEventId: idB });
+    await settle();
+    assert.deepEqual(first.frames.filter((fr) => fr.data.message_id === idA), [], "A is not committed yet");
+    first.close();
+    await a.query("COMMIT");
+  } finally {
+    a.release();
+    b.release();
+  }
+  // reconnect with the same Last-Event-ID: the late-committed lower id is included, ascending, deduplicated by the stream
+  const re = await openSse(cand.token, { lastEventId: idB });
+  await settle();
+  const got = re.frames.map((fr) => fr.data.message_id);
+  assert.ok(got.includes(idA), "the late-committed lower id is replayed");
+  assert.ok(got.includes(idB), "the overlap includes the last id itself (clients dedupe by id)");
+  assert.ok(!got.includes(old), "a message older than the 2-minute overlap is not replayed");
+  assert.deepEqual(got, [...got].sort((x, y) => x - y), "ascending by id");
+  assert.equal(new Set(got).size, got.length, "each id once");
+  // other people's conversations never enter the overlap
+  const other = await w.mkCandidate("OOO2", w.id.agent2);
+  const cvO = await w.openConv("candidate", other.id);
+  const idO = Number((await w.q("INSERT INTO chat_messages (conversation_id, sender_user_id, sender_role, body) VALUES ($1,$2,'Manager','other') RETURNING id", [cvO, w.id.mgr])).rows[0].id);
+  const re2 = await openSse(cand.token, { lastEventId: idO });
+  await settle();
+  assert.ok(!re2.frames.some((fr) => fr.data.conversation_id === cvO), "overlap is scoped to the visible conversations");
+  assert.ok(re2.frames.some((fr) => fr.data.message_id === idA), "and still includes my recent lower ids");
+  // an unknown Last-Event-ID (no such message) degrades to plain id > lastId
+  const re3 = await openSse(cand.token, { lastEventId: 999999999 });
+  await settle();
+  assert.deepEqual(re3.frames, []);
+  // cap: 250 recent messages -> the newest 200, ascending, even with the overlap branch active
+  const capCand = await w.mkCandidate("OOO3", w.id.agent1);
+  const capCv = await w.openConv("candidate", capCand.id);
+  await w.q("INSERT INTO chat_messages (conversation_id, sender_user_id, sender_role, body) SELECT $1, $2, 'Manager', 'bulk ' || g FROM generate_series(1, 250) g", [capCv, w.id.mgr]);
+  const max = Number((await w.one("SELECT max(id) AS m FROM chat_messages WHERE conversation_id = $1", [capCv])).m);
+  const capped = await openSse(capCand.token, { lastEventId: max - 10 });
+  await settle();
+  const ids = capped.frames.map((fr) => fr.data.message_id);
+  assert.equal(ids.length, 200);
+  assert.equal(ids[ids.length - 1], max);
+  assert.deepEqual(ids, [...ids].sort((x, y) => x - y));
 });
 
 // ================================================================================================ caps, heartbeat, cleanup, shutdown
@@ -543,15 +796,23 @@ test("nudge: link only with a valid SITE_BASE_URL; employer and agency users eac
   assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_nudges")).rows[0].n, 0);
 });
 
-test("nudge: a mail failure or a refused recipient never fails the send, and gives the cooldown slot back", async () => {
+test("nudge: a mail failure or a refused recipient never fails the send, and holds the slot for the failure backoff (default 5 minutes), not longer, not shorter", async () => {
   const f = await fx();
   const { w } = f;
   await cleanMail(w);
-  nudges.setClock(() => new Date());
+  let now = Date.parse("2026-10-26T10:00:00.000Z");
+  const clock = () => new Date(now);
+  const advance = (min) => {
+    now += min * 60000;
+  };
+  nudges.setClock(clock);
+  assert.equal(nudges.failureBackoffMinutes(), 5);
   const real = mail.sandbox.send;
   const errors = [];
   const origErr = console.error;
   console.error = (...a) => errors.push(a.join(" "));
+  const slot = async (cid) => (await w.q("SELECT last_sent_at FROM chat_nudges WHERE conversation_id = $1", [cid])).rows;
+  const sentTo = async () => (await w.outbound(f.candA.email)).length;
   try {
     mail.sandbox.send = async () => {
       throw Object.assign(new Error("smtp exploded with secret-host.internal"), { code: "ECONNREFUSED" });
@@ -560,21 +821,71 @@ test("nudge: a mail failure or a refused recipient never fails the send, and giv
     assert.equal(r.status, 201);
     assert.equal(r.body.body, "mail will fail");
     await nudges.idle();
-    assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_nudges WHERE conversation_id = $1", [f.cvA])).rows[0].n, 0, "slot released");
+    assert.equal((await slot(f.cvA)).length, 1, "the slot is HELD after a failed delivery, not released");
     assert.ok(errors.some((e) => e.includes("chat nudge failed") && e.includes("ECONNREFUSED")));
     assert.ok(!errors.some((e) => e.includes("secret-host")), "only the error code is logged");
+    // provider recovers, but the backoff holds: no mail within 5 minutes (a provider outage must not be hammered once per message)
+    mail.sandbox.send = real;
+    advance(4);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "within backoff")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 0, "held for the backoff");
+    // after the backoff the next staff message nudges normally (the 15-minute cooldown is NOT what held it)
+    advance(1.5);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "after backoff")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 1, "retried after 5 minutes");
+    // a refused recipient takes the same path
+    advance(60);
     mail.sandbox.send = async () => ({ providerMessageId: null, accepted: false, reason: "refused" });
     assert.equal((await w.send(w.T.mgr, f.cvA, "mail refused")).status, 201);
     await nudges.idle();
-    assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_nudges WHERE conversation_id = $1", [f.cvA])).rows[0].n, 0);
+    assert.equal(await sentTo(), 1);
+    assert.equal((await slot(f.cvA)).length, 1, "held after a refusal");
+    mail.sandbox.send = real;
+    advance(2);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "still held")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 1);
+    advance(3.5);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "mail works again")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 2, "the next message after the backoff nudges normally");
+    // the setting: unset / malformed -> 5, 0 releases at once (the old behaviour), large values are capped
+    for (const [raw, want] of [[undefined, 5], ["", 5], ["abc", 5], ["-1", 5], ["1.5", 5], ["0", 0], ["10", 10], ["99999", 1440]]) {
+      if (raw === undefined) delete process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN;
+      else process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN = raw;
+      assert.equal(nudges.failureBackoffMinutes(), want, `backoff ${raw}`);
+    }
+    process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN = "0";
+    await w.q("DELETE FROM chat_nudges");
+    mail.sandbox.send = async () => {
+      throw Object.assign(new Error("down"), { code: "ETIMEDOUT" });
+    };
+    assert.equal((await w.send(w.T.mgr, f.cvA, "fails, no backoff")).status, 201);
+    await nudges.idle();
+    assert.equal((await slot(f.cvA)).length, 0, "backoff 0 releases the slot at once");
+    // a longer backoff than the cooldown holds for the backoff
+    process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN = "30";
+    advance(1);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "fails, long backoff")).status, 201);
+    await nudges.idle();
+    mail.sandbox.send = real;
+    advance(20);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "20 minutes later")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 2, "20 < 30 minutes of backoff (cooldown is 15, backoff wins)");
+    advance(11);
+    assert.equal((await w.send(w.T.mgr, f.cvA, "31 minutes later")).status, 201);
+    await nudges.idle();
+    assert.equal(await sentTo(), 3);
   } finally {
+    delete process.env.CHAT_NUDGE_FAILURE_BACKOFF_MIN;
     mail.sandbox.send = real;
     console.error = origErr;
   }
-  assert.equal((await w.send(w.T.mgr, f.cvA, "mail works again")).status, 201);
-  await nudges.idle();
-  assert.equal((await w.outbound(f.candA.email)).length, 1, "the next message nudges normally");
   // a recipient outside the sandbox allow-list is refused by the adapter: still no failure
+  nudges.setClock(() => new Date());
   const outside = await w.mkCandidate("OUT", w.id.agent1);
   await w.q("UPDATE users SET email = 'someone@not-allowed.example' WHERE id = $1", [outside.userId]);
   const cvO = await w.openConv("candidate", outside.id);

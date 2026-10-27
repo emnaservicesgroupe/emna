@@ -7,6 +7,9 @@ const c = require("./common");
 const hub = require("./hub");
 
 const OPEN_TYPES = ["candidate", "employer_request", "agency"];
+const ROOM_TITLE_MAX = 120;
+const ROOM_MEMBERS_MAX = 50;
+const ID_MAX = 2147483647;
 
 const candidateCanStart = () => !/^(false|0|no|off)$/i.test(String(process.env.CHAT_CANDIDATE_CAN_START ?? "true").trim());
 
@@ -85,6 +88,62 @@ async function listConversations(actor, query) {
   return { rows, has_more: r.rows.length > limit };
 }
 
+/** Title of a staff room: a string, trimmed, 1..120 characters (code points), no NUL / lone surrogate, something visible. */
+function roomTitle(v) {
+  if (typeof v !== "string") throw new HttpError(400, "title must be a string");
+  const t = v.trim();
+  if (t.includes("\u0000") || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(t)) throw new HttpError(400, "title contains invalid characters");
+  if (/[\u202A-\u202E\u2066-\u2069]/.test(t)) throw new HttpError(400, "title contains bidirectional override or isolate characters, which are not allowed");
+  const len = [...t].length;
+  if (len < 1 || /^[\p{Cf}\p{Cc}\p{Z}\s]*$/u.test(t)) throw new HttpError(400, "title is required");
+  if (len > ROOM_TITLE_MAX) throw new HttpError(400, `title must be at most ${ROOM_TITLE_MAX} characters`);
+  return t;
+}
+
+/** participant_user_ids: an array of 1..50 positive 32-bit ids (duplicates collapse). */
+function roomMemberIds(v) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > ROOM_MEMBERS_MAX) throw new HttpError(400, `participant_user_ids must be a list of 1 to ${ROOM_MEMBERS_MAX} user ids`);
+  const ids = new Set();
+  for (const raw of v) {
+    if (!Number.isSafeInteger(raw) || raw < 1 || raw > ID_MAX) throw new HttpError(400, "participant_user_ids must contain positive integer user ids");
+    ids.add(raw);
+  }
+  return [...ids];
+}
+
+/** Active staff users among `ids` (who may be added to a staff room). */
+async function activeStaff(runner, ids) {
+  const r = await runner.query("SELECT id, full_name, role FROM users WHERE id = ANY($1::int[]) AND is_active = true AND role = ANY($2::text[])", [ids, [...scope.ROOM_MEMBER_ROLES]]);
+  return r.rows;
+}
+
+/**
+ * POST /chat/conversations {subject_type: 'staff', title, participant_user_ids} (chat:moderate): an internal room visible only to its
+ * EXPLICIT participants (added_by set), HR and Accountant included. The creator is a participant too. Rooms are not idempotent (a new room
+ * each time); every participant must be an active staff user. Audited once, with the participant ids (never any text).
+ */
+async function createStaffRoom(actor0, body) {
+  if (actor0.kind !== "staff" || !actor0.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+  const title = roomTitle(body.title);
+  const requested = roomMemberIds(body.participant_user_ids);
+  return c.inTransaction(async (client) => {
+    const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
+    if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+    const members = [...new Set([actor.userId, ...requested])];
+    const found = await activeStaff(client, members);
+    if (found.length !== members.length) throw new HttpError(400, "participant_user_ids must be active staff users");
+    const ins = await client.query(
+      `INSERT INTO chat_conversations (subject_type, subject_id, title, created_by) VALUES ('staff', NULL, $1, $2)
+       RETURNING id, subject_type, subject_id, title, status, created_at, last_message_at`,
+      [title, actor.userId]
+    );
+    const id = ins.rows[0].id;
+    await client.query("INSERT INTO chat_participants (conversation_id, user_id, added_by) SELECT $1, x, $2 FROM unnest($3::int[]) AS x", [id, actor.userId, members]);
+    await logAudit({ client, userId: actor.userId, action: "chat.conversation.open", tableName: "chat_conversations", recordId: String(id), newData: { subject_type: "staff", participant_user_ids: members.sort((a, b) => a - b) } });
+    return { created: true, conversation: { ...shapeConversation(ins.rows[0], actor), participant_user_ids: members } };
+  });
+}
+
 /**
  * POST /chat/conversations {subject_type, subject_id}. Staff open a conversation for a subject they can serve; a candidate may open
  * only their own candidate conversation (CHAT_CANDIDATE_CAN_START, default true); employers and agencies never start one.
@@ -93,11 +152,13 @@ async function listConversations(actor, query) {
 async function openConversation(actor0, input) {
   const body = c.bodyObject(input);
   const type = body.subject_type;
+  if (type === "staff") return createStaffRoom(actor0, body);
   if (typeof type !== "string" || !OPEN_TYPES.includes(type)) throw new HttpError(400, `subject_type must be one of ${OPEN_TYPES.join(", ")}`);
   if (actor0.kind !== "staff") {
     if (actor0.kind !== "candidate" || type !== "candidate") throw new HttpError(403, "Access denied");
     if (!candidateCanStart()) throw new HttpError(403, "Starting a conversation is not enabled");
-  } else if (!actor0.perms.write) throw new HttpError(403, "Permission denied: chat:write");
+  } else if (actor0.participantOnly) throw new HttpError(403, "Access denied");
+  else if (!actor0.perms.write) throw new HttpError(403, "Permission denied: chat:write");
   let subjectId;
   if (actor0.kind === "candidate" && (body.subject_id === undefined || body.subject_id === null)) subjectId = actor0.candidateId;
   else subjectId = c.parseId(body.subject_id, { label: "subject_id" });
@@ -142,6 +203,90 @@ async function setStatus(actor0, rawId, status) {
   });
   if (result.changed) hub.publish({ kind: status === "closed" ? "closed" : "reopened", conversation_id: id });
   return result;
+}
+
+/**
+ * POST /chat/conversations/:id/participants {user_id} (chat:moderate): makes an active STAFF user an explicit participant (added_by = the actor),
+ * which gives Receptionist / Agent access to employer / agency conversations and staff rooms, and HR / Accountant access to staff rooms.
+ * Idempotent: -> 201 {changed: true} when added, 200 {changed: false} when already a participant; audited only on a change. The moderator must
+ * see the conversation (else the usual 404). HR / Accountant can only join staff rooms; candidate conversations follow the assignment, not participants.
+ */
+async function addParticipant(actor0, rawId, input) {
+  const id = c.pathId(rawId);
+  if (actor0.kind !== "staff" || !actor0.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+  const userId = c.parseId(c.bodyObject(input).user_id, { label: "user_id" });
+  return c.inTransaction(async (client) => {
+    const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
+    if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+    const conv = await loadVisible(client, actor, id, { lock: true });
+    const target = (await activeStaff(client, [userId]))[0];
+    if (!target) throw new HttpError(400, "user_id must be an active staff user");
+    if (conv.subject_type === "candidate") throw new HttpError(400, "Participants cannot be added to a candidate conversation: it follows the candidate's assignment");
+    if (conv.subject_type !== "staff" && scope.PARTICIPANT_ONLY_ROLES.has(target.role)) throw new HttpError(400, "HR and Accountant can only join staff rooms");
+    const up = await client.query(
+      `INSERT INTO chat_participants (conversation_id, user_id, added_by) VALUES ($1,$2,$3)
+       ON CONFLICT (conversation_id, user_id) DO UPDATE SET added_by = EXCLUDED.added_by, added_at = now() WHERE chat_participants.added_by IS NULL
+       RETURNING user_id`,
+      [id, userId, actor.userId]
+    );
+    const changed = up.rowCount > 0;
+    if (changed) {
+      await logAudit({ client, userId: actor.userId, action: "chat.participant.add", tableName: "chat_participants", recordId: `${id}:${userId}`, newData: { conversation_id: id, user_id: userId, role: target.role } });
+    }
+    return { conversation_id: id, user_id: userId, full_name: target.full_name, role: target.role, changed };
+  });
+}
+
+/**
+ * DELETE /chat/conversations/:id/participants/:user_id (chat:moderate): withdraws the explicit access (added_by -> NULL; the read marker, if any,
+ * stays). Idempotent: {changed: false} when the user was not an explicit participant; audited only on a change. Works for deactivated users too.
+ */
+async function removeParticipant(actor0, rawId, rawUserId) {
+  const id = c.pathId(rawId);
+  if (actor0.kind !== "staff" || !actor0.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+  const userId = c.parseId(rawUserId, { label: "user_id" });
+  return c.inTransaction(async (client) => {
+    const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
+    if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+    await loadVisible(client, actor, id, { lock: true });
+    const del = await client.query("UPDATE chat_participants SET added_by = NULL WHERE conversation_id = $1 AND user_id = $2 AND added_by IS NOT NULL RETURNING user_id", [id, userId]);
+    const changed = del.rowCount > 0;
+    if (changed) {
+      await logAudit({ client, userId: actor.userId, action: "chat.participant.remove", tableName: "chat_participants", recordId: `${id}:${userId}`, oldData: { conversation_id: id, user_id: userId } });
+    }
+    return { conversation_id: id, user_id: userId, changed };
+  });
+}
+
+/** GET /chat/conversations/:id/participants (chat:moderate): the explicit participants, for the "add participant" dialog. */
+async function listParticipants(actor, rawId) {
+  const id = c.pathId(rawId);
+  if (actor.kind !== "staff" || !actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+  await loadVisible(db, actor, id);
+  const r = await db.query(
+    `SELECT p.user_id, u.full_name, u.role, p.added_at FROM chat_participants p JOIN users u ON u.id = p.user_id
+      WHERE p.conversation_id = $1 AND p.added_by IS NOT NULL ORDER BY u.full_name, p.user_id`,
+    [id]
+  );
+  return { rows: r.rows.map((row) => ({ user_id: row.user_id, full_name: row.full_name, role: row.role, added_at: row.added_at })) };
+}
+
+/** GET /chat/staff ?q&limit(<=50) (chat:moderate): active staff users {id, full_name, role} to pick participants from (no e-mail addresses). */
+async function staffDirectory(actor, query) {
+  if (actor.kind !== "staff" || !actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
+  const q = query || {};
+  const { limit } = c.paging({ limit: q.limit }, { def: 25 });
+  let term = "";
+  if (q.q !== undefined) {
+    if (typeof q.q !== "string") throw new HttpError(400, "q must be a single value");
+    term = q.q.trim().slice(0, 100);
+  }
+  const like = `%${term.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+  const r = await db.query(
+    `SELECT id, full_name, role FROM users WHERE is_active = true AND role = ANY($1::text[]) AND ($2 = '' OR full_name ILIKE $3) ORDER BY full_name, id LIMIT $4`,
+    [[...scope.ROOM_MEMBER_ROLES], term, like, limit]
+  );
+  return { rows: r.rows };
 }
 
 async function unreadFor(runner, actor, conversationId) {
@@ -192,4 +337,4 @@ async function unreadCount(actor) {
   return { unread: r.rows[0].unread, conversations: r.rows[0].conversations };
 }
 
-module.exports = { listConversations, openConversation, setStatus, markRead, unreadCount, loadVisible, shapeConversation, candidateCanStart };
+module.exports = { listConversations, openConversation, setStatus, markRead, unreadCount, loadVisible, shapeConversation, candidateCanStart, addParticipant, removeParticipant, listParticipants, staffDirectory };

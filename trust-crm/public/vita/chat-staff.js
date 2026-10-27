@@ -15,7 +15,10 @@
   var started = false;
 
   function role() { return A.role(); }
-  function visible() { return CU.canChatRead(role()); }
+  function visible() { return CU.canChatUse(role()); }
+  /** HR / Accountant: no chat:* - they read and write only inside staff rooms they were added to (the server enforces it). */
+  function participantOnly() { return CU.isChatParticipantOnly(role()); }
+  function canWrite() { return CU.canChatWrite(role()) || participantOnly(); }
   /** Organisation conversations: the role reads organisations AND moderates (the server opens them for Admin / Manager / SuperAdmin only). */
   function canOrgSubjects() { return CU.canOrgsRead(role()) && CU.canChatModerate(role()); }
 
@@ -140,15 +143,150 @@
     typeSel.focus();
   }
 
+  // ---------------------------------------------------------------- staff rooms and participants
+  /** Staff search (GET /chat/staff?q=, chat:moderate): name + role, no e-mail. onPick(user) receives the chosen person. */
+  function staffPicker(idBase, onPick) {
+    var search = h("input", { id: idBase + "-search", type: "search", attrs: { maxlength: "100", autocomplete: "off" } });
+    var pick = h("select", { id: idBase + "-pick" });
+    var add = h("button", { type: "button", class: "btn secondary small", text: t("chat.room.add") });
+    var state = h("p", { class: "small muted", attrs: { "aria-live": "polite" } });
+    var results = [];
+    var n = 0;
+    function fill() {
+      A.fillSelect(pick, [["", results.length ? t("chat.room.pick") : t("chat.open.noMatches")]].concat(results.map(function (r) { return [String(r.id), r.full_name + " (" + roleName(r.role) + ")"]; })), "");
+    }
+    var lookup = V.debounce(function () {
+      var mine = ++n;
+      var q = search.value.trim();
+      V.setContent(state, t("chat.open.searching"));
+      return V.api("GET", "/chat/staff?limit=25&q=" + encodeURIComponent(q.slice(0, 100)))
+        .then(function (data) {
+          if (mine !== n) return;
+          results = ((data && data.rows) || []).slice(0, 25).map(function (r) { return { id: r.id, full_name: String(r.full_name || ""), role: String(r.role || "") }; });
+          fill();
+          V.setContent(state, results.length ? t("chat.open.found", { n: results.length }) : t("chat.open.noMatches"));
+        })
+        .catch(function (err) { if (mine === n) V.setContent(state, V.errorMessage(err)); });
+    }, 300);
+    search.addEventListener("input", lookup);
+    add.addEventListener("click", function () {
+      var chosen = results.filter(function (r) { return String(r.id) === pick.value; })[0];
+      if (chosen) onPick(chosen);
+    });
+    fill();
+    lookup();
+    return { el: h("div", null, field(idBase + "-search", t("chat.room.search"), search), field(idBase + "-pick", t("chat.open.results"), pick), add, state), input: search };
+  }
+  function roleName(r) { return V.has("chat.role." + r) ? t("chat.role." + r) : String(r); }
+
+  /** A modal dialog with a form; returns {dlg, form, done}. */
+  function modal(titleId, titleText, hint) {
+    var form = h("form", { attrs: { novalidate: "" } }, h("h3", { id: titleId, text: titleText }), hint ? h("p", { class: "small muted", text: hint }) : null);
+    var dlg = h("dialog", { class: "wide", attrs: { "aria-labelledby": titleId } }, form);
+    document.body.appendChild(dlg);
+    var opener = document.activeElement;
+    function done() {
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      if (opener && opener.focus && opener.isConnected) opener.focus();
+    }
+    dlg.addEventListener("cancel", function (e) { e.preventDefault(); done(); });
+    return { dlg: dlg, form: form, done: done, show: function () { if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", ""); } };
+  }
+
+  /** New staff room (chat:moderate): a name and 1 to 50 staff participants; the creator joins automatically. HR and Accountant can be added. */
+  function roomDialog() {
+    if (!panel) return;
+    var m = modal("chat-room-title", t("chat.room.title"), t("chat.room.hint"));
+    var name = h("input", { id: "chat-room-name", type: "text", attrs: { maxlength: "120", autocomplete: "off" } });
+    var chosen = [];
+    var list = h("ul", { class: "plain chat-room-members", attrs: { "aria-live": "polite" } });
+    var count = h("p", { class: "small muted" });
+    var err = h("p", { class: "form-error", attrs: { role: "alert" } });
+    function renderChosen() {
+      V.clear(list);
+      chosen.forEach(function (u) {
+        list.appendChild(h("li", null, h("span", { text: u.full_name + " (" + roleName(u.role) + ") " }),
+          h("button", { type: "button", class: "linklike small", text: t("chat.room.remove"), on: { click: function () { chosen = chosen.filter(function (x) { return x.id !== u.id; }); renderChosen(); } } })));
+      });
+      count.textContent = chosen.length ? t("chat.room.selected", { n: chosen.length }) : t("chat.room.none");
+    }
+    var picker = staffPicker("chat-room", function (u) {
+      if (!chosen.some(function (x) { return x.id === u.id; })) chosen.push(u);
+      renderChosen();
+    });
+    renderChosen();
+    var ok = h("button", { type: "submit", class: "btn", text: t("chat.room.submit") });
+    var cancel = h("button", { type: "button", class: "btn secondary", text: t("common.cancel") });
+    [field("chat-room-name", t("chat.room.name"), name), picker.el, count, list, err, h("div", { class: "btn-row" }, ok, cancel)].forEach(function (el) { m.form.appendChild(el); });
+    m.form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      err.textContent = "";
+      var built = U.staffRoomPayload(name.value, chosen.map(function (u) { return u.id; }));
+      if (!built.ok) { err.textContent = t("chat.room.err." + built.error); (built.error === "title" ? name : picker.input).focus(); return; }
+      V.busy(ok, function () {
+        return V.api("POST", "/chat/conversations", { body: built.payload }).then(function (conv) {
+          m.done();
+          V.toast(t("chat.room.created"), "ok");
+          return panel.reload().then(function () { if (conv && conv.id) panel.openConversation(conv.id); });
+        });
+      }).catch(function (e2) { err.textContent = V.errorMessage(e2); });
+    });
+    cancel.addEventListener("click", m.done);
+    m.show();
+    name.focus();
+  }
+
+  /** Add participant (chat:moderate) to the open organisation conversation or staff room, and remove the ones already added. */
+  function participantDialog(conv) {
+    if (!panel || !conv || !U.canAddParticipants(conv)) return;
+    var m = modal("chat-part-title", t("chat.participants.title"), t("chat.participants.hint"));
+    var current = h("ul", { class: "plain chat-participants", attrs: { "aria-label": t("chat.participants.current") } });
+    var err = h("p", { class: "form-error", attrs: { role: "alert" } });
+    function loadCurrent() {
+      return V.api("GET", "/chat/conversations/" + conv.id + "/participants").then(function (data) {
+        var rows = (data && data.rows) || [];
+        V.clear(current);
+        if (!rows.length) current.appendChild(h("li", { class: "small muted", text: t("chat.participants.empty") }));
+        rows.forEach(function (r) {
+          current.appendChild(h("li", null, h("span", { text: String(r.full_name || "") + " (" + roleName(String(r.role || "")) + ") " }),
+            h("button", { type: "button", class: "linklike small", text: t("chat.participants.remove"), on: { click: function (e) {
+              V.busy(e.currentTarget, function () { return V.api("DELETE", "/chat/conversations/" + conv.id + "/participants/" + encodeURIComponent(String(r.user_id))).then(function () { V.toast(t("chat.participants.removed"), "ok"); return loadCurrent(); }); })
+                .catch(function (e2) { err.textContent = V.errorMessage(e2); });
+            } } })));
+        });
+      }).catch(function (e2) { err.textContent = V.errorMessage(e2); });
+    }
+    var picker = staffPicker("chat-part", function (u) {
+      err.textContent = "";
+      var built = U.participantPayload(String(u.id));
+      if (!built.ok) { err.textContent = t("chat.participants.err.none"); return; }
+      V.api("POST", "/chat/conversations/" + conv.id + "/participants", { body: built.payload }).then(function (out) {
+        V.toast(t(out && out.changed ? "chat.participants.added" : "chat.participants.already"), "ok");
+        return loadCurrent();
+      }).catch(function (e2) { err.textContent = V.errorMessage(e2); });
+    });
+    var close = h("button", { type: "button", class: "btn secondary", text: t("common.close") });
+    [h("h4", { text: t("chat.participants.current") }), current, picker.el, err, h("div", { class: "btn-row" }, close)].forEach(function (el) { m.form.appendChild(el); });
+    m.form.addEventListener("submit", function (e) { e.preventDefault(); });
+    close.addEventListener("click", m.done);
+    loadCurrent();
+    m.show();
+    picker.input.focus();
+  }
+
   // ---------------------------------------------------------------- tab wiring
   function init() {
     var badge = C.badge($("#chat-tab-badge"));
     panel = C.createPanel({
       root: $("#chat-staff-root"),
       mode: "staff",
-      canWrite: function () { return CU.canChatWrite(role()); },
+      canWrite: canWrite,
       canModerate: function () { return CU.canChatModerate(role()); },
+      participantOnly: participantOnly,
       onNew: openDialog,
+      onNewRoom: roomDialog,
+      onAddParticipant: participantDialog,
       onUnread: badge,
     });
   }

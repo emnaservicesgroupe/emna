@@ -11,6 +11,7 @@ delete process.env.CHAT_CANDIDATE_CAN_START;
 const { createTestDb, loadApp } = require("./helpers/db");
 const { createEmployerUser, createAgencyUser, portalToken } = require("./helpers/orgs");
 const scope = require("../modules/chat/scope");
+const nudges = require("../modules/chat/nudges");
 
 // ------------------------------------------------------------------------------------------------ world
 let worldPromise = null;
@@ -127,21 +128,41 @@ test("scope: conversationVisibleSql validates the alias and denies unknown actor
 });
 
 // ------------------------------------------------------------------------------------------------ authentication and role gate
-test("anonymous is 401 on every endpoint; HR and Accountant are 403; malformed tokens are refused", async () => {
+test("anonymous is 401 on every endpoint; malformed tokens are refused; HR and Accountant reach /chat but see and do nothing outside staff rooms they joined", async () => {
   const f = await fx();
   const { w } = f;
   const calls = [
     ["GET", "/chat/conversations"], ["POST", "/chat/conversations"], ["GET", `/chat/conversations/${f.cvA}/messages`], ["POST", `/chat/conversations/${f.cvA}/messages`],
     ["POST", `/chat/conversations/${f.cvA}/read`], ["GET", "/chat/unread-count"], ["POST", `/chat/conversations/${f.cvA}/close`], ["POST", `/chat/conversations/${f.cvA}/reopen`],
-    ["POST", "/chat/messages/1/hide"], ["POST", "/chat/messages/1/unhide"],
+    ["POST", "/chat/messages/1/hide"], ["POST", "/chat/messages/1/unhide"], ["GET", `/chat/conversations/${f.cvA}/participants`], ["POST", `/chat/conversations/${f.cvA}/participants`],
+    ["DELETE", `/chat/conversations/${f.cvA}/participants/1`], ["GET", "/chat/staff"],
   ];
   for (const [m, u] of calls) {
     assert.equal((await w.http(m, u, null, m === "POST" ? {} : undefined)).status, 401, `anon ${m} ${u}`);
     assert.equal((await w.http(m, u, "not-a-token", m === "POST" ? {} : undefined)).status, 400, `bad token ${m} ${u}`);
-    for (const k of ["hr", "acct"]) {
-      const r = await w.http(m, u, w.T[k], m === "POST" ? { body: "x" } : undefined);
-      assert.equal(r.status, 403, `${k} ${m} ${u}`);
+  }
+  for (const k of ["hr", "acct"]) {
+    // no blanket 403 any more: an empty list, a zero count, and the identical 404 for every conversation they were not added to
+    const list = await w.http("GET", "/chat/conversations", w.T[k]);
+    assert.equal(list.status, 200, list.text);
+    assert.deepEqual(list.body.rows, [], `${k} sees nothing`);
+    assert.deepEqual((await w.http("GET", "/chat/unread-count", w.T[k])).body, { unread: 0, conversations: 0 });
+    for (const [m, u, b] of [
+      ["GET", `/chat/conversations/${f.cvA}/messages`], ["POST", `/chat/conversations/${f.cvA}/messages`, { body: "x" }], ["POST", `/chat/conversations/${f.cvA}/read`, { message_id: 1 }],
+      ["GET", `/chat/conversations/${f.evA}/messages`], ["GET", `/chat/conversations/${f.avA}/messages`],
+    ]) {
+      const r = await w.http(m, u, w.T[k], b);
+      assert.equal(r.status, 404, `${k} ${m} ${u}`);
+      assert.deepEqual(r.body, NOT_FOUND);
     }
+    // they cannot open candidate / employer / agency conversations or moderate
+    for (const [type, id] of [["candidate", f.candA.id], ["employer_request", f.empA.orgId], ["agency", f.agyA.orgId]]) assert.equal((await w.openAs(w.T[k], type, id)).status, 403, `${k} open ${type}`);
+    assert.equal((await w.http("POST", "/chat/conversations", w.T[k], { subject_type: "staff", title: "x", participant_user_ids: [w.id[k]] })).status, 403, `${k} create room`);
+    for (const [m, u, b] of [["POST", `/chat/conversations/${f.cvA}/close`, {}], ["POST", `/chat/conversations/${f.cvA}/reopen`, {}], ["POST", "/chat/messages/1/hide", { reason: "x" }], ["POST", "/chat/messages/1/unhide", {}],
+      ["GET", `/chat/conversations/${f.cvA}/participants`], ["POST", `/chat/conversations/${f.cvA}/participants`, { user_id: w.id[k] }], ["DELETE", `/chat/conversations/${f.cvA}/participants/${w.id[k]}`], ["GET", "/chat/staff"]]) {
+      assert.equal((await w.http(m, u, w.T[k], b)).status, 403, `${k} ${m} ${u}`);
+    }
+    assert.equal((await w.http("GET", "/chat/prefs", w.T[k])).status, 200);
   }
 });
 
@@ -418,6 +439,272 @@ test("explicit participants: staff rooms are participants-only (even for Admin);
   await w.q("DELETE FROM chat_participants WHERE conversation_id = $1 AND user_id = $2", [f.cvB, w.id.agent1]);
 });
 
+// ------------------------------------------------------------------------------------------------ participants and staff rooms
+const mkRoom = async (w, token, title, ids, expected = 201) => {
+  const r = await w.http("POST", "/chat/conversations", token, { subject_type: "staff", title, participant_user_ids: ids });
+  assert.equal(r.status, expected, r.text);
+  return r;
+};
+
+test("staff rooms: chat:moderate creates one (creator joins, 1..50 active staff, title 1..120); only explicit participants see it - HR and Accountant included", async () => {
+  const f = await fx();
+  const { w } = f;
+  const room = (await mkRoom(w, w.T.mgr, "  Visa desk ", [w.id.hr, w.id.agent1])).body;
+  assert.equal(room.subject_type, "staff");
+  assert.equal(room.subject_id, null);
+  assert.equal(room.title, "Visa desk");
+  assert.deepEqual([...room.participant_user_ids].sort((a, b) => a - b), [w.id.mgr, w.id.hr, w.id.agent1].sort((a, b) => a - b));
+  const rows = (await w.q("SELECT user_id, added_by FROM chat_participants WHERE conversation_id = $1 ORDER BY user_id", [room.id])).rows;
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((r) => r.added_by === w.id.mgr), "added_by is the creator");
+  const audit = await w.q("SELECT user_id, new_data FROM audit_logs WHERE action = 'chat.conversation.open' AND record_id = $1", [String(room.id)]);
+  assert.equal(audit.rowCount, 1);
+  assert.equal(audit.rows[0].user_id, w.id.mgr);
+  // rooms are not idempotent: the same request creates a second room
+  const again = (await mkRoom(w, w.T.mgr, "Visa desk", [w.id.hr])).body;
+  assert.notEqual(again.id, room.id);
+  // visibility: participants only. Not Admin / SuperAdmin / Accountant / the other agent / portal users.
+  for (const k of ["mgr", "hr", "agent1"]) {
+    const l = await w.http("GET", "/chat/conversations?limit=50", w.T[k]);
+    assert.ok(l.body.rows.some((r) => r.id === room.id && r.title === "Visa desk"), `${k} lists the room`);
+    assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, w.T[k])).status, 200, k);
+  }
+  for (const k of ["admin", "sa", "acct", "agent2", "rec"]) {
+    assert.ok(!(await w.http("GET", "/chat/conversations?limit=50", w.T[k])).body.rows.some((r) => r.id === room.id), `${k} does not list it`);
+    for (const [m, u, b] of [["GET", `/chat/conversations/${room.id}/messages`], ["POST", `/chat/conversations/${room.id}/messages`, { body: "x" }], ["POST", `/chat/conversations/${room.id}/read`, { message_id: 1 }]]) {
+      assert.deepEqual((await w.http(m, u, w.T[k], b)).body, NOT_FOUND, `${k} ${m} ${u}`);
+    }
+  }
+  for (const t of [f.candA.token, f.empA.token, f.agyA.token]) assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, t)).status, 404);
+  // HR writes in the room, the manager reads it, unread counts follow; HR cannot moderate or manage participants
+  const hrMsg = await w.send(w.T.hr, room.id, "HR: policy question");
+  assert.equal(hrMsg.status, 201, hrMsg.text);
+  assert.equal(hrMsg.body.sender_role, "HR");
+  const mgrView = (await w.http("GET", "/chat/conversations?limit=50", w.T.mgr)).body.rows.find((r) => r.id === room.id);
+  assert.equal(mgrView.unread_count, 1);
+  assert.equal(mgrView.last_message.preview, "HR: policy question");
+  assert.equal((await w.http("POST", `/chat/conversations/${room.id}/read`, w.T.mgr, { message_id: hrMsg.body.id })).body.unread_count, 0);
+  assert.equal((await w.http("POST", `/chat/messages/${hrMsg.body.id}/hide`, w.T.hr, { reason: "x" })).status, 403);
+  assert.equal((await w.http("POST", `/chat/conversations/${room.id}/close`, w.T.hr, {})).status, 403);
+  assert.equal((await w.http("POST", `/chat/messages/${hrMsg.body.id}/hide`, w.T.mgr, { reason: "moderated" })).status, 200);
+  assert.equal((await w.http("POST", `/chat/messages/${hrMsg.body.id}/hide`, w.T.admin, { reason: "x" })).status, 404, "a moderator outside the room cannot reach its messages");
+  assert.equal((await w.http("POST", `/chat/conversations/${room.id}/close`, w.T.admin, {})).status, 404);
+  // no e-mail is ever sent for a staff room
+  await nudges.idle();
+  assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_nudges WHERE conversation_id = $1", [room.id])).rows[0].n, 0);
+  // the creator who is an Admin only sees it as participant
+  const adminRoom = (await mkRoom(w, w.T.admin, "Admin only", [w.id.acct])).body;
+  assert.ok((await w.http("GET", "/chat/conversations?limit=50", w.T.acct)).body.rows.some((r) => r.id === adminRoom.id));
+  assert.ok(!(await w.http("GET", "/chat/conversations?limit=50", w.T.mgr)).body.rows.some((r) => r.id === adminRoom.id));
+});
+
+test("staff rooms: validation (permission, title, participant list, users must be active staff) and nothing is created on a refusal", async () => {
+  const f = await fx();
+  const { w } = f;
+  const before = (await w.one("SELECT count(*)::int AS n FROM chat_conversations WHERE subject_type = 'staff'")).n;
+  const inactive = await w.mkStaff("inactiveroom", "Agent", { active: false });
+  const bad = async (token, body, status = 400, label = JSON.stringify(body)) => assert.equal((await w.http("POST", "/chat/conversations", token, { subject_type: "staff", ...body })).status, status, label);
+  for (const k of ["agent1", "rec", "hr", "acct"]) await bad(w.T[k], { title: "x", participant_user_ids: [w.id.mgr] }, 403, `${k} may not create`);
+  for (const t of [f.candA.token, f.empA.token, f.agyA.token]) await bad(t, { title: "x", participant_user_ids: [w.id.mgr] }, 403, "portal");
+  const ok = [w.id.agent1];
+  await bad(w.T.mgr, { participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "", participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "   ", participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "\u200b\u200d", participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "x".repeat(121), participant_user_ids: ok });
+  await bad(w.T.mgr, { title: 5, participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "bad\u0000", participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "evil\u202etxt", participant_user_ids: ok });
+  await bad(w.T.mgr, { title: "t" });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: "1" });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: Array.from({ length: 51 }, (_, i) => i + 1) });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: ["1"] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [1.5] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [0] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [-3] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [2 ** 40] });
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [999999999] }, 400, "unknown user");
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [inactive] }, 400, "inactive user");
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [f.candA.userId] }, 400, "candidate user");
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [f.empA.userId] }, 400, "employer user");
+  await bad(w.T.mgr, { title: "t", participant_user_ids: [w.id.agent1, f.agyA.userId] }, 400, "one bad id refuses the whole room");
+  assert.equal((await w.one("SELECT count(*)::int AS n FROM chat_conversations WHERE subject_type = 'staff'")).n, before, "nothing was created");
+  // limits that are fine: 120-character title, 50 participants (duplicates collapse, the creator may list themselves)
+  const many = [];
+  for (let i = 0; i < 10; i += 1) many.push(await w.mkStaff(`roommember${i}`, "Agent"));
+  const r = await w.http("POST", "/chat/conversations", w.T.mgr, { subject_type: "staff", title: "é".repeat(120), participant_user_ids: [...many, ...many, w.id.mgr] });
+  assert.equal(r.status, 201, r.text);
+  assert.equal(r.body.participant_user_ids.length, 11);
+  assert.equal([...r.body.title].length, 120);
+  assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_participants WHERE conversation_id = $1", [r.body.id])).rows[0].n, 11);
+});
+
+test("participants API: add / remove / list by a moderator who sees the conversation - idempotent, audited, target must be an active staff user", async () => {
+  const f = await fx();
+  const { w } = f;
+  const post = (token, cid, body) => w.http("POST", `/chat/conversations/${cid}/participants`, token, body);
+  const del = (token, cid, uid) => w.http("DELETE", `/chat/conversations/${cid}/participants/${uid}`, token);
+  const actions = async (cid) => (await w.q("SELECT action, user_id, record_id FROM audit_logs WHERE action LIKE 'chat.participant.%' AND record_id LIKE $1 ORDER BY id", [`${cid}:%`])).rows;
+  // organisation thread: an Agent gains access once added, loses it when removed
+  assert.equal((await w.http("GET", `/chat/conversations/${f.evA}/messages`, w.T.agent2)).status, 404);
+  const added = await post(w.T.mgr, f.evA, { user_id: w.id.agent2 });
+  assert.equal(added.status, 201, added.text);
+  assert.deepEqual([added.body.conversation_id, added.body.user_id, added.body.role, added.body.changed], [f.evA, w.id.agent2, "Agent", true]);
+  assert.equal((await w.one("SELECT added_by FROM chat_participants WHERE conversation_id = $1 AND user_id = $2", [f.evA, w.id.agent2])).added_by, w.id.mgr);
+  const readable = await w.http("GET", `/chat/conversations/${f.evA}/messages`, w.T.agent2);
+  assert.equal(readable.status, 200);
+  assert.ok(readable.body.rows.some((m) => m.body === "FROM-EMP-A"), "the Agent reads the employer thread end to end");
+  assert.equal((await w.send(w.T.agent2, f.evA, "agent in the employer thread")).status, 201);
+  assert.ok((await w.http("GET", "/chat/conversations?limit=50", w.T.agent2)).body.rows.some((r) => r.id === f.evA));
+  // idempotent: the second add changes nothing and is not audited again
+  const twice = await post(w.T.admin, f.evA, { user_id: w.id.agent2 });
+  assert.equal(twice.status, 200);
+  assert.equal(twice.body.changed, false);
+  assert.equal((await w.one("SELECT added_by FROM chat_participants WHERE conversation_id = $1 AND user_id = $2", [f.evA, w.id.agent2])).added_by, w.id.mgr, "the first adder stays");
+  assert.deepEqual((await actions(f.evA)).map((r) => r.action), ["chat.participant.add"]);
+  // a lazily created read-marker row (added_by NULL) is promoted by an add
+  assert.equal((await w.http("POST", `/chat/conversations/${f.avA}/read`, w.T.rec, { message_id: 1 })).status, 404);
+  // list
+  const listed = await w.http("GET", `/chat/conversations/${f.evA}/participants`, w.T.mgr);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body.rows.map((r) => [r.user_id, r.role]), [[w.id.agent2, "Agent"]], "explicit participants only; the lazy read markers do not count");
+  // remove: idempotent, audited once, access gone at once, the read marker survives
+  const gone = await del(w.T.admin, f.evA, w.id.agent2);
+  assert.equal(gone.status, 200, gone.text);
+  assert.deepEqual([gone.body.changed, gone.body.user_id], [true, w.id.agent2]);
+  assert.equal((await w.http("GET", `/chat/conversations/${f.evA}/messages`, w.T.agent2)).status, 404);
+  assert.equal((await w.http("GET", `/chat/conversations/${f.evA}/participants`, w.T.mgr)).body.rows.length, 0);
+  const again = await del(w.T.mgr, f.evA, w.id.agent2);
+  assert.equal(again.status, 200);
+  assert.equal(again.body.changed, false);
+  assert.equal((await del(w.T.mgr, f.evA, w.id.hr)).body.changed, false, "removing somebody who never was a participant is a no-op");
+  assert.deepEqual((await actions(f.evA)).map((r) => r.action), ["chat.participant.add", "chat.participant.remove"]);
+  assert.ok((await actions(f.evA)).every((r) => r.record_id === `${f.evA}:${w.id.agent2}`));
+  // re-adding after removal works (the row exists with added_by NULL)
+  assert.equal((await post(w.T.mgr, f.evA, { user_id: w.id.agent2 })).status, 201);
+  assert.equal((await del(w.T.mgr, f.evA, w.id.agent2)).body.changed, true);
+  // Receptionist on an agency thread
+  assert.equal((await post(w.T.mgr, f.avA, { user_id: w.id.rec })).status, 201);
+  assert.equal((await w.http("GET", `/chat/conversations/${f.avA}/messages`, w.T.rec)).status, 200);
+  assert.equal((await del(w.T.mgr, f.avA, w.id.rec)).body.changed, true);
+  assert.equal((await w.http("GET", `/chat/conversations/${f.avA}/messages`, w.T.rec)).status, 404);
+  // permissions and scope
+  for (const k of ["agent1", "rec"]) {
+    assert.equal((await post(w.T[k], f.evA, { user_id: w.id.agent2 })).status, 403, k);
+    assert.equal((await del(w.T[k], f.evA, w.id.agent2)).status, 403, k);
+    assert.equal((await w.http("GET", `/chat/conversations/${f.evA}/participants`, w.T[k])).status, 403, k);
+  }
+  for (const t of [f.candA.token, f.empA.token, f.agyA.token]) assert.equal((await post(t, f.evA, { user_id: w.id.agent2 })).status, 403);
+  assert.deepEqual((await post(w.T.mgr, 2000000000, { user_id: w.id.agent2 })).body, NOT_FOUND);
+  assert.equal((await post(w.T.mgr, "abc", { user_id: w.id.agent2 })).status, 400);
+  assert.deepEqual((await del(w.T.mgr, 2000000000, w.id.agent2)).body, NOT_FOUND);
+  // a moderator who cannot see a staff room cannot touch its participants (the identical 404)
+  const room = (await mkRoom(w, w.T.mgr, "Closed circle", [w.id.agent1])).body;
+  assert.deepEqual((await post(w.T.admin, room.id, { user_id: w.id.admin })).body, NOT_FOUND);
+  assert.deepEqual((await del(w.T.admin, room.id, w.id.agent1)).body, NOT_FOUND);
+  assert.deepEqual((await w.http("GET", `/chat/conversations/${room.id}/participants`, w.T.admin)).body, NOT_FOUND);
+  // validation of the target
+  const inactive = await w.mkStaff("inactiveparticipant", "Agent", { active: false });
+  for (const [body, label] of [[{}, "missing"], [{ user_id: "abc" }, "string"], [{ user_id: -1 }, "negative"], [{ user_id: 1.5 }, "fraction"], [{ user_id: [w.id.hr] }, "array"], [{ user_id: 2 ** 40 }, "huge"]]) {
+    assert.equal((await post(w.T.mgr, room.id, body)).status, 400, label);
+  }
+  for (const [uid, label] of [[inactive, "inactive staff"], [f.candA.userId, "candidate"], [f.empA.userId, "employer user"], [f.agyA.userId, "agency user"], [999999999, "unknown user"]]) {
+    const r = await post(w.T.mgr, room.id, { user_id: uid });
+    assert.equal(r.status, 400, `${label}: ${r.text}`);
+  }
+  assert.equal((await w.q("SELECT count(*)::int AS n FROM chat_participants WHERE conversation_id = $1", [room.id])).rows[0].n, 2);
+  // staff-room membership: add HR and Accountant, remove them again
+  assert.equal((await post(w.T.mgr, room.id, { user_id: w.id.acct })).status, 201);
+  assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, w.T.acct)).status, 200);
+  assert.equal((await del(w.T.mgr, room.id, w.id.acct)).body.changed, true);
+  assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, w.T.acct)).status, 404);
+  // HR / Accountant can only join staff rooms; candidate threads follow the assignment
+  for (const k of ["hr", "acct"]) assert.equal((await post(w.T.mgr, f.evA, { user_id: w.id[k] })).status, 400, `${k} cannot join an employer thread`);
+  assert.equal((await post(w.T.mgr, f.avA, { user_id: w.id.hr })).status, 400);
+  assert.equal((await post(w.T.mgr, f.cvA, { user_id: w.id.agent2 })).status, 400, "no participants on a candidate thread");
+  assert.equal((await w.http("GET", `/chat/conversations/${f.cvA}/messages`, w.T.agent2)).status, 404);
+  // a deactivated participant can still be removed
+  assert.equal((await post(w.T.mgr, room.id, { user_id: w.id.rec })).status, 201);
+  await w.q("UPDATE users SET is_active = false WHERE id = $1", [w.id.rec]);
+  assert.equal((await del(w.T.mgr, room.id, w.id.rec)).body.changed, true);
+  await w.q("UPDATE users SET is_active = true WHERE id = $1", [w.id.rec]);
+  // a participant removed from the room loses it for good, and a deactivated one is refused by the account check
+  assert.equal((await del(w.T.mgr, room.id, w.id.agent1)).body.changed, true);
+  assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, w.T.agent1)).status, 404);
+});
+
+test("staff directory: moderators list active staff (id, name, role - no e-mail), filtered and capped; others are refused", async () => {
+  const f = await fx();
+  const { w } = f;
+  const inactive = await w.mkStaff("hiddenstaff", "Agent", { active: false, name: "Zed Inactive Directory" });
+  await w.mkStaff("visiblestaff", "Receptionist", { name: "Zed Visible Directory" });
+  const all = await w.http("GET", "/chat/staff?limit=50", w.T.mgr);
+  assert.equal(all.status, 200, all.text);
+  assert.ok(all.body.rows.every((r) => Object.keys(r).sort().join() === "full_name,id,role"), "no e-mail or other fields");
+  assert.ok(all.body.rows.some((r) => r.id === w.id.hr && r.role === "HR"));
+  assert.ok(!all.body.rows.some((r) => r.id === inactive || r.id === f.candA.userId || r.id === f.empA.userId));
+  const q = await w.http("GET", "/chat/staff?q=zed%20visible", w.T.admin);
+  assert.deepEqual(q.body.rows.map((r) => r.full_name), ["Zed Visible Directory"]);
+  assert.deepEqual((await w.http("GET", "/chat/staff?q=%25", w.T.mgr)).body.rows, [], "LIKE wildcards are literal");
+  assert.equal((await w.http("GET", "/chat/staff?limit=1", w.T.mgr)).body.rows.length, 1);
+  assert.equal((await w.http("GET", "/chat/staff?limit=abc", w.T.mgr)).status, 400);
+  assert.equal((await w.http("GET", "/chat/staff?q=a&q=b", w.T.mgr)).status, 400);
+  for (const t of [w.T.agent1, w.T.hr, f.candA.token, f.empA.token]) assert.equal((await w.http("GET", "/chat/staff", t)).status, 403);
+});
+
+test("scope consistency: the SQL used for fan-out (subscriberAccess) agrees with conversationVisibleSql for every user and every conversation", async () => {
+  const f = await fx();
+  const { w } = f;
+  const room = (await mkRoom(w, w.T.mgr, "Consistency", [w.id.hr, w.id.agent1])).body;
+  await w.q("INSERT INTO chat_participants (conversation_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [f.avB, w.id.agent1, w.id.admin]);
+  await w.q("INSERT INTO chat_participants (conversation_id, user_id, added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [f.evA, w.id.rec, w.id.admin]);
+  await w.q("INSERT INTO chat_participants (conversation_id, user_id, added_by) VALUES ($1,$2,NULL) ON CONFLICT DO NOTHING", [f.evB, w.id.agent2]); // lazy marker: no access
+  const users = [];
+  for (const k of ["sa", "admin", "mgr", "rec", "agent1", "agent2", "hr", "acct"]) users.push({ id: w.id[k], role: (await w.one("SELECT role FROM users WHERE id = $1", [w.id[k]])).role });
+  for (const o of [f.candA, f.candB]) users.push({ id: o.userId, role: "Candidate" });
+  for (const o of [f.empA, f.empB, f.empA2]) users.push({ id: o.userId, role: "Employer" });
+  for (const o of [f.agyA, f.agyB]) users.push({ id: o.userId, role: "Agency" });
+  const convs = [f.cvA, f.cvB, f.evA, f.evB, f.avA, f.avB, room.id];
+  let visibleCount = 0;
+  for (const cid of convs) {
+    const map = await scope.subscriberAccess(w.pool, cid, users);
+    for (const u of users) {
+      const actor = await scope.resolveActor(w.pool, u);
+      const sc = scope.conversationVisibleSql(actor, "c", 1);
+      const expected = (await w.q(`SELECT 1 FROM chat_conversations c WHERE c.id = $1 AND ${sc.clause}`, [cid, ...sc.params])).rowCount > 0;
+      const got = map.get(scope.subscriberKey(u));
+      assert.ok(got && got.live, `${u.role} ${u.id} is live`);
+      assert.equal(got.visible, expected, `${u.role} ${u.id} on conversation ${cid}`);
+      if (expected) visibleCount += 1;
+    }
+  }
+  assert.ok(visibleCount > 20, "the comparison covered real grants");
+  // liveness: a deactivated user, a changed role, a stale token version, a suspended organisation and a deleted candidate are not live
+  const probe = async (user, mutate, undo) => {
+    await mutate();
+    try {
+      return (await scope.subscriberAccess(w.pool, f.cvA, [user])).get(scope.subscriberKey(user));
+    } finally {
+      await undo();
+    }
+  };
+  const mgr = { id: w.id.mgr, role: "Manager" };
+  assert.deepEqual(await probe(mgr, () => w.q("UPDATE users SET is_active = false WHERE id = $1", [mgr.id]), () => w.q("UPDATE users SET is_active = true WHERE id = $1", [mgr.id])), undefined);
+  assert.equal(await probe({ id: w.id.mgr, role: "Admin" }, async () => {}, async () => {}), undefined, "role changed since the stream opened");
+  const tv = (await w.one("SELECT token_version FROM users WHERE id = $1", [w.id.mgr])).token_version;
+  assert.equal((await scope.subscriberAccess(w.pool, f.cvA, [{ ...mgr, tv }])).get(scope.subscriberKey({ ...mgr, tv })).visible, true);
+  assert.equal((await scope.subscriberAccess(w.pool, f.cvA, [{ ...mgr, tv: tv + 1 }])).get(scope.subscriberKey({ ...mgr, tv: tv + 1 })), undefined, "stale token version");
+  const emp = { id: f.empA.userId, role: "Employer" };
+  const suspended = await probe(emp, () => w.q("UPDATE crm_employers SET status = 'suspended' WHERE id = $1", [f.empA.orgId]), () => w.q("UPDATE crm_employers SET status = 'active' WHERE id = $1", [f.empA.orgId]));
+  assert.ok(!suspended || suspended.live === false, "a suspended organisation is not live");
+  const cand = { id: f.candA.userId, role: "Candidate" };
+  const deleted = await probe(cand, () => w.q("UPDATE candidates SET is_deleted = true WHERE id = $1", [f.candA.id]), () => w.q("UPDATE candidates SET is_deleted = false WHERE id = $1", [f.candA.id]));
+  assert.ok(!deleted || deleted.live === false, "a deleted candidate is not live");
+  assert.equal((await scope.subscriberAccess(w.pool, f.cvA, [])).size, 0);
+  assert.equal((await scope.subscriberAccess(w.pool, 0, [mgr])).size, 0);
+});
+
 // ------------------------------------------------------------------------------------------------ id validation
 test("ids: malformed ids are 400 for every actor, out-of-int-range ids are the identical 404", async () => {
   const f = await fx();
@@ -486,7 +773,7 @@ test("send: validation of the body (trim, 1..2000 characters, NUL, types, lone s
   await ok("x".repeat(2000));
   await ok("😀".repeat(2000)); // 2000 characters = 8000 bytes: counted in characters, not bytes
   await ok("a");
-  const bidi = "abc ‮evil.txt‬ ⁦x⁩ ​‌‍﻿ end العربية é́ \u{1F468}‍\u{1F469}‍\u{1F467}";
+  const bidi = "abc \u200b\u200c\u200d\ufeff\u200e\u200f end العربية é́ \u{1F468}\u200d\u{1F469}\u200d\u{1F467}";
   await ok(bidi, bidi.trim());
   const html = `<img src=x onerror=alert(1)> <script>alert('x')</script> & "quoted" 'single' <a href="javascript:alert(1)">l</a> {{7*7}} \${7*7} ' OR 1=1; --`;
   const m = await ok(html);
@@ -494,6 +781,31 @@ test("send: validation of the body (trim, 1..2000 characters, NUL, types, lone s
   assert.equal(listed.body.rows.find((x) => x.id === m.id).body, html, "HTML comes back as text, unchanged");
   assert.match(listed.headers.get("content-type"), /^application\/json/);
   assert.equal(listed.headers.get("cache-control"), "no-store");
+});
+
+test("send: bodies with nothing visible (format, space, control characters) and bidi override / isolate controls are refused; ZWJ / ZWNJ / LRM / RLM stay allowed", async () => {
+  const f = await fx();
+  const { w } = f;
+  const c = await w.mkCandidate("invisible", w.id.agent1);
+  const conv = (await w.openAs(w.T.agent1, "candidate", c.id)).body.id;
+  const before = (await w.one("SELECT count(*)::int AS n FROM chat_messages WHERE conversation_id = $1", [conv])).n;
+  const bad = async (body, label, pattern) => {
+    const r = await w.send(c.token, conv, body);
+    assert.equal(r.status, 400, `${label}: ${r.text}`);
+    if (pattern) assert.match(r.body.error, pattern, label);
+  };
+  for (const [t, label] of [["\u200b", "ZWSP"], ["\u200b\u200c\u200d\u2060", "ZW*"], ["\ufeff", "BOM"], ["\u200e\u200f", "LRM RLM"], [" \u00ad ", "soft hyphen"], ["\u0007\u001b", "controls"], ["\u2028 \u2029", "separators"], ["\u3000\u200b\u3000", "ideographic space + ZWSP"], ["\u2063\u2064", "invisible operators"]]) {
+    await bad(t, label, /required|visible/i);
+  }
+  for (const [cp, label] of [[0x202a, "LRE"], [0x202b, "RLE"], [0x202c, "PDF"], [0x202d, "LRO"], [0x202e, "RLO"], [0x2066, "LRI"], [0x2067, "RLI"], [0x2068, "FSI"], [0x2069, "PDI"]]) {
+    await bad(`see ${String.fromCodePoint(cp)}evil.txt`, `U+${cp.toString(16)} ${label}`, /bidirectional|direction/i);
+  }
+  assert.equal((await w.one("SELECT count(*)::int AS n FROM chat_messages WHERE conversation_id = $1", [conv])).n, before, "nothing stored");
+  for (const t of ["a\u200db", "ab\u200cc", "\u200fمرحبا\u200e", "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}", "x\u200b", "\u200bx"]) {
+    const r = await w.send(c.token, conv, t);
+    assert.equal(r.status, 201, `${JSON.stringify(t)}: ${r.text}`);
+    assert.equal((await w.one("SELECT body FROM chat_messages WHERE id = $1", [r.body.id])).body, t.trim());
+  }
 });
 
 test("send: closed conversations refuse sends (409) but stay readable; reopening restores sending; only moderators close/reopen", async () => {

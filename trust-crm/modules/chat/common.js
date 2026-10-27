@@ -30,15 +30,23 @@ function paging(query, { def, max = 50 } = {}) {
   return { limit: num(query.limit, "limit", def, max, 1), offset: num(query.offset, "offset", 0, 1e6, 0) };
 }
 
-/** Message text: a string, trimmed, 1..2000 characters (code points, as Postgres counts them), no NUL, no lone surrogates. */
+/**
+ * Message text: a string, trimmed, 1..2000 characters (code points, as Postgres counts them), no NUL, no lone surrogates, something
+ * visible (not only format \p{Cf}, control \p{Cc} or space characters) and no bidi OVERRIDE / EMBEDDING / ISOLATE controls
+ * (U+202A-202E, U+2066-2069), which can disguise text. ZWJ / ZWNJ / LRM / RLM stay allowed inside visible text (Arabic shaping, emoji).
+ * Mirrored by composeState() in public/vita/chat-util.js.
+ */
+const INVISIBLE_ONLY = /^[\p{Cf}\p{Cc}\p{Z}\s]*$/u;
+const BIDI_FORMATTING = /[\u202A-\u202E\u2066-\u2069]/;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 function messageText(v) {
   if (typeof v !== "string") throw new HttpError(400, "body must be a string");
   const t = v.trim();
   if (t.includes("\u0000")) throw new HttpError(400, "body contains invalid characters");
   if (LONE_SURROGATE.test(t)) throw new HttpError(400, "body contains invalid characters");
+  if (BIDI_FORMATTING.test(t)) throw new HttpError(400, "body contains bidirectional override or isolate characters, which are not allowed");
   const len = [...t].length;
-  if (len < 1) throw new HttpError(400, "body is required");
+  if (len < 1 || INVISIBLE_ONLY.test(t)) throw new HttpError(400, "body is required: it must contain visible text");
   if (len > MAX_BODY) throw new HttpError(400, `body must be at most ${MAX_BODY} characters`);
   return { text: t, length: len };
 }

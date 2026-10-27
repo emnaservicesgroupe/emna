@@ -134,7 +134,7 @@ test("message bodies are rendered with textContent and dir=auto (bidi), hidden m
   assert.match(src, /chat\.closedBanner/);
   assert.match(src, /U\.sendStep\(/);
   assert.match(src, /\.disabled = /);
-  assert.match(src, /U\.markReadDecision\(/);
+  assert.match(src, /U\.markReadPlan\(/);
   assert.doesNotMatch(src, /\.value\s*=\s*[^;]*\.body/, "message text is never written back into controls except by the user's own draft");
 });
 
@@ -423,6 +423,138 @@ test("markReadDecision: only a visible, focused thread with a newer message from
   assert.equal(U.markReadDecision({ ...base, messages: [] }), null);
   assert.equal(U.markReadDecision({ ...base, messages: [{ id: 2, mine: false }, { id: 4, mine: true }] }), 4, "the marker moves to the newest LOADED message");
   assert.equal(U.markReadDecision(null), null);
+});
+
+test("markReadDecision: never marks messages the client has not loaded - pages in older ones first (capped at 5), then marks", () => {
+  const others = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => ({ id: from + i, mine: false }));
+  const ctx = (over) => ({ visible: true, focused: true, markedId: 0, hasOlder: false, ...over });
+  // everything loaded (no older page): mark the newest
+  assert.equal(U.markReadDecision(ctx({ messages: others(1, 10), hasOlder: false })), 10);
+  // 120 unread, only the newest 50 loaded: the oldest unread is NOT in the page -> do not mark, load older first
+  const page = others(71, 120);
+  assert.equal(U.markReadDecision(ctx({ messages: page, hasOlder: true, unreadCount: 120 })), null, "50 of 120 unread loaded");
+  assert.deepEqual(U.markReadPlan(ctx({ messages: page, hasOlder: true, unreadCount: 120, pagesLoaded: 0 })), { action: "load_older", id: null });
+  assert.equal(U.markReadPlan(ctx({ messages: page, hasOlder: true, unreadCount: 120, pagesLoaded: 4 })).action, "load_older");
+  assert.deepEqual(U.markReadPlan(ctx({ messages: page, hasOlder: true, unreadCount: 120, pagesLoaded: 5 })), { action: "none", id: null }, "cap reached: still nothing marked");
+  // after two more pages (150 loaded >= 120 unread) it marks the newest
+  const more = others(1, 120);
+  assert.deepEqual(U.markReadPlan(ctx({ messages: more, hasOlder: true, unreadCount: 120, pagesLoaded: 2 })), { action: "mark", id: 120 });
+  // unread count <= loaded messages from others: mark even though older pages exist (the older ones are already read)
+  assert.equal(U.markReadDecision(ctx({ messages: page, hasOlder: true, unreadCount: 3 })), 120);
+  assert.equal(U.markReadDecision(ctx({ messages: page, hasOlder: true, unreadCount: 50 })), 120, "exactly the loaded ones");
+  assert.equal(U.markReadDecision(ctx({ messages: page, hasOlder: true, unreadCount: 51 })), null);
+  // my own and removed messages do not count as loaded unread messages
+  const mixed = [...others(1, 5).map((m) => ({ ...m, mine: true })), { id: 6, mine: false, hidden: true }, { id: 7, mine: false }];
+  assert.equal(U.markReadDecision(ctx({ messages: mixed, hasOlder: true, unreadCount: 2 })), null, "only one loaded message from the other side");
+  assert.equal(U.markReadDecision(ctx({ messages: mixed, hasOlder: true, unreadCount: 1 })), 7);
+  // unknown unread count with older pages: be conservative
+  assert.equal(U.markReadDecision(ctx({ messages: page, hasOlder: true })), null);
+  assert.equal(U.markReadPlan(ctx({ messages: page, hasOlder: true })).action, "load_older");
+  // the original guards still apply
+  assert.equal(U.markReadPlan(ctx({ messages: page, hasOlder: true, unreadCount: 120, visible: false })).action, "none");
+  assert.equal(U.markReadPlan(ctx({ messages: page, hasOlder: true, unreadCount: 120, focused: false })).action, "none");
+  assert.equal(U.markReadPlan(null).action, "none");
+  assert.equal(U.MAX_AUTO_PAGES, 5);
+});
+
+test("chat-panel pages older messages in before marking read, and merges every incoming message by id", () => {
+  const src = read("chat-panel.js");
+  assert.match(src, /U\.markReadPlan\(/, "the panel uses the plan, not just the id");
+  assert.match(src, /load_older/, "the panel pages in older messages for the plan");
+  assert.match(src, /unreadCount:/, "the plan gets the server's unread count");
+  assert.match(src, /autoPages/, "auto page-in is counted per open conversation");
+  // every place that adds messages goes through mergeMessages (idempotent by id); no direct push/concat into P.messages
+  assert.doesNotMatch(src, /P\.messages\.(push|concat|unshift|splice)\(/);
+  assert.doesNotMatch(src, /P\.messages\s*=\s*P\.messages\.concat/);
+});
+
+test("mergeMessages is idempotent: a replayed message and the live copy collapse to one entry; a late lower id lands in order", () => {
+  const live = [{ id: 10, body: "a" }, { id: 12, body: "c" }];
+  const replay = [{ id: 12, body: "c" }, { id: 11, body: "b-late" }, { id: 10, body: "a" }];
+  const once = U.mergeMessages(live, replay);
+  assert.deepEqual(once.map((m) => m.id), [10, 11, 12]);
+  assert.deepEqual(U.mergeMessages(once, replay).map((m) => m.id), [10, 11, 12], "merging the same replay again changes nothing");
+  assert.deepEqual(U.mergeMessages(once, once), once);
+  assert.equal(U.mergeMessages(once, [{ id: "11", body: "b-late-2" }]).filter((m) => U.toId(m.id) === 11).length, 1, "string ids dedupe too");
+});
+
+test("composeState / server mirror: bodies that are invisible after removing format, space and control characters are empty; bidi override / isolate controls are invalid", () => {
+  for (const t of ["\u200b", "\u200b\u200c\u200d", "\ufeff", " \u2060 \u200e\u200f ", "\u0007", "\u00ad", "\u2028", "\u3000 \u200b"]) {
+    const s = U.composeState(t);
+    assert.deepEqual([s.empty, s.canSend], [true, false], JSON.stringify(t));
+  }
+  for (const c of ["\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069"]) {
+    const s = U.composeState(`abc ${c}def`);
+    assert.deepEqual([s.invalid, s.canSend], [true, false], `U+${c.codePointAt(0).toString(16)}`);
+  }
+  // ZWJ / ZWNJ / LRM / RLM inside visible text stay allowed (Arabic shaping, emoji sequences)
+  for (const t of ["a\u200db", "ab\u200cc", "abc \u200e", "\u200fمرحبا", "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}", "x\u200b"]) assert.equal(U.composeState(t).canSend, true, JSON.stringify(t));
+});
+
+test("staffRoomPayload / participantPayload: what the new-room and add-participant dialogs send", () => {
+  assert.deepEqual(U.staffRoomPayload("  Visa desk ", [3, "4", 3]), { ok: true, payload: { subject_type: "staff", title: "Visa desk", participant_user_ids: [3, 4] } });
+  assert.deepEqual(U.staffRoomPayload("", [1]), { ok: false, error: "title" });
+  assert.deepEqual(U.staffRoomPayload("   ", [1]), { ok: false, error: "title" });
+  assert.deepEqual(U.staffRoomPayload("\u200b", [1]), { ok: false, error: "title" });
+  assert.deepEqual(U.staffRoomPayload("bad\u202etitle", [1]), { ok: false, error: "title" });
+  assert.deepEqual(U.staffRoomPayload("x".repeat(121), [1]), { ok: false, error: "title" });
+  assert.equal(U.staffRoomPayload("é".repeat(120), [1]).ok, true);
+  assert.equal(U.staffRoomPayload("😀".repeat(120), [1]).ok, true, "characters, not UTF-16 units");
+  assert.deepEqual(U.staffRoomPayload("ok", []), { ok: false, error: "members" });
+  assert.deepEqual(U.staffRoomPayload("ok", null), { ok: false, error: "members" });
+  assert.deepEqual(U.staffRoomPayload("ok", ["abc"]), { ok: false, error: "members" });
+  assert.deepEqual(U.staffRoomPayload("ok", [0]), { ok: false, error: "members" });
+  assert.deepEqual(U.staffRoomPayload("ok", Array.from({ length: 51 }, (_, i) => i + 1)), { ok: false, error: "members" });
+  assert.equal(U.staffRoomPayload("ok", Array.from({ length: 50 }, (_, i) => i + 1)).ok, true);
+  assert.deepEqual(U.participantPayload("7"), { ok: true, payload: { user_id: 7 } });
+  assert.deepEqual(U.participantPayload(""), { ok: false, error: "none" });
+  assert.deepEqual(U.participantPayload("x"), { ok: false, error: "none" });
+  assert.equal(U.canAddParticipants({ subject_type: "candidate" }), false, "candidate threads follow the assignment");
+  for (const t of ["employer_request", "agency", "staff"]) assert.equal(U.canAddParticipants({ subject_type: t }), true, t);
+  assert.equal(U.canAddParticipants(null), false);
+});
+
+test("crm-util: every active staff role may use the Messages tab (HR / Accountant only for rooms they join); portal roles never", () => {
+  for (const role of ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "HR", "Accountant"]) assert.equal(CU.canChatUse(role), true, role);
+  for (const role of ["Candidate", "Employer", "Agency", "", null, undefined, "Nobody", "__proto__"]) assert.equal(CU.canChatUse(role), false, String(role));
+  assert.equal(CU.isChatParticipantOnly("HR"), true);
+  assert.equal(CU.isChatParticipantOnly("Accountant"), true);
+  for (const role of ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]) assert.equal(CU.isChatParticipantOnly(role), false, role);
+  for (const [role, perms] of Object.entries(PERMISSIONS)) if (CU.isChatParticipantOnly(role)) assert.ok(!perms.some((p) => p.startsWith("chat:")), `${role} holds no chat:*`);
+});
+
+test("staff UI wiring: 'New staff room' and 'Add participant' dialogs exist, are moderator-only, call the documented endpoints and have ar/en/fr keys", () => {
+  const staff = read("chat-staff.js");
+  const panel = read("chat-panel.js");
+  const plain = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "");
+  // panel: the two buttons are offered to moderators only
+  assert.match(panel, /o\.onNewRoom && canModerate\(\)/);
+  assert.match(panel, /o\.onAddParticipant && canModerate\(\) && U\.canAddParticipants\(c\)/);
+  assert.match(panel, /chat\.room\.button/);
+  assert.match(panel, /chat\.participants\.button/);
+  // staff script: dialogs, endpoints, payload helpers
+  assert.match(staff, /function roomDialog\(/);
+  assert.match(staff, /function participantDialog\(/);
+  assert.match(plain(staff), /V\.api\("POST", "\/chat\/conversations", \{ body: built\.payload \}\)/);
+  assert.match(plain(staff), /V\.api\("(GET|POST)", "\/chat\/conversations\/" \+ [a-z.A-Z]+ \+ "\/participants/);
+  assert.match(plain(staff), /V\.api\("GET", "\/chat\/staff\?/);
+  assert.match(staff, /U\.staffRoomPayload\(/);
+  assert.match(staff, /U\.participantPayload\(/);
+  assert.match(staff, /onNewRoom: roomDialog/);
+  assert.match(staff, /onAddParticipant: participantDialog/);
+  assert.match(staff, /CU\.canChatUse\(/, "HR / Accountant reach the tab");
+  assert.match(staff, /isChatParticipantOnly/, "and may write inside the rooms they joined");
+  // the keys the dialogs use exist in all three languages
+  const keys = ["chat.room.button", "chat.room.title", "chat.room.hint", "chat.room.name", "chat.room.search", "chat.room.pick", "chat.room.add", "chat.room.selected", "chat.room.none", "chat.room.remove", "chat.room.submit",
+    "chat.room.created", "chat.room.err.title", "chat.room.err.members", "chat.participants.button", "chat.participants.title", "chat.participants.hint", "chat.participants.current", "chat.participants.submit",
+    "chat.participants.added", "chat.participants.already", "chat.participants.remove", "chat.participants.removed", "chat.participants.err.none", "chat.participants.empty"];
+  for (const k of keys) for (const l of LANGS) assert.ok(typeof I18N.dictionaries[l][k] === "string" && I18N.dictionaries[l][k].trim(), `${l}:${k}`);
+  for (const k of ["chat.room.title", "chat.participants.hint", "chat.room.submit"]) {
+    assert.notEqual(I18N.dictionaries.fr[k], I18N.dictionaries.en[k], `fr ${k} translated`);
+    assert.match(I18N.dictionaries.ar[k], /[\u0600-\u06ff]/, `ar ${k}`);
+  }
+  // the panel hands staff-room kinds a label
+  assert.ok("chat.kind.staff" in I18N.dictionaries.en);
 });
 
 test("subjectOpenPayload / reasonCheck: what the open dialog and the hide dialog send", () => {

@@ -7,7 +7,8 @@
 //   Admin/SuperAdmin/Manager   -> every non-staff-room conversation; staff rooms only as an explicit participant
 //   Receptionist/Agent  -> candidate conversations of candidates assigned to them (candidates.assigned_to, not deleted), plus
 //                          organisation / staff-room conversations they were EXPLICITLY added to
-//   HR/Accountant       -> nothing (refused at the router)
+//   HR/Accountant       -> ONLY staff rooms they were explicitly added to (they hold no chat:* permission; they may read and write in those rooms,
+//                          never moderate, never open or see candidate / organisation conversations)
 // "Explicit participant" = a chat_participants row with added_by set. Rows created lazily when somebody reads or writes (added_by NULL)
 // only hold the read marker and never grant access, so reassigning a candidate or demoting a user takes effect at once.
 // subject_id of an 'employer_request' / 'agency' conversation is the organisation id (crm_employers.id / crm_agencies.id).
@@ -16,8 +17,12 @@ const { hasPerm } = require("../crm/leadsAdmin");
 
 const STAFF_CHAT_ROLES = new Set(["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]);
 const WIDE_ROLES = new Set(["SuperAdmin", "Admin", "Manager"]);
+// Staff roles without chat:* permissions: they reach /chat but see only the staff rooms they are an explicit participant of.
+const PARTICIPANT_ONLY_ROLES = new Set(["HR", "Accountant"]);
+// Every role that may be added to a staff room (active staff users; portal roles never).
+const ROOM_MEMBER_ROLES = new Set([...STAFF_CHAT_ROLES, ...PARTICIPANT_ONLY_ROLES]);
 const EXTERNAL_ROLES = new Set(["Candidate", "Employer", "Agency"]);
-const ALL_CHAT_ROLES = new Set([...STAFF_CHAT_ROLES, ...EXTERNAL_ROLES]);
+const ALL_CHAT_ROLES = new Set([...STAFF_CHAT_ROLES, ...PARTICIPANT_ONLY_ROLES, ...EXTERNAL_ROLES]);
 const ALIAS_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ORG = { Employer: { type: "employer", table: "crm_employers", kind: "employer" }, Agency: { type: "agency", table: "crm_agencies", kind: "agency" } };
 const SUBJECT_TABLE = { employer_request: "crm_employers", agency: "crm_agencies" };
@@ -41,6 +46,10 @@ async function resolveActor(runner, user, { lock = false } = {}) {
     const perms = { read: hasPerm(row, "chat:read"), write: hasPerm(row, "chat:write"), moderate: hasPerm(row, "chat:moderate") };
     if (!perms.read) throw new HttpError(403, "Access denied");
     return Object.freeze({ kind: "staff", ...base, perms: Object.freeze(perms) });
+  }
+  if (PARTICIPANT_ONLY_ROLES.has(row.role)) {
+    // No chat:* permission: access exists only through explicit participation (conversationVisibleSql). Inside a room they may read and write.
+    return Object.freeze({ kind: "staff", ...base, participantOnly: true, perms: Object.freeze({ read: true, write: true, moderate: false }) });
   }
   const external = Object.freeze({ read: true, write: true, moderate: false });
   if (row.role === "Candidate") {
@@ -86,6 +95,7 @@ function conversationVisibleSql(actor, alias = "c", paramOffset = 0) {
     case "staff": {
       if (!isPosInt(actor.userId) || !actor.perms || actor.perms.read !== true) return deny;
       const explicit = `EXISTS (SELECT 1 FROM chat_participants xp WHERE xp.conversation_id = ${a}.id AND xp.user_id = ${p} AND xp.added_by IS NOT NULL)`;
+      if (PARTICIPANT_ONLY_ROLES.has(actor.role)) return { clause: `(${a}.subject_type = 'staff' AND ${explicit})`, params: [actor.userId] };
       if (WIDE_ROLES.has(actor.role)) return { clause: `(${a}.subject_type <> 'staff' OR ${explicit})`, params: [actor.userId] };
       if (actor.role === "Agent" || actor.role === "Receptionist") {
         return {
@@ -116,4 +126,57 @@ async function canServeSubject(runner, actor, type, subjectId) {
   return (await runner.query(`SELECT 1 FROM ${table} WHERE id = $1`, [subjectId])).rowCount > 0;
 }
 
-module.exports = { resolveActor, conversationVisibleSql, canServeSubject, isExternal, STAFF_CHAT_ROLES, WIDE_ROLES, EXTERNAL_ROLES, ALL_CHAT_ROLES };
+/**
+ * Fan-out helper (hub.js): ONE query decides, for a whole list of subscribed streams, which of them may receive an event of ONE conversation.
+ * `subscribers` = [{id, role, tv}] (tv = token_version the stream was opened with, or undefined). Returns Map key -> {live, visible} with
+ * key = subscriberKey(sub); a stream missing from the map is not live.
+ *   live     the account is still what the stream was opened for: active, same role, same token_version, and a Candidate / Employer /
+ *            Agency still has a live candidate record / non-suspended organisation (the checks of resolveActor)
+ *   visible  live AND the conversation is in the user's scope - the SAME rules as conversationVisibleSql, evaluated from the user's row
+ *            instead of an actor object (tests/chat-api.test.js compares the two for every user and conversation)
+ * The cost is one query whatever the number of streams.
+ */
+const subscriberKey = (sub) => `${sub.id}:${sub.tv === undefined || sub.tv === null ? "" : sub.tv}`;
+const roleList = (set) => [...set].map((r) => `'${r}'`).join(",");
+async function subscriberAccess(runner, conversationId, subscribers) {
+  const out = new Map();
+  if (!isPosInt(conversationId) || !Array.isArray(subscribers) || subscribers.length === 0) return out;
+  const seen = new Map();
+  for (const sub of subscribers) if (isPosInt(sub.id) && typeof sub.role === "string") seen.set(subscriberKey(sub), sub);
+  const subs = [...seen.values()];
+  if (subs.length === 0) return out;
+  const explicit = "EXISTS (SELECT 1 FROM chat_participants xp WHERE xp.conversation_id = c.id AND xp.user_id = a.id AND xp.added_by IS NOT NULL)";
+  const r = await runner.query(
+    `/* chat:subscriber-access */
+     WITH cand AS (
+       SELECT t.user_id, t.role, t.tv FROM unnest($2::int[], $3::text[], $4::int[]) AS t(user_id, role, tv)
+     ), a AS (
+       SELECT u.id, u.role, cand.tv,
+              CASE u.role
+                WHEN 'Candidate' THEN (SELECT x.candidate_id FROM js_candidate_accounts x JOIN candidates ca ON ca.id = x.candidate_id WHERE x.user_id = u.id AND ca.is_deleted = false LIMIT 1)
+                WHEN 'Employer' THEN (SELECT oa.org_id FROM crm_org_accounts oa JOIN crm_employers o ON o.id = oa.org_id WHERE oa.user_id = u.id AND oa.org_type = 'employer' AND o.status <> 'suspended' LIMIT 1)
+                WHEN 'Agency' THEN (SELECT oa.org_id FROM crm_org_accounts oa JOIN crm_agencies o ON o.id = oa.org_id WHERE oa.user_id = u.id AND oa.org_type = 'agency' AND o.status <> 'suspended' LIMIT 1)
+              END AS ref
+         FROM cand JOIN users u ON u.id = cand.user_id
+        WHERE u.is_active = true AND u.role = cand.role AND (cand.tv IS NULL OR u.token_version = cand.tv)
+     )
+     SELECT a.id, a.tv,
+            (a.role NOT IN ('Candidate','Employer','Agency') OR a.ref IS NOT NULL) AS live,
+            (c.id IS NOT NULL AND CASE
+               WHEN a.role = 'Candidate' THEN c.subject_type = 'candidate' AND c.subject_id = a.ref
+               WHEN a.role = 'Employer' THEN c.subject_type = 'employer_request' AND c.subject_id = a.ref
+               WHEN a.role = 'Agency' THEN c.subject_type = 'agency' AND c.subject_id = a.ref
+               WHEN a.role IN (${roleList(WIDE_ROLES)}) THEN (c.subject_type <> 'staff' OR ${explicit})
+               WHEN a.role IN ('Agent','Receptionist') THEN
+                    ((c.subject_type = 'candidate' AND EXISTS (SELECT 1 FROM candidates sc WHERE sc.id = c.subject_id AND sc.is_deleted = false AND sc.assigned_to = a.id))
+                     OR (c.subject_type <> 'candidate' AND ${explicit}))
+               WHEN a.role IN (${roleList(PARTICIPANT_ONLY_ROLES)}) THEN (c.subject_type = 'staff' AND ${explicit})
+               ELSE false END) AS visible
+       FROM a LEFT JOIN chat_conversations c ON c.id = $1`,
+    [conversationId, subs.map((x) => x.id), subs.map((x) => x.role), subs.map((x) => (Number.isSafeInteger(x.tv) ? x.tv : null))]
+  );
+  for (const row of r.rows) out.set(subscriberKey({ id: row.id, tv: row.tv }), { live: row.live === true, visible: row.visible === true });
+  return out;
+}
+
+module.exports = { resolveActor, conversationVisibleSql, canServeSubject, subscriberAccess, subscriberKey, isExternal, STAFF_CHAT_ROLES, PARTICIPANT_ONLY_ROLES, ROOM_MEMBER_ROLES, WIDE_ROLES, EXTERNAL_ROLES, ALL_CHAT_ROLES };

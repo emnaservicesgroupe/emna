@@ -11,13 +11,14 @@
 //   D  agency: the same
 //   E  Manager moderation: hide -> stub without text for the candidate, SSE kind hidden, unread unaffected; unhide; roles that may not
 //   F  close -> send 409 -> reopen -> send OK
-//   G  HR / Accountant 403 on /chat; Candidate / Employer / Agency tokens denied on the other route classes (spot check)
+//   G  HR / Accountant reach /chat but see only their staff rooms; Candidate / Employer / Agency tokens denied on the other route classes (spot check)
 //   H  rate limit 429 (+ Retry-After), recovery after the window is not needed for other users
 //   I  opt-out of nudges honoured; cooldown expiry sends again
 //   J  honest channels: WhatsApp requires_setup, the outbox never says 'sent', e-mail is the sandbox
 //   K  HTML / script / bidi / zero-width text stored verbatim, returned as JSON strings
 //   L  20 parallel sends: unique ordered ids, correct counts, no e-mail storm
 //   M  a deactivated user's token (and open stream) dies at once
+//   P  staff rooms and explicit participants (HR in a room, an Agent in an employer thread) over REST, SSE and the audit trail
 //   N  no message text in any SSE frame or e-mail body (sentinels), frames carry ids and kinds only
 //   O  the all-routes authorization sweep file passes as a child process
 //
@@ -485,13 +486,27 @@ test("F: close -> send 409 for everyone -> reopen -> send OK; only moderators ma
 });
 
 // ================================================================ G  role matrix
-test("G: HR / Accountant are 403 on /chat; portal tokens are denied on the other route classes", async () => {
+test("G: HR / Accountant reach /chat but only their staff rooms (empty list, identical 404 elsewhere, no open / moderate); portal tokens are denied on the other route classes", async () => {
   for (const k of ["hr", "acct"]) {
-    for (const [m, u, b] of [["GET", "/conversations"], ["GET", "/unread-count"], ["GET", `/conversations/${S.cv}/messages`], ["POST", `/conversations/${S.cv}/messages`, { body: "x" }], ["POST", "/conversations", { subject_type: "candidate", subject_id: S.cand.id }], ["GET", "/prefs"], ["GET", "/channels"], ["POST", `/conversations/${S.cv}/close`]]) {
-      assert.equal((await chat(m, u, w.tokens[k], b)).status, 403, `${k} ${m} /chat${u}`);
+    const list = await chat("GET", "/conversations", w.tokens[k]);
+    assert.equal(list.status, 200, `${k} list`);
+    assert.deepEqual(list.body.rows, [], `${k} sees no candidate / employer / agency conversation`);
+    assert.deepEqual((await chat("GET", "/unread-count", w.tokens[k])).body, { unread: 0, conversations: 0 });
+    for (const [m, u, b] of [["GET", `/conversations/${S.cv}/messages`], ["POST", `/conversations/${S.cv}/messages`, { body: "x" }], ["POST", `/conversations/${S.cv}/read`, { message_id: 1 }]]) {
+      const r = await chat(m, u, w.tokens[k], b);
+      assert.equal(r.status, 404, `${k} ${m} /chat${u}`);
+      assert.deepEqual(r.body, { error: "Not found" });
     }
-    assert.equal((await openSse(w.tokens[k])).status, 403, `${k} SSE`);
+    for (const [m, u, b] of [["POST", "/conversations", { subject_type: "candidate", subject_id: S.cand.id }], ["POST", `/conversations/${S.cv}/close`, {}]]) assert.equal((await chat(m, u, w.tokens[k], b)).status, 403, `${k} ${m} /chat${u}`);
+    assert.equal((await chat("GET", "/prefs", w.tokens[k])).status, 200);
+    assert.equal((await openSse(w.tokens[k])).status, 200, `${k} SSE opens (and sees only its rooms)`);
   }
+  // an explicit staff room is the one thing HR sees: created by a manager, written in by HR, invisible to the Accountant
+  const room = await chat("POST", "/conversations", w.tokens.mgr, { subject_type: "staff", title: "G room", participant_user_ids: [w.users.hr] });
+  assert.equal(room.status, 201, JSON.stringify(room.body));
+  assert.equal((await chat("POST", `/conversations/${room.body.id}/messages`, w.tokens.hr, { body: "HR here" })).status, 201);
+  assert.ok((await chat("GET", "/conversations", w.tokens.hr)).body.rows.some((r) => r.id === room.body.id));
+  assert.equal((await chat("GET", `/conversations/${room.body.id}/messages`, w.tokens.acct)).status, 404);
   // anonymous
   for (const [m, u] of [["GET", "/conversations"], ["GET", "/events"], ["GET", "/unread-count"]]) assert.equal((await chat(m, u, null)).status, 401, `anonymous ${u}`);
 
@@ -610,7 +625,7 @@ test("K: HTML, script, bidi and zero-width text is stored verbatim and returned 
   const nasty = [
     `<script>alert("x")</script><img src=x onerror=alert(1)>`,
     `<b>bold</b> &amp; &lt;i&gt; javascript:alert(1)`,
-    `‮evil.exe‬ ⁦isolate⁩ ​zero‍width⁠ tail`,
+    `evil.exe\u200e isolate\u200f \u200bzero\u200dwidth\u2060 tail`,
     `ok مرحبا \u{1F600} <svg/onload=alert(1)>`,
     `"quote" 'single' \\ backslash </script> ]]> <!--`,
   ];
@@ -626,8 +641,10 @@ test("K: HTML, script, bidi and zero-width text is stored verbatim and returned 
     assert.equal(typeof row.body, "string");
     assert.equal(row.body, tagged);
   }
-  // NUL is refused, not stored
+  // NUL, bidi override / isolate controls and bodies with nothing visible are refused, not stored
   const n = await w.count("SELECT count(*) AS n FROM chat_messages");
+  assert.equal((await chat("POST", `/conversations/${S.cv}/messages`, w.tokens.agent1, { body: "evil\u202eexe.txt" })).status, 400);
+  assert.equal((await chat("POST", `/conversations/${S.cv}/messages`, w.tokens.agent1, { body: "\u200b\u200d" })).status, 400);
   assert.equal((await chat("POST", `/conversations/${S.cv}/messages`, w.tokens.agent1, { body: "a\u0000b" })).status, 400);
   assert.equal((await chat("POST", `/conversations/${S.cv}/messages`, w.tokens.agent1, { body: "x".repeat(2001) })).status, 400);
   assert.equal(await w.count("SELECT count(*) AS n FROM chat_messages"), n);
@@ -695,6 +712,43 @@ test("M: a deactivated user's token and open stream die at once", async () => {
   await w.q("UPDATE users SET is_active = false WHERE id = $1", [w.users.agent2]);
   assert.equal((await chat("GET", "/conversations", w.tokens.agent2)).status, 401);
   assert.equal((await openSse(w.tokens.agent2)).status, 401);
+});
+
+// ================================================================ P  staff rooms and explicit participants
+test("P: a manager creates a staff room with HR, adds a Receptionist to an employer thread, removes both again - REST, SSE and the audit trail agree", async () => {
+  const room = await chat("POST", "/conversations", w.tokens.mgr, { subject_type: "staff", title: "P: payroll questions", participant_user_ids: [w.users.hr, w.users.agent1] });
+  assert.equal(room.status, 201, JSON.stringify(room.body));
+  const rid = room.body.id;
+  const sse = { hr: await openSse(w.tokens.hr), agent1: await openSse(w.tokens.agent1), acct: await openSse(w.tokens.acct), admin: await openSse(w.tokens.admin) };
+  const m1 = await send(w.tokens.hr, rid, text("room-hr"));
+  const m2 = await send(w.tokens.agent1, rid, text("room-agent"));
+  await settle();
+  for (const k of ["hr", "agent1"]) {
+    await sse[k].waitFor((d) => d.message_id === m1.id);
+    await sse[k].waitFor((d) => d.message_id === m2.id);
+  }
+  assert.equal(await unread(w.tokens.hr), 1, "the Agent's message is unread for HR");
+  for (const k of ["acct", "admin"]) assert.deepEqual(sse[k].frames.filter((f) => f.data.conversation_id === rid), [], `${k} gets nothing`);
+  assert.equal((await chat("GET", `/conversations/${rid}/messages`, w.tokens.admin)).status, 404, "an Admin outside the room cannot read it");
+  assert.equal(await w.count("SELECT count(*) AS n FROM js_sandbox_mail WHERE subject = $1 AND body ILIKE '%payroll%'", [NUDGE_SUBJECT]), 0);
+
+  // a Receptionist joins the employer thread explicitly, reads and writes, and loses it again
+  const cid = S.ev;
+  assert.ok(cid, "the employer thread of journey C exists");
+  {
+    assert.equal((await chat("GET", `/conversations/${cid}/messages`, w.tokens.rec)).status, 404);
+    assert.equal((await chat("POST", `/conversations/${cid}/participants`, w.tokens.mgr, { user_id: w.users.rec })).status, 201);
+    assert.equal((await chat("GET", `/conversations/${cid}/messages`, w.tokens.rec)).status, 200);
+    assert.equal((await chat("DELETE", `/conversations/${cid}/participants/${w.users.rec}`, w.tokens.mgr)).body.changed, true);
+    assert.equal((await chat("GET", `/conversations/${cid}/messages`, w.tokens.rec)).status, 404);
+  }
+  assert.equal((await chat("DELETE", `/conversations/${rid}/participants/${w.users.hr}`, w.tokens.mgr)).body.changed, true);
+  assert.equal((await chat("GET", `/conversations/${rid}/messages`, w.tokens.hr)).status, 404, "HR lost the room at once");
+  const m3 = await send(w.tokens.agent1, rid, text("room-after-removal"));
+  await settle();
+  assert.ok(!sse.hr.frames.find((f) => f.data.message_id === m3.id), "and its open stream gets nothing further");
+  const audit = (await w.q("SELECT action FROM audit_logs WHERE record_id LIKE $1 OR record_id = $2 ORDER BY id", [`${rid}:%`, String(rid)])).rows.map((r) => r.action);
+  assert.ok(audit.includes("chat.conversation.open") && audit.includes("chat.participant.remove"), audit.join());
 });
 
 // ================================================================ N  no text on the wire except REST

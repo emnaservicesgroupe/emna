@@ -200,6 +200,37 @@ test("deleting a user is never blocked: messages keep their text with sender NUL
     await assert.rejects(pool.query("UPDATE chat_messages SET sender_user_id=NULL, body='z' WHERE id=$1", [id2]), /immutable/i);
   }));
 
+test("migration 022: sender_user_id can become NULL only through the foreign-key action, never by a direct UPDATE (also not inside a transaction or a DO block)", () =>
+  withShared(async (pool) => {
+    const sql022 = fs.readFileSync(path.join(ROOT, "sql", "migrations", "022_chat_hardening.sql"), "utf8");
+    await pool.query(sql022); // idempotent
+    assert.equal((await pool.query("SELECT 1 FROM schema_migrations WHERE name='022_chat_hardening.sql'")).rowCount, 1);
+    const trg = await pool.query("SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = 'chat_messages'::regclass");
+    assert.deepEqual(trg.rows.map((r) => r.tgname), ["chat_messages_immutable_trg"], "still exactly one trigger");
+    const sender = await user(pool);
+    const c = await conv(pool);
+    const id = (await msg(pool, c, sender, "who wrote this")).rows[0].id;
+    await assert.rejects(pool.query("UPDATE chat_messages SET sender_user_id = NULL WHERE id = $1", [id]), /immutable/i);
+    await assert.rejects(pool.query("DO $$ BEGIN UPDATE chat_messages SET sender_user_id = NULL WHERE id = " + Number(id) + "; END $$"), /immutable/i);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await assert.rejects(client.query("UPDATE chat_messages SET sender_user_id = NULL WHERE id = $1", [id]), /immutable/i);
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
+    assert.equal((await pool.query("SELECT sender_user_id FROM chat_messages WHERE id=$1", [id])).rows[0].sender_user_id, sender);
+    // hiding still works, and deleting the user (FK SET NULL action) still works and keeps the message
+    await pool.query("UPDATE chat_messages SET hidden_at=now(), hidden_by=$2, hidden_reason='r' WHERE id=$1", [id, sender]);
+    await pool.query("DELETE FROM users WHERE id=$1", [sender]);
+    const row = (await pool.query("SELECT body, sender_user_id, hidden_by FROM chat_messages WHERE id=$1", [id])).rows[0];
+    assert.deepEqual(row, { body: "who wrote this", sender_user_id: null, hidden_by: null });
+    // once NULL, it cannot be pointed at somebody else either
+    const other = await user(pool);
+    await assert.rejects(pool.query("UPDATE chat_messages SET sender_user_id = $2 WHERE id = $1", [id, other]), /immutable/i);
+  }));
+
 test("participants, prefs, nudges, outbox: keys, defaults and checks", () =>
   withShared(async (pool) => {
     const a = await user(pool);

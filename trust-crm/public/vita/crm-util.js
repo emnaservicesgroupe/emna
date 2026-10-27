@@ -25,7 +25,7 @@
     Agent: ["candidates:read", "candidates:write", "leads:read", "chat:read", "chat:write"],
     // Accountant uses only the Accounting tab (finance:* and the candidate lookup); see public/vita/fin-util.js.
     Accountant: ["candidates:read", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export"],
-    // Messaging (stage 6): Accountant and HR hold no chat:* (HR joins internal staff rooms only as an explicit participant).
+    // Messaging (stage 6): Accountant and HR hold no chat:* (they use only the staff rooms they were explicitly added to; see canChatUse).
     // HR (stage 5) works in the HR tab; hr:approve for a Manager is limited to their direct reports by the server.
     HR: ["candidates:read", "hr:read", "hr:write", "hr:approve"],
   };
@@ -46,6 +46,10 @@
   function canChatRead(role) { return can(role, "chat:read"); }
   function canChatWrite(role) { return can(role, "chat:write"); }
   function canChatModerate(role) { return can(role, "chat:moderate"); }
+  // HR and Accountant hold no chat:* but reach the tab: they see (and write in) only the staff rooms they were added to. The server decides.
+  var CHAT_PARTICIPANT_ONLY = ["HR", "Accountant"];
+  function isChatParticipantOnly(role) { return Object.prototype.hasOwnProperty.call(PERMS, role) && CHAT_PARTICIPANT_ONLY.indexOf(role) >= 0; }
+  function canChatUse(role) { return canChatRead(role) || isChatParticipantOnly(role); }
   function canCreateSiteJob(role) { return can(role, "orgs:write") && can(role, "sitejobs:write"); }
 
   function str(v) { return v === null || v === undefined ? "" : String(v); }
@@ -223,7 +227,7 @@
     APPLY_MODES: APPLY_MODES, NOTE_MAX: NOTE_MAX, PUBLISH_REQUIRED: PUBLISH_REQUIRED,
     can: can, canConvert: canConvert, canAssign: canAssign, canSiteJobs: canSiteJobs,
     canOrgsRead: canOrgsRead, canOrgsWrite: canOrgsWrite, canPresent: canPresent, canRecordConsent: canRecordConsent, canCreateSiteJob: canCreateSiteJob,
-    canChatRead: canChatRead, canChatWrite: canChatWrite, canChatModerate: canChatModerate,
+    canChatRead: canChatRead, canChatWrite: canChatWrite, canChatModerate: canChatModerate, canChatUse: canChatUse, isChatParticipantOnly: isChatParticipantOnly,
     parseApplyMode: parseApplyMode, buildApplyMode: buildApplyMode, toLocalInput: toLocalInput, fromLocalInput: fromLocalInput,
     siteJobPayload: siteJobPayload, diffPayload: diffPayload, publishBlockers: publishBlockers,
     leadQuery: leadQuery, leadCanConvert: leadCanConvert, convertPayload: convertPayload,

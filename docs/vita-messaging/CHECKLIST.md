@@ -29,7 +29,7 @@ before relying on it.
 | Abuse controls: length cap, per-user rate limit across all conversations, closed conversations | completed, tested | `tests/chat-api.test.js`; `tests/chat-e2e.test.js` H (429 with `Retry-After`, the refused message is not stored, other users unaffected), F |
 | Content is untrusted data; system-generated texts promise nothing | completed, tested | The e-mail nudge is one fixed, trilingual, content-free text (`tests/chat-e2e.test.js` A, N: no message text, sender, subject name, or promise of employment / visa) |
 
-## Data (migration 021)
+## Data (migrations 021 and 022)
 
 - [x] completed, tested: additive and idempotent; unique subject per non-staff conversation; indexes for thread paging, participants, unread and rate-limit lookups; immutability trigger; deleting a user never blocks. `tests/chat-schema.test.js`.
 - [x] completed, tested: permissions `chat:read`, `chat:write`, `chat:moderate` and the role matrix; the matrix in `docs/vita-job-search/SETUP.md` is compared with the code. `tests/chat-schema.test.js`, `tests/role.test.js`.
@@ -53,7 +53,7 @@ before relying on it.
 
 ## Roles and isolation (spec section 2)
 
-- [x] completed, tested: HR and Accountant are 403 on every `/chat` route and cannot open a stream; anonymous callers 401. `tests/chat-api.test.js`, `tests/chat-realtime.test.js`, `tests/chat-e2e.test.js` G.
+- [x] completed, tested (review round 1): HR and Accountant reach `/chat` (no blanket 403) but their list, unread count and event stream cover only staff rooms they were explicitly added to; every other conversation is the identical 404; they cannot open candidate / employer / agency conversations, create rooms or moderate (403); anonymous callers 401. `tests/chat-api.test.js`, `tests/chat-realtime.test.js`, `tests/chat-e2e.test.js` G, P, `tests/orgs-route-sweep.test.js`.
 - [x] completed, tested: Candidate, Employer and Agency tokens reach `/chat/*` only; they are 403 on the other route classes (spot check in `tests/chat-e2e.test.js` G) and the all-routes sweep, which classifies every `/chat/*` route and seeds sentinels in the conversations, passes as a child process (`tests/chat-e2e.test.js` O, `tests/orgs-route-sweep.test.js`).
 - [x] completed, tested: a deactivated user's token stops working at once and the open stream is closed without receiving the next event (`tests/chat-e2e.test.js` M).
 - [x] completed, tested: no message text appears in any SSE frame or any e-mail body or any audit row of the whole end-to-end run (sentinels, `tests/chat-e2e.test.js` N).
@@ -67,10 +67,24 @@ before relying on it.
 
 - **Event ids exist only for message events.** The SSE `id:` field is set for `message` events only (it is the message id, so `Last-Event-ID` is always a message id). `hidden`, `closed`, `reopened` and `read` events have no id and are **not replayed** after a reconnect: clients refetch on reconnect.
 - **Unhide emits `hidden`.** Hiding and unhiding both emit `kind: "hidden"` with the message id; the client refetches to learn the new state.
-- **Nudge cooldown semantics.** The cooldown is per (conversation, person), measured from the last nudge actually sent. A message sent during the cooldown is not announced by e-mail later; the person sees it in the unread count. `CHAT_NUDGE_COOLDOWN_MIN=0` disables the cooldown (every staff message e-mails). A failed delivery gives the slot back.
-- **Staff rooms only for explicit participants.** The `staff` subject type exists in the model and visibility, but there is no UI or endpoint to create a staff room yet, and **HR and Accountant have no chat access yet** (they hold no `chat:*` permission; the router refuses them).
+- **Nudge cooldown semantics.** The cooldown is per (conversation, person), measured from the last nudge actually sent. A message sent during the cooldown is not announced by e-mail later; the person sees it in the unread count. `CHAT_NUDGE_COOLDOWN_MIN=0` disables the cooldown (every staff message e-mails). A failed or refused delivery keeps the slot held for `CHAT_NUDGE_FAILURE_BACKOFF_MIN` minutes (default 5; `0` releases it at once) so an outage is retried at most once per backoff.
+- **Staff rooms and explicit participants** are implemented (review round 1): create a room, add / remove participants, HR and Accountant limited to the rooms they joined (see SETUP.md section 3a). Deleting (not deactivating) the user who added a participant clears `added_by` and ends that participant's access.
 - **Candidate start toggle.** `CHAT_CANDIDATE_CAN_START` (default `true`) lets a candidate open their own conversation; set it to `false` if staff must always write first.
 - **The SSE hub is in-process.** A single app container is assumed. Several app processes would each only serve their own streams (the polling fallback still shows new messages within 30 s). A shared bus is not built.
 - **Employer / agency users receive no message from one another and staff get no e-mail**: staff see in-app unread counts only.
 - **No read receipts**: the other side never learns that a message was read (the `read` event goes only to the reader's own streams).
 - **Retention** of chat data is the owner's decision (see above); nothing is purged.
+
+## Review round 1 (independent messaging review)
+
+| # | Finding | Status | Evidence |
+|---|---|---|---|
+| 1 | Fan-out cost: every event cost several queries per subscribed stream | completed, tested | `hub.publish` resolves the recipients with ONE query (`scope.subscriberAccess`: account still live + conversation in scope, same rules as `conversationVisibleSql`) and queues delivery only for visible users; revoked accounts are closed from the same query. The per-stream account re-check is cached `CHAT_SSE_RECHECK_MS` (default 5000) and always runs on heartbeat. `tests/chat-realtime.test.js` (50 and 100 streams without access = 1 statement; cache window driven by an injected clock and `hub.clearRecheckCache()`; revocation inside the window; ordering), `tests/chat-api.test.js` (SQL consistency for every user x conversation). The existing revocation tests are unchanged and still pass because the single query reads current state on every event. |
+| 2 | Staff rooms and explicit participants were promised but missing | completed, tested; **UI wiring only tested at string level** | `POST/DELETE/GET /chat/conversations/:id/participants`, `GET /chat/staff`, `POST /chat/conversations` with `subject_type: "staff"`; HR / Accountant access rule; "New staff room" and "Add participant" dialogs (ar/en/fr). `tests/chat-api.test.js`, `tests/chat-realtime.test.js`, `tests/chat-e2e.test.js` P, `tests/chat-ui.test.js`. Not rendered in a browser. |
+| 3 | Replay could miss a lower id that committed after a higher one | completed, tested | Replay = `id > last` OR (`id <= last` and created within 2 minutes before the last message), newest 200, ascending; index `chat_messages_created_idx` (migration 022). Two real transactions commit out of order in `tests/chat-realtime.test.js`; duplicate-safe merge in `tests/chat-ui.test.js`. |
+| 4 | Client could mark read messages it never loaded | completed, tested | `markReadPlan` / `markReadDecision` in `chat-util.js` + auto page-in (max 5 pages) in `chat-panel.js`. `tests/chat-ui.test.js`. |
+| 5 | Invisible / disguised message bodies | completed, tested | Bodies with nothing but format, space or control characters are refused; bidi override / embedding / isolate controls (U+202A-202E, U+2066-2069) are refused (400, clear message) on the server (`common.js`) and in the composer counter. ZWJ / ZWNJ / LRM / RLM stay allowed. `tests/chat-api.test.js`, `tests/chat-ui.test.js`, `tests/chat-e2e.test.js` K. |
+| 6 | A failed nudge released its slot immediately | completed, tested | Slot held for `CHAT_NUDGE_FAILURE_BACKOFF_MIN` (default 5). `tests/chat-realtime.test.js` (injected clock). |
+| 7 | Immutability trigger allowed any UPDATE of `sender_user_id` to NULL | completed, tested | Migration `022_chat_hardening.sql`: NULL only when `pg_trigger_depth() > 1` (the foreign-key action). User deletion still works. `tests/chat-schema.test.js`, migration lists in `tests/fin-schema.test.js`. |
+
+Remaining limits after this round: the hub is in-process (one app container); ids are not globally commit-ordered (replay overlap of 2 minutes mitigates it; a client offline for more than 200 messages must refetch); the browser behaviour of the new dialogs and of the read-marker paging has not been exercised in a real browser.

@@ -69,7 +69,7 @@ const ROUTE_RULES = [
   // Agency are refused on all of them, /hr/me included. Staff access is by permission / report line and is covered by tests/hr-*.test.js.
   { re: /^\w+ \/hr\//, allow: NONE, why: "hr (active staff accounts only)" },
   // chat (stage 6, routes/chat.js): Candidate, Employer and Agency are legitimate users of /chat/* ONLY (own conversation, identical 404 for any
-  // other id, no start for employers / agencies, no moderation). HR / Accountant are refused by the router; staff access is covered by tests/chat-api.test.js.
+  // other id, no start for employers / agencies, no moderation). HR / Accountant reach the router but see only staff rooms they were added to (empty list, identical 404); staff access is covered by tests/chat-api.test.js.
   { re: /^\w+ \/chat\//, allow: ["employer", "agency", "candidate"], why: "chat (own conversations only; anonymous is 401)" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
@@ -430,7 +430,18 @@ test("sweep controls: the refused routes are alive for the roles that own them (
     assert.equal(r.json.rows.length, 6);
     await ok(w.tokens[k], "/chat/unread-count", `${k} chat unread`);
   }
-  for (const k of ["hrx", "acctx"]) for (const url of ["/chat/conversations", "/chat/unread-count", `/chat/conversations/${chat.victim}/messages`]) assert.equal((await probe(w.base, "GET", url, w.tokens[k])).status, 403, `${k} GET ${url}`);
+  // HR / Accountant: no blanket 403 any more - an empty list / zero count, and the identical 404 for every conversation they were not added to.
+  for (const k of ["hrx", "acctx"]) {
+    const list = await ok(w.tokens[k], "/chat/conversations", `${k} chat list`);
+    assert.deepEqual(list.json.rows, [], `${k} sees no conversation`);
+    assert.deepEqual((await ok(w.tokens[k], "/chat/unread-count", `${k} chat unread`)).json, { unread: 0, conversations: 0 });
+    for (const id of Object.values(chat)) {
+      const r = await probe(w.base, "GET", `/chat/conversations/${id}/messages`, w.tokens[k]);
+      assert.equal(r.status, 404, `${k} GET thread ${id}`);
+    }
+    const open = await probe(w.base, "POST", "/chat/conversations", w.tokens[k], { body: JSON.stringify({ subject_type: "candidate", subject_id: victim.id }) });
+    assert.equal(open.status, 403, `${k} open`);
+  }
   const missing = await probe(w.base, "GET", "/chat/conversations/2000000000/messages", attacker.token);
   assert.equal(missing.status, 404);
   const parties = [["candidate", attacker.token, chat.attacker], ["employer", emp.token, chat.employer], ["agency", agy.token, chat.agency]];
@@ -472,8 +483,7 @@ test("sweep controls: the refused routes are alive for the roles that own them (
     assert.equal((await probe(w.base, m, u, null)).status, 401, `anon ${m} ${u}`);
     for (const k of ["hrx", "acctx"]) {
       const r = await probe(w.base, m, u, w.tokens[k], m === "PUT" ? { body: JSON.stringify({ email_nudges: true }) } : {});
-      assert.equal(r.status, 403, `${k} ${m} ${u}`);
-      assert.equal(r.stream, false, "a refused request never opens a stream");
+      assert.equal(r.status, 200, `${k} ${m} ${u}`); // staff accounts: prefs, channel status and their own (room-only) event stream
     }
   }
 });

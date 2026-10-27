@@ -355,8 +355,9 @@ code to the manager's direct reports (never their own requests); HR, Admin and S
 
 Who may use VITA messaging at all. Candidate, Employer and Agency users hold no permission: they are authorised by
 ownership (their own conversation / their organisation's thread) and reach only `/chat/*`. HR and Accountant hold
-none either; HR can still take part in an internal `staff` room when explicitly added as a participant (service
-rule, not a permission). Staff see candidate / organisation conversations only for people they may serve
+none either; they still reach `/chat` and can read and write in the internal `staff` rooms they were explicitly added
+to as a participant (service rule, not a permission) - nothing else: no candidate / employer / agency conversation,
+no moderation. Staff see candidate / organisation conversations only for people they may serve
 (assigned staff, Admin, Manager).
 
 <!-- chat-permission-matrix:start -->

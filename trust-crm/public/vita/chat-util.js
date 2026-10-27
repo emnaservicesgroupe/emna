@@ -12,6 +12,11 @@
   var SUBJECT_TYPES = ["candidate", "employer_request", "agency"];
   var ERROR_KINDS = ["empty", "too_long", "invalid", "network", "auth", "denied", "gone", "closed", "rate", "server", "other"];
   var EVENT_KINDS = ["message", "hidden", "closed", "reopened", "read"];
+  var MAX_AUTO_PAGES = 5; // older pages loaded automatically so the read marker never covers messages the client has not shown
+  // Mirrors modules/chat/common.js: a body with nothing visible (only format, space or control characters) is empty, and bidi override /
+  // isolate controls are refused. ZWJ / ZWNJ / LRM / RLM stay allowed inside visible text (Arabic shaping, emoji sequences).
+  var INVISIBLE_ONLY = /^[\p{Cf}\p{Cc}\p{Z}\s]*$/u;
+  var BIDI_FORMATTING = /[\u202A-\u202E\u2066-\u2069]/;
 
   function toId(v) {
     var n = typeof v === "number" ? v : typeof v === "string" && /^\d{1,15}$/.test(v) ? Number(v) : NaN;
@@ -42,9 +47,9 @@
     if (typeof text !== "string") return { length: 0, remaining: MAX_BODY, empty: true, over: false, warn: false, invalid: false, canSend: false };
     var trimmed = text.trim();
     var length = codePointLength(trimmed);
-    var invalid = trimmed.indexOf("\u0000") >= 0;
+    var invalid = trimmed.indexOf("\u0000") >= 0 || BIDI_FORMATTING.test(trimmed);
     var over = length > MAX_BODY;
-    var empty = length === 0;
+    var empty = length === 0 || INVISIBLE_ONLY.test(trimmed);
     return { length: length, remaining: MAX_BODY - length, empty: empty, over: over, warn: length >= WARN_AT, invalid: invalid, canSend: !empty && !over && !invalid };
   }
 
@@ -162,17 +167,38 @@
     return { list: true, thread: ev.kind !== "read" && open === conv, unread: true };
   }
   /**
-   * The message id to mark as read, or null. Only when the thread is on screen AND the window has focus, only for ids the
-   * client has loaded, and only when a visible message from the other side is newer than the last marked id.
+   * What to do about the read marker: {action: "mark", id} | {action: "load_older", id: null} | {action: "none", id: null}.
+   * Marking moves the server's marker up to `id`, which also covers every OLDER message - so it is only allowed when the client has
+   * loaded the oldest unread one: no older page exists (ctx.hasOlder false), or the loaded messages from the other side number at least
+   * the server's unread count (ctx.unreadCount; the unread ones are always the newest of those). Otherwise older pages are paged in
+   * first (ctx.pagesLoaded counts them; after MAX_AUTO_PAGES nothing is marked until the user loads more). Only when the thread is on
+   * screen AND the window has focus, and only when a visible message from the other side is newer than the last marked id.
    */
-  function markReadDecision(ctx) {
-    if (!ctx || !ctx.visible || !ctx.focused) return null;
+  function markReadPlan(ctx) {
+    var none = { action: "none", id: null };
+    if (!ctx || !ctx.visible || !ctx.focused) return none;
     var marked = toId(ctx.markedId);
     var list = Array.isArray(ctx.messages) ? ctx.messages : [];
     var unread = list.some(function (m) { return m && !m.mine && !m.hidden && toId(m.id) > marked; });
-    if (!unread) return null;
+    if (!unread) return none;
     var newest = newestId(list);
-    return newest > marked ? newest : null;
+    if (!(newest > marked)) return none;
+    var covered = !ctx.hasOlder;
+    if (!covered) {
+      var count = ctx.unreadCount;
+      if (typeof count === "number" && isFinite(count) && count >= 0) {
+        var loaded = list.filter(function (m) { return m && !m.mine && !m.hidden; }).length;
+        covered = loaded >= count;
+      }
+    }
+    if (covered) return { action: "mark", id: newest };
+    var pages = typeof ctx.pagesLoaded === "number" && ctx.pagesLoaded > 0 ? ctx.pagesLoaded : 0;
+    return pages < MAX_AUTO_PAGES ? { action: "load_older", id: null } : none;
+  }
+  /** The message id to mark as read, or null (see markReadPlan). */
+  function markReadDecision(ctx) {
+    var plan = markReadPlan(ctx);
+    return plan.action === "mark" ? plan.id : null;
   }
 
   // ---------------------------------------------------------------- conversations
@@ -200,6 +226,29 @@
     if (!id || id > MAX_ID) return { ok: false, error: "id" };
     return { ok: true, payload: { subject_type: type, subject_id: id } };
   }
+  /** New-staff-room dialog -> POST /chat/conversations body: a title of 1..120 characters (something visible, no bidi overrides) and 1..50 distinct staff user ids. */
+  function staffRoomPayload(title, userIds) {
+    var t = typeof title === "string" ? title.trim() : "";
+    if (!t || INVISIBLE_ONLY.test(t) || BIDI_FORMATTING.test(t) || t.indexOf("\u0000") >= 0 || codePointLength(t) > 120) return { ok: false, error: "title" };
+    var ids = [];
+    var list = Array.isArray(userIds) ? userIds : [];
+    for (var i = 0; i < list.length; i += 1) {
+      var id = toId(list[i]);
+      if (!id || id > MAX_ID) return { ok: false, error: "members" };
+      if (ids.indexOf(id) < 0) ids.push(id);
+    }
+    if (ids.length < 1 || ids.length > 50) return { ok: false, error: "members" };
+    return { ok: true, payload: { subject_type: "staff", title: t, participant_user_ids: ids } };
+  }
+  /** Add-participant dialog -> POST /chat/conversations/:id/participants body. */
+  function participantPayload(rawId) {
+    var id = toId(typeof rawId === "string" ? rawId.trim() : rawId);
+    return id && id <= MAX_ID ? { ok: true, payload: { user_id: id } } : { ok: false, error: "none" };
+  }
+  /** Participants can be added to organisation conversations and staff rooms; a candidate thread follows the candidate's assignment. */
+  function canAddParticipants(conv) {
+    return Boolean(conv) && conv.subject_type !== "candidate" && typeof conv.subject_type === "string";
+  }
   /** Moderation reason (hide: required; unhide: optional), 500 characters at most, no NUL. */
   function reasonCheck(value, required) {
     var s = typeof value === "string" ? value.trim() : "";
@@ -222,9 +271,9 @@
     toId: toId, badgeText: badgeText, totalUnread: totalUnread, codePointLength: codePointLength, composeState: composeState,
     classifyError: classifyError, sendInitial: sendInitial, sendStep: sendStep,
     dayKey: dayKey, groupByDay: groupByDay, dayLabelKind: dayLabelKind, formatTime: formatTime, formatDay: formatDay,
-    mergeMessages: mergeMessages, newestId: newestId, eventPlan: eventPlan, markReadDecision: markReadDecision,
+    mergeMessages: mergeMessages, newestId: newestId, eventPlan: eventPlan, markReadDecision: markReadDecision, markReadPlan: markReadPlan, MAX_AUTO_PAGES: MAX_AUTO_PAGES,
     conversationTitle: conversationTitle, previewKind: previewKind, sortConversations: sortConversations,
-    subjectOpenPayload: subjectOpenPayload, reasonCheck: reasonCheck, channelState: channelState,
+    subjectOpenPayload: subjectOpenPayload, staffRoomPayload: staffRoomPayload, participantPayload: participantPayload, canAddParticipants: canAddParticipants, reasonCheck: reasonCheck, channelState: channelState,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.VITA_CHAT_UTIL = api;

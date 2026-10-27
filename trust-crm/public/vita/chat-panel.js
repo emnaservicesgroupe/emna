@@ -28,7 +28,7 @@
       return {
         started: false, rows: [], listLoaded: false, hasMore: false, listError: null,
         openId: null, cur: null, messages: [], hasOlder: false, olderBefore: null, threadLoaded: false, threadState: "idle",
-        send: U.sendInitial(), sendTok: 0, drafts: {}, marked: {}, marking: false, markAgain: false,
+        send: U.sendInitial(), sendTok: 0, drafts: {}, marked: {}, marking: false, markAgain: false, autoPages: 0, pagingIn: false,
         events: null, live: "off", pending: { list: false, thread: false, reset: false }, listSeq: 0, threadSeq: 0, unread: 0, prefs: null, startFailed: false,
       };
     }
@@ -39,6 +39,7 @@
     function flag(v, dflt) { return typeof v === "function" ? Boolean(v()) : v === undefined ? dflt : Boolean(v); }
     function canWrite() { return flag(o.canWrite, true); }
     function canModerate() { return flag(o.canModerate, false); }
+    function participantOnly() { return flag(o.participantOnly, false); }
     function tz() { return V.userTz(); }
     function curRow() {
       if (P.openId === null) return null;
@@ -73,7 +74,8 @@
       if (staff) {
         var refresh = h("button", { type: "button", class: "btn secondary small", text: t("common.refresh"), on: { click: function () { refreshAll(true); } } });
         top.appendChild(h("span", { class: "spacer" }));
-        if (o.onNew && canWrite()) top.appendChild(h("button", { type: "button", class: "btn small", text: t("chat.open.button"), on: { click: function () { o.onNew(); } } }));
+        if (o.onNew && canWrite() && !participantOnly()) top.appendChild(h("button", { type: "button", class: "btn small", text: t("chat.open.button"), on: { click: function () { o.onNew(); } } }));
+        if (o.onNewRoom && canModerate()) top.appendChild(h("button", { type: "button", class: "btn small secondary", text: t("chat.room.button"), on: { click: function () { o.onNewRoom(); } } }));
         top.appendChild(refresh);
       }
 
@@ -269,6 +271,8 @@
       P.messages = [];
       P.hasOlder = false;
       P.olderBefore = null;
+      P.autoPages = 0;
+      P.pagingIn = false;
       P.threadLoaded = false;
       P.threadState = "loading";
       P.send = U.sendInitial();
@@ -317,6 +321,9 @@
       if (canModerate()) {
         var closed = c.status === "closed";
         E.mod.appendChild(h("button", { type: "button", class: "btn secondary small", text: closed ? t("chat.reopen") : t("chat.close"), on: { click: function (e) { toggleClosed(e.currentTarget, closed); } } }));
+        if (o.onAddParticipant && canModerate() && U.canAddParticipants(c)) {
+          E.mod.appendChild(h("button", { type: "button", class: "btn secondary small", text: t("chat.participants.button"), on: { click: function () { o.onAddParticipant(c); } } }));
+        }
       }
     }
 
@@ -426,8 +433,8 @@
 
     function loadOlder() {
       var cid = P.openId;
-      if (cid === null || !P.hasOlder || P.olderBefore === null) return;
-      V.busy(E.older, function () {
+      if (cid === null || !P.hasOlder || P.olderBefore === null) return Promise.resolve();
+      return V.busy(E.older, function () {
         return V.api("GET", "/chat/conversations/" + cid + "/messages?limit=" + U.PAGE_SIZE + "&before=" + P.olderBefore).then(function (resp) {
           if (cid !== P.openId) return;
           P.messages = U.mergeMessages(((resp && resp.rows) || []).slice().reverse(), P.messages);
@@ -503,8 +510,22 @@
       if (!P.started || P.openId === null) return;
       var cid = P.openId;
       var focused = document.visibilityState !== "hidden" && (typeof document.hasFocus !== "function" || document.hasFocus());
-      var id = U.markReadDecision({ visible: threadVisible(), focused: focused, messages: P.messages, markedId: P.marked[cid] || 0 });
-      if (id === null) return;
+      var row0 = curRow();
+      var plan = U.markReadPlan({
+        visible: threadVisible(), focused: focused, messages: P.messages, markedId: P.marked[cid] || 0,
+        hasOlder: P.hasOlder, unreadCount: row0 && typeof row0.unread_count === "number" ? row0.unread_count : undefined, pagesLoaded: P.autoPages,
+      });
+      if (plan.action === "load_older") {
+        // The oldest unread message is not on screen yet: page in older ones first (capped), then decide again.
+        if (P.hasOlder && P.olderBefore !== null && !P.pagingIn) {
+          P.autoPages += 1;
+          P.pagingIn = true;
+          loadOlder().then(function () { P.pagingIn = false; maybeMarkRead(); }, function () { P.pagingIn = false; });
+        }
+        return;
+      }
+      if (plan.action !== "mark") return;
+      var id = plan.id;
       if (P.marking) { P.markAgain = true; return; }
       P.marking = true;
       V.api("POST", "/chat/conversations/" + cid + "/read", { body: { message_id: id } })
@@ -696,7 +717,7 @@
       updateComposer();
     });
 
-    return { start: start, stop: stop, activate: activate, refresh: refreshAll, openSubject: openSubject, openConversation: function (id) { return openConversation(id, true); }, unread: function () { return P.unread; } };
+    return { start: start, stop: stop, activate: activate, refresh: refreshAll, reload: loadConversations, openSubject: openSubject, openConversation: function (id) { return openConversation(id, true); }, unread: function () { return P.unread; } };
   }
 
   /** Unread badge in a tab / stepper button: hidden at 0, "99+" above 99, with a screen-reader text. Returns update(n). */

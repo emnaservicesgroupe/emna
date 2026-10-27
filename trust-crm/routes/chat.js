@@ -1,8 +1,14 @@
 // Messaging API (stage 6), mounted at /chat with its own 16 kb JSON parser (app.js). Router level: a verified token (versioned portal
-// tokens are re-checked against the account and organisation), a role that can use chat at all (HR / Accountant are refused for now),
+// tokens are re-checked against the account and organisation), a role that can use chat at all (every staff role; HR / Accountant, who hold no
+// chat:*, see only the staff rooms they were explicitly added to; Candidate / Employer / Agency their own thread),
 // and the ACTOR is rebuilt from the database on every request (deactivated account -> 401, suspended organisation / deleted candidate -> 403).
 //   GET  /conversations ?limit(<=50)&offset                 scoped list: unread_count, last-message preview (a hidden message is a stub for external viewers)
 //   POST /conversations {subject_type, subject_id}          staff (serves the subject) or a candidate (own conversation, CHAT_CANDIDATE_CAN_START); idempotent: 201 new / 200 existing
+//   POST /conversations {subject_type:'staff', title, participant_user_ids[1..50]}   internal staff room (chat:moderate); creator joins; participants only; 201
+//   GET  /conversations/:id/participants                    explicit participants (chat:moderate)
+//   POST /conversations/:id/participants {user_id}          add an active staff user as explicit participant (chat:moderate, audited, idempotent: 201 / 200)
+//   DELETE /conversations/:id/participants/:user_id         withdraw explicit access (chat:moderate, audited, idempotent)
+//   GET  /staff ?q&limit(<=50)                              active staff users to pick participants from (chat:moderate)
 //   GET  /conversations/:id/messages ?before&limit(<=50)    newest first; hidden messages are {id, created_at, hidden:true} for external viewers
 //   POST /conversations/:id/messages {body}                 1..2000 characters; 409 closed; 429 + Retry-After above CHAT_RATE_PER_MIN (default 30) per user
 //   POST /conversations/:id/read {message_id}               monotonic read marker
@@ -56,6 +62,17 @@ router.get("/conversations/:id/messages", asyncHandler(async (req, res) => res.j
 router.post("/conversations/:id/messages", asyncHandler(async (req, res) => res.status(201).json(await messages.sendMessage(req.chat, req.params.id, body(req)))));
 router.post("/conversations/:id/read", asyncHandler(async (req, res) => res.json(await conversations.markRead(req.chat, req.params.id, body(req)))));
 router.get("/unread-count", asyncHandler(async (req, res) => res.json(await conversations.unreadCount(req.chat))));
+router.get("/conversations/:id/participants", moderator, asyncHandler(async (req, res) => res.json(await conversations.listParticipants(req.chat, req.params.id))));
+router.post(
+  "/conversations/:id/participants",
+  moderator,
+  asyncHandler(async (req, res) => {
+    const out = await conversations.addParticipant(req.chat, req.params.id, body(req));
+    res.status(out.changed ? 201 : 200).json(out);
+  })
+);
+router.delete("/conversations/:id/participants/:user_id", moderator, asyncHandler(async (req, res) => res.json(await conversations.removeParticipant(req.chat, req.params.id, req.params.user_id))));
+router.get("/staff", moderator, asyncHandler(async (req, res) => res.json(await conversations.staffDirectory(req.chat, req.query))));
 router.post("/conversations/:id/close", moderator, asyncHandler(async (req, res) => res.json(await conversations.setStatus(req.chat, req.params.id, "closed"))));
 router.post("/conversations/:id/reopen", moderator, asyncHandler(async (req, res) => res.json(await conversations.setStatus(req.chat, req.params.id, "open"))));
 router.post("/messages/:id/hide", moderator, asyncHandler(async (req, res) => res.json(await messages.setHidden(req.chat, req.params.id, body(req), true))));
