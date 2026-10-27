@@ -38,6 +38,7 @@ const shutdown = createShutdown({
     () => alertTask && typeof alertTask.stop === "function" && alertTask.stop(),
     () => require("./modules/jobsearch/eventsHub").shutdown(),
     () => require("./modules/chat/hub").shutdown(),
+    () => require("./routes/mcp").shutdown(),
   ],
   isIdle: () => !jobSearch || typeof jobSearch.isIdle !== "function" || jobSearch.isIdle(),
   closeDb: () => db.end(),

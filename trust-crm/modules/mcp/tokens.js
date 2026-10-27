@@ -159,4 +159,4 @@ async function authenticate(secret, { ip } = {}) {
   };
 }
 
-module.exports = { createToken, listTokens, revokeToken, authenticate, hashEquals, sha256hex, canUseMcp, MAX_ACTIVE, MAX_DAYS, SECRET_RE };
+module.exports = { createToken, listTokens, revokeToken, authenticate, hashEquals, sha256hex, canUseMcp, ipHash, MAX_ACTIVE, MAX_DAYS, SECRET_RE };

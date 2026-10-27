@@ -74,6 +74,10 @@ const ROUTE_RULES = [
   // mcp-tokens (stage 7, routes/mcpTokens.js): personal access token management = a normal JWT of an active staff account holding mcp:use
   // (Admin, Manager, SuperAdmin). Every other staff role, Candidate, Employer, Agency and anonymous are refused; a PAT bearer is 401 (see PAT_EXEMPT).
   { re: /^\w+ \/mcp-tokens(\/|$)/, allow: NONE, why: "mcp token management (staff with mcp:use)" },
+  // mcp (stage 7, routes/mcp.js): POST /mcp accepts ONLY a personal access token (PAT_EXEMPT below); a JWT of any actor and anonymous are 401
+  // (404 while MCP_ENABLED is off, which is how the sweep runs). Every other method is 405 + Allow: POST for everyone, enabled or not (MCP_405).
+  { re: /^POST \/mcp$/, allow: NONE, why: "mcp endpoint (PAT only)" },
+  { re: /^(GET|PUT|PATCH|DELETE) \/mcp$/, allow: NONE, why: "mcp endpoint: POST only" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -161,9 +165,10 @@ const JOBSEARCH_STAFF = [
 ];
 
 // Routes that accept a personal access token (PAT, "vita_pat_..." bearer). It is the ONLY place a PAT is valid: every other authenticated route
-// must answer it 401 (middleware/auth.js verifyToken). Task 3 adds POST /mcp; until then no registered route matches and 404 is fine.
+// must answer it 401 (middleware/auth.js verifyToken). POST /mcp is the only one; the other methods of /mcp are 405 for everyone (MCP_405).
 // Deliberately NOT in ROUTE_RULES: that table fails on a rule matching no route.
-const PAT_EXEMPT = [/^\w+ \/mcp$/];
+const PAT_EXEMPT = [/^POST \/mcp$/];
+const MCP_405 = /^(GET|PUT|PATCH|DELETE) \/mcp$/;
 
 function classify(key) {
   for (const r of ROUTE_RULES) if (r.re.test(key)) return r;
@@ -224,7 +229,7 @@ async function probe(base, method, url, token, { headers = {}, body } = {}) {
   } catch {
     json = null;
   }
-  return { status: res.status, text, json, stream: false };
+  return { status: res.status, text, json, stream: false, headers: res.headers };
 }
 const DENIED = new Set([401, 403, 404]);
 const ERROR_KEYS = new Set(["error", "message", "code"]);
@@ -357,6 +362,11 @@ test("sweep: every route is classified and every disallowed (route, role) answer
         if (found.length) offenders.push(`${tag}: LEAKS ${found.join(", ")}`);
         if (res.status >= 500) offenders.push(`${tag}: server error`);
         if (allow.includes(role)) continue;
+        if (MCP_405.test(keyOf(r))) {
+          if (res.status !== 405 || res.headers.get("allow") !== "POST") offenders.push(`${tag}: expected 405 with Allow: POST`);
+          else if (!isErrorOnly(res)) offenders.push(`${tag}: refusal body is not error-only`);
+          continue;
+        }
         if (!DENIED.has(res.status)) offenders.push(`${tag}: expected 401/403/404`);
         else if (!res.stream && !isErrorOnly(res)) offenders.push(`${tag}: refusal body is not error-only: ${res.text.slice(0, 80)}`);
       }
@@ -512,7 +522,7 @@ test("sweep controls (mcp-tokens): staff with mcp:use reach it; other staff, por
   }
 });
 
-test("sweep: a PAT bearer is 401 on EVERY authenticated route (only /mcp, once it exists, accepts one)", async () => {
+test("sweep: a PAT bearer is 401 on EVERY authenticated route (only POST /mcp accepts one)", async () => {
   const { w, routes } = await world();
   const made = await probe(w.base, "POST", "/mcp-tokens", w.tokens.admin, { body: JSON.stringify({ name: "sweep-pat" }) });
   assert.equal(made.status, 201, made.text);
@@ -523,7 +533,8 @@ test("sweep: a PAT bearer is 401 on EVERY authenticated route (only /mcp, once i
   const offenders = [];
   for (const r of routes) {
     const key = keyOf(r);
-    if (PAT_EXEMPT.some((re) => re.test(key))) continue; // /mcp: arrives with Task 3 (404 while it does not exist)
+    if (PAT_EXEMPT.some((re) => re.test(key))) continue; // POST /mcp: the one route that accepts a PAT (covered by the control below)
+    if (MCP_405.test(key)) continue; // the other methods of /mcp are 405 for everyone (main sweep)
     // Unauthenticated-by-design routes (public API, login, OTP, healthz, static mounts) never read the bearer, so a PAT there is simply ignored.
     if (classify(key).allow.includes("anon")) continue;
     for (const id of /:\w+/.test(r.template) ? [1, 2] : [1]) {
@@ -543,6 +554,41 @@ test("sweep: a PAT bearer is 401 on EVERY authenticated route (only /mcp, once i
   // The same PAT is valid for the token service itself (it was not rejected for being malformed) and its owner's JWT still works.
   assert.ok(await require("../modules/mcp/tokens").authenticate(pat));
   assert.equal((await probe(w.base, "GET", "/candidates/all", w.tokens.admin)).status, 200);
+});
+
+test("sweep controls (mcp): POST /mcp takes only a PAT - every JWT and anonymous is 401, a PAT works, disabled is 404, other methods are 405", async () => {
+  const { w, emp, agy, attacker } = await world();
+  const rpc = { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }), headers: { accept: "application/json, text/event-stream" } };
+  const made = await probe(w.base, "POST", "/mcp-tokens", w.tokens.mgr, { body: JSON.stringify({ name: "sweep-mcp" }) });
+  assert.equal(made.status, 201, made.text);
+  const actors = { admin: w.tokens.admin, mgr: w.tokens.mgr, hrx: w.tokens.hrx, acctx: w.tokens.acctx, employer: emp.token, agency: agy.token, candidate: attacker.token, anon: null };
+  // Disabled (the default of this suite): even a valid PAT gets the generic 404; the answer never depends on who asks.
+  assert.notEqual(process.env.MCP_ENABLED, "true");
+  for (const [role, token] of Object.entries({ ...actors, pat: made.json.secret })) {
+    const r = await probe(w.base, "POST", "/mcp", token, rpc);
+    assert.equal(r.status, 404, `${role} disabled`);
+    assert.deepEqual(r.json, { error: "MCP is disabled" });
+  }
+  process.env.MCP_ENABLED = "true";
+  try {
+    for (const [role, token] of Object.entries(actors)) {
+      const r = await probe(w.base, "POST", "/mcp", token, rpc);
+      assert.equal(r.status, 401, `${role} POST /mcp with a JWT / nothing`);
+      assert.deepEqual(r.json, { error: "Unauthorized" });
+    }
+    const ok = await probe(w.base, "POST", "/mcp", made.json.secret, rpc);
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.result.tools.length, 8);
+    for (const m of ["GET", "PUT", "PATCH", "DELETE"]) {
+      for (const [role, token] of Object.entries({ ...actors, pat: made.json.secret })) {
+        const r = await probe(w.base, m, "/mcp", token);
+        assert.equal(r.status, 405, `${role} ${m} /mcp`);
+        assert.equal(r.headers.get("allow"), "POST");
+      }
+    }
+  } finally {
+    delete process.env.MCP_ENABLED;
+  }
 });
 
 test("sweep: the inbound mail webhook rejects anything unsigned or wrongly signed, for every actor", async () => {

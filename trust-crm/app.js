@@ -27,6 +27,7 @@ const publicRoutes = require("./routes/public");
 const crmRoutes = require("./routes/crm");
 const employerPortalRoutes = require("./routes/employerPortal");
 const mcpTokenRoutes = require("./routes/mcpTokens");
+const mcpRoutes = require("./routes/mcp");
 const agencyPortalRoutes = require("./routes/agencyPortal");
 const { mountVita } = require("./routes/vitaStatic");
 const { mountSite, siteHome } = require("./routes/siteStatic");
@@ -40,6 +41,8 @@ const trustProxy = trustProxySetting(process.env.TRUST_PROXY);
 if (trustProxy !== null) app.set("trust proxy", trustProxy);
 
 app.use(cors());
+// MCP endpoint (stage 7, off by default): reads its own 64 KB raw body, so it must come BEFORE every JSON parser below. The only route that accepts a PAT.
+app.use("/mcp", mcpRoutes);
 // /jobsearch parses its own JSON first so parser errors (which carry the raw body,
 // possibly an OTP) are answered without logging; the global parser then skips
 // already-parsed requests. Non-jobsearch routes are unaffected.
@@ -103,7 +106,7 @@ app.use("/finance", financeV2Routes);
 app.use("/hr", hrRoutes);
 // Messaging (stage 6): staff, Candidate, Employer and Agency accounts, each scoped to their own conversations in SQL.
 app.use("/chat", chatRoutes);
-// MCP personal access tokens (stage 7): JWT of staff with mcp:use only. /mcp itself (Task 3) is the ONLY route that accepts a PAT.
+// MCP personal access tokens (stage 7): JWT of staff with mcp:use only. /mcp (mounted at the top) is the ONLY route that accepts a PAT.
 app.use("/mcp-tokens", mcpTokenRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
