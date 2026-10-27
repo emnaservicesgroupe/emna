@@ -356,7 +356,7 @@
   function assertPath(path) {
     // Staff console + candidate portal (/jobsearch, /auth, /crm), the employer / agency portals (/employer, /agency) and
     // accounting (/finance/, plus the candidate name lookup /candidates/all used by the Accounting tab).
-    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path) || /^\/finance\//.test(path) || /^\/hr\//.test(path) || /^\/chat\//.test(path) || /^\/candidates\/all(?:\?|$)/.test(path))) throw new Error("API path not allowed");
+    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path) || /^\/finance\//.test(path) || /^\/hr\//.test(path) || /^\/chat\//.test(path) || /^\/mcp-tokens(?:[\/?]|$)/.test(path) || /^\/candidates\/all(?:\?|$)/.test(path))) throw new Error("API path not allowed");
   }
 
   /** JSON API call. opts: body, noAuth, raw (return Response), headers. */

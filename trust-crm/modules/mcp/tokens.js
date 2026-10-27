@@ -124,6 +124,35 @@ async function revokeToken(user, id) {
   });
 }
 
+const USAGE_MAX = 50;
+
+/**
+ * Recent MCP calls from the audit log: tool, outcome, duration, row count and which token. Own calls; Admin / SuperAdmin see everyone's.
+ * Metadata only: the arguments digest and anything else in the audit row are never selected, and no data is ever recorded there.
+ */
+async function listUsage(user, limit) {
+  requireActor(user);
+  let n = USAGE_MAX;
+  if (limit !== undefined) {
+    if (typeof limit !== "string" || !/^[1-9][0-9]?$/.test(limit) || Number(limit) > USAGE_MAX) throw new HttpError(400, `limit must be a whole number from 1 to ${USAGE_MAX}`);
+    n = Number(limit);
+  }
+  const all = ADMIN_ROLES.has(user.role);
+  const r = await db.query(
+    `SELECT a.id, a.created_at, a.new_data->>'tool' AS tool, a.new_data->>'outcome' AS outcome,
+            CASE WHEN (a.new_data->>'duration_ms') ~ '^[0-9]{1,9}$' THEN (a.new_data->>'duration_ms')::int END AS duration_ms,
+            CASE WHEN (a.new_data->>'rows') ~ '^[0-9]{1,9}$' THEN (a.new_data->>'rows')::int END AS rows,
+            t.name AS token_name, t.prefix AS token_prefix, u.full_name AS owner_name
+       FROM audit_logs a
+       LEFT JOIN api_tokens t ON t.id::text = a.record_id
+       LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'MCP_CALL' ${all ? "" : "AND a.user_id = $2"}
+      ORDER BY a.id DESC LIMIT $1`,
+    all ? [n] : [n, user.id]
+  );
+  return { rows: r.rows.map((x) => ({ ...x, id: String(x.id) })) };
+}
+
 function ipHash(ip) {
   if (typeof ip !== "string" || !ip) return null;
   return crypto.createHmac("sha256", process.env.JWT_SECRET || "mcp").update(ip).digest("hex");
@@ -159,4 +188,4 @@ async function authenticate(secret, { ip } = {}) {
   };
 }
 
-module.exports = { createToken, listTokens, revokeToken, authenticate, hashEquals, sha256hex, canUseMcp, ipHash, MAX_ACTIVE, MAX_DAYS, SECRET_RE };
+module.exports = { createToken, listTokens, revokeToken, listUsage, authenticate, hashEquals, sha256hex, canUseMcp, ipHash, MAX_ACTIVE, MAX_DAYS, SECRET_RE };

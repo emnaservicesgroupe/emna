@@ -3,6 +3,7 @@
 // Candidate / Employer / Agency are 403. Works even while MCP_ENABLED is false: every answer says {mcp_enabled} so the UI can explain.
 //   POST   /        {name, days?}  -> 201 {id, secret, prefix, expires_at, mcp_enabled}   the secret appears HERE ONLY, once
 //   GET    /                       -> {rows, mcp_enabled}  own tokens (Admin / SuperAdmin: everyone's, with owner_name); never a secret or hash
+//   GET    /usage?limit=1..50 -> {rows, mcp_enabled}  recent MCP_CALL audit rows (tool, outcome, duration_ms, rows, token name / prefix, owner_name, created_at): own; Admin / SuperAdmin: all. Never data.
 //   DELETE /:id                    -> {id, revoked, already_revoked, mcp_enabled}  own, or any for Admin / SuperAdmin; idempotent
 const express = require("express");
 const { requireStaff } = require("../middleware/staff");
@@ -34,6 +35,11 @@ router.post(
 router.get(
   "/",
   asyncHandler(async (req, res) => res.json({ ...(await tokens.listTokens(req.user)), mcp_enabled: mcpEnabled() }))
+);
+
+router.get(
+  "/usage",
+  asyncHandler(async (req, res) => res.json({ ...(await tokens.listUsage(req.user, req.query.limit)), mcp_enabled: mcpEnabled() }))
 );
 
 router.delete(

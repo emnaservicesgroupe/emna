@@ -389,3 +389,11 @@ ol.stepper button .tab-badge { margin-inline-start: 0.4rem; }
 .chat-channel-list li { padding-block: 0.4rem; border-block-end: 1px solid var(--line); }
 .chat-channel-list li:last-child { border-block-end: 0; }
 .chat-channel-list p { margin: 0.2rem 0 0; }
+
+/* assistant access (mcp-admin.js) */
+.mcp-secret-box { border: 2px dashed var(--gold); background: var(--gold-50); border-radius: 8px; padding: 0.75rem; overflow-wrap: anywhere; word-break: break-all; }
+.mcp-secret { font-size: 1rem; user-select: all; }
+.mcp-snippet { direction: ltr; text-align: left; margin: 0.4rem 0; padding: 0.7rem; background: #f6f9fd; border: 1px solid var(--line); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; }
+.mcp-snippet-wrap { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.mcp-limits { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 700px) { .mcp-limits { grid-template-columns: 1fr 1fr; } }

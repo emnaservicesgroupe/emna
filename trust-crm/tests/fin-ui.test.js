@@ -38,7 +38,7 @@ test("admin.html: Accounting tab + panel, fin scripts load last and in order, no
   const order = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map((m) => m[1]);
   const finAt = order.indexOf("fin-util.js");
   assert.deepEqual(order.slice(finAt, finAt + FIN_JS.length), FIN_JS, "fin scripts are contiguous, util first (the HR scripts follow them, see tests/hr-ui.test.js)");
-  assert.deepEqual(order.slice(finAt + FIN_JS.length), ["hr-util.js", "hr-my.js", "hr-team.js", "hr-admin.js"]);
+  assert.deepEqual(order.slice(finAt + FIN_JS.length), ["hr-util.js", "hr-my.js", "hr-team.js", "hr-admin.js", "mcp-util.js", "mcp-admin.js"]);
   assert.ok(order.indexOf("fin-util.js") > order.indexOf("admin.js") && order.indexOf("fin-util.js") > order.indexOf("crm-util.js"));
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /\sstyle\s*=/i);

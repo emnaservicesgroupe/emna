@@ -342,7 +342,7 @@ test("sweep: every route is classified and every disallowed (route, role) answer
   assert.deepEqual([...unusedRules, ...unusedLists], [], "STALE classification entries that match no registered route");
   assert.equal(new Set([...JOBSEARCH_CANDIDATE, ...JOBSEARCH_STAFF]).size, JOBSEARCH_CANDIDATE.length + JOBSEARCH_STAFF.length, "no route listed twice");
   // Sanity: the enumeration really walked the nested routers (guards against a silent express-internals change).
-  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "POST /mcp-tokens", "GET /mcp-tokens", "DELETE /mcp-tokens/:id", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
+  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "POST /mcp-tokens", "GET /mcp-tokens", "GET /mcp-tokens/usage", "DELETE /mcp-tokens/:id", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
   assert.ok(routes.length > 120, `enumerated ${routes.length} routes`);
 
   // 2. Every (route, actor, id-set) call.
@@ -512,9 +512,11 @@ test("sweep controls (mcp-tokens): staff with mcp:use reach it; other staff, por
     const r = await probe(w.base, "GET", "/mcp-tokens", w.tokens[k]);
     assert.equal(r.status, 200, `${k} GET /mcp-tokens -> ${r.status}`);
     assert.equal(r.json.mcp_enabled, false);
+    const u = await probe(w.base, "GET", "/mcp-tokens/usage", w.tokens[k]);
+    assert.equal(u.status, 200, `${k} GET /mcp-tokens/usage -> ${u.status}`);
   }
   for (const [role, token] of [["hrx", w.tokens.hrx], ["acctx", w.tokens.acctx], ["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
-    for (const [m, url] of [["GET", "/mcp-tokens"], ["POST", "/mcp-tokens"], ["DELETE", "/mcp-tokens/1"]]) {
+    for (const [m, url] of [["GET", "/mcp-tokens"], ["GET", "/mcp-tokens/usage"], ["POST", "/mcp-tokens"], ["DELETE", "/mcp-tokens/1"]]) {
       const r = await probe(w.base, m, url, token, m === "POST" ? { body: JSON.stringify({ name: "sweep" }) } : {});
       assert.ok(DENIED.has(r.status), `${role} ${m} ${url} -> ${r.status}`);
       assert.ok(isErrorOnly(r), `${role} ${m} ${url}: error-only body`);
@@ -549,7 +551,7 @@ test("sweep: a PAT bearer is 401 on EVERY authenticated route (only POST /mcp ac
     }
   }
   assert.deepEqual(offenders, [], `\n${offenders.join("\n  ")}`);
-  for (const must of ["GET /candidates/all", "GET /finance/dashboard", "GET /hr/me", "GET /chat/conversations", "GET /jobsearch/auth/me", "GET /mcp-tokens", "POST /mcp-tokens", "DELETE /mcp-tokens/:id", "POST /jobsearch/inbound/mail"]) assert.ok(checked.includes(must), `PAT checked on ${must}`);
+  for (const must of ["GET /candidates/all", "GET /finance/dashboard", "GET /hr/me", "GET /chat/conversations", "GET /jobsearch/auth/me", "GET /mcp-tokens", "GET /mcp-tokens/usage", "POST /mcp-tokens", "DELETE /mcp-tokens/:id", "POST /jobsearch/inbound/mail"]) assert.ok(checked.includes(must), `PAT checked on ${must}`);
   assert.ok(checked.length > 150, `made ${checked.length} PAT calls`);
   // The same PAT is valid for the token service itself (it was not rejected for being malformed) and its owner's JWT still works.
   assert.ok(await require("../modules/mcp/tokens").authenticate(pat));

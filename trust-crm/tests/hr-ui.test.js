@@ -33,7 +33,7 @@ test("admin.html: HR tab + panel, hr scripts after the crm/fin scripts and in or
   assert.match(html, /<button type="button" role="tab" id="tab-hr" aria-controls="panel-hr" data-tab="hr" data-i18n="tab\.hr">/);
   assert.match(html, /<section id="panel-hr" role="tabpanel" aria-labelledby="tab-hr"/);
   const order = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map((m) => m[1]);
-  assert.deepEqual(order.slice(-HR_JS.length), HR_JS, "hr scripts are the last scripts, util first");
+  assert.deepEqual(order.slice(order.indexOf("hr-util.js"), order.indexOf("hr-util.js") + HR_JS.length), HR_JS, "hr scripts are contiguous, util first (the mcp scripts follow)");
   for (const f of HR_JS) assert.ok(order.indexOf(f) > order.indexOf("admin.js") && order.indexOf(f) > order.indexOf("crm-util.js"), f);
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /\sstyle\s*=/i);

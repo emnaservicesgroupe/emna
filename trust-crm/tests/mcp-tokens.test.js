@@ -520,3 +520,51 @@ test("verifyToken answers 401 to a vita_pat_ bearer on ordinary routes and never
   assert.ok(await tokens.authenticate(t.secret));
   assert.equal(mcpAuth.PAT_PREFIX, "vita_pat_");
 });
+
+// ------------------------------------------------------------------------------------------------ usage log (stage 7, Task 4)
+test("GET /mcp-tokens/usage: own MCP_CALL rows only for Manager, everyone's (with owner) for Admin / SuperAdmin; metadata only, never data", async () => {
+  const w = await world();
+  const mgr = await w.mk("Manager");
+  const mgr2 = await w.mk("Manager");
+  const adm = await w.mk("Admin");
+  const t1 = (await create(w, mgr, { name: "mgr-one" })).body;
+  const t2 = (await create(w, mgr2, { name: "mgr2-one" })).body;
+  const row = async (u, tok, tool, outcome, ms, extra = {}) =>
+    w.q("INSERT INTO audit_logs (user_id, action, table_name, record_id, new_data) VALUES ($1,'MCP_CALL','mcp',$2,$3::jsonb)", [u.id, tok.id, JSON.stringify({ token_id: tok.id, tool, args_digest: "d".repeat(16), rows: 3, outcome, duration_ms: ms, ...extra })]);
+  await row(mgr, t1, "search_candidates", "ok", 12);
+  await row(mgr, t1, "finance_summary", "denied", 3);
+  await row(mgr2, t2, "list_leads", "ok", 40, { secret_leak: "PASSPORT-SENTINEL-9" });
+  await w.q("INSERT INTO audit_logs (user_id, action, table_name, new_data) VALUES ($1,'mcp.token.create','api_tokens','{}')", [mgr.id]);
+  const mine = await w.http("GET", "/mcp-tokens/usage", mgr.token);
+  assert.equal(mine.status, 200);
+  assert.equal(mine.body.mcp_enabled, false);
+  assert.deepEqual(mine.body.rows.map((r) => r.tool).sort(), ["finance_summary", "search_candidates"]);
+  for (const r of mine.body.rows) {
+    assert.deepEqual(Object.keys(r).sort(), ["created_at", "duration_ms", "id", "outcome", "owner_name", "rows", "token_name", "token_prefix", "tool"]);
+    assert.equal(r.token_prefix, t1.prefix);
+    assert.equal(r.token_name, "mgr-one");
+  }
+  assert.doesNotMatch(mine.text, /PASSPORT-SENTINEL|args_digest|dddddddd/);
+  const all = await w.http("GET", "/mcp-tokens/usage", adm.token);
+  assert.ok(all.body.rows.some((r) => r.tool === "list_leads" && r.token_name === "mgr2-one" && /Manager/.test(r.owner_name)));
+  assert.ok(all.body.rows.some((r) => r.tool === "search_candidates"));
+  assert.doesNotMatch(all.text, /PASSPORT-SENTINEL|args_digest/);
+  assert.ok(all.body.rows.every((r, i, a) => i === 0 || a[i - 1].created_at >= r.created_at), "newest first");
+});
+
+test("GET /mcp-tokens/usage: limit is 1..50 (default 50), bad limits are 400, other roles and anonymous are refused, no-store", async () => {
+  const w = await world();
+  const mgr = await w.mk("Manager");
+  const tk = (await create(w, mgr, { name: "lim" })).body;
+  for (let i = 0; i < 4; i++) await w.q("INSERT INTO audit_logs (user_id, action, table_name, record_id, new_data) VALUES ($1,'MCP_CALL','mcp',$2,$3::jsonb)", [mgr.id, tk.id, JSON.stringify({ token_id: tk.id, tool: "platform_status", rows: 1, outcome: "ok", duration_ms: i })]);
+  assert.equal((await w.http("GET", "/mcp-tokens/usage?limit=2", mgr.token)).body.rows.length, 2);
+  assert.equal((await w.http("GET", "/mcp-tokens/usage?limit=1", mgr.token)).body.rows.length, 1);
+  assert.equal((await w.http("GET", "/mcp-tokens/usage", mgr.token)).body.rows.length, 4);
+  for (const bad of ["0", "51", "-1", "abc", "1.5", "1e1", ""]) assert.equal((await w.http("GET", `/mcp-tokens/usage?limit=${bad}`, mgr.token)).status, 400, `limit=${bad}`);
+  const res = await fetch(`${w.base}/mcp-tokens/usage`, { headers: { authorization: `Bearer ${mgr.token}` } });
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  await res.arrayBuffer();
+  for (const role of ["Receptionist", "Agent", "HR", "Accountant"]) assert.equal((await w.http("GET", "/mcp-tokens/usage", (await w.mk(role)).token)).status, 403, role);
+  assert.equal((await w.http("GET", "/mcp-tokens/usage", null)).status, 401);
+  assert.equal((await w.http("GET", "/mcp-tokens/usage", `vita_pat_${"A".repeat(43)}`)).status, 401);
+});

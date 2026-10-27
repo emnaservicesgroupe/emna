@@ -31,6 +31,8 @@
   <script src="hr-my.js" defer></script>
   <script src="hr-team.js" defer></script>
   <script src="hr-admin.js" defer></script>
+  <script src="mcp-util.js" defer></script>
+  <script src="mcp-admin.js" defer></script>
 </head>
 <body data-page="admin" data-title-key="admin.title">
   <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
@@ -87,6 +89,7 @@
         <button type="button" role="tab" id="tab-chat" aria-controls="panel-chat" data-tab="chat"><span data-i18n="tab.chat">Messages</span><span class="tab-badge" id="chat-tab-badge" hidden></span></button>
         <button type="button" role="tab" id="tab-accounting" aria-controls="panel-accounting" data-tab="accounting" data-i18n="tab.accounting">Accounting</button>
         <button type="button" role="tab" id="tab-hr" aria-controls="panel-hr" data-tab="hr" data-i18n="tab.hr">HR</button>
+        <button type="button" role="tab" id="tab-mcp" aria-controls="panel-mcp" data-tab="mcp" data-i18n="tab.mcp">Assistant access</button>
         <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
         <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
         <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
@@ -291,6 +294,15 @@
         <div id="hr-sec-my"></div>
         <div id="hr-sec-team" hidden></div>
         <div id="hr-sec-admin" hidden></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- assistant access (built by mcp-admin.js; Admin, Manager, SuperAdmin) -->
+      <section id="panel-mcp" role="tabpanel" aria-labelledby="tab-mcp" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="mcp.title">Assistant access</h2>
+          <p class="notice info small" data-i18n="mcp.hint">Let an AI assistant (for example Claude Desktop or Claude Code) answer questions about the VITA data you are already allowed to see. It is read-only and acts as you, with your current permissions.</p>
+        </div>
+        <div id="mcp-root"></div>
       </section>
 
       <!-- ---------------------------------------------------------- applications -->

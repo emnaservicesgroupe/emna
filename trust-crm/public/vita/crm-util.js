@@ -19,8 +19,8 @@
   // Mirror of the permissions that matter to this UI (middleware/role.js; tests compare the two).
   var PERMS = {
     SuperAdmin: ["*"],
-    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export", "hr:read", "hr:write", "hr:approve", "chat:read", "chat:write", "chat:moderate"],
-    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:export", "hr:approve", "chat:read", "chat:write", "chat:moderate"],
+    Admin: ["candidates:read", "candidates:write", "users:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:write", "finance:void", "finance:refund", "finance:export", "hr:read", "hr:write", "hr:approve", "chat:read", "chat:write", "chat:moderate", "mcp:use"],
+    Manager: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "orgs:write", "finance:read", "finance:export", "hr:approve", "chat:read", "chat:write", "chat:moderate", "mcp:use"],
     Receptionist: ["candidates:read", "candidates:write", "leads:read", "leads:write", "sitejobs:write", "orgs:read", "chat:read", "chat:write"],
     Agent: ["candidates:read", "candidates:write", "leads:read", "chat:read", "chat:write"],
     // Accountant uses only the Accounting tab (finance:* and the candidate lookup); see public/vita/fin-util.js.
