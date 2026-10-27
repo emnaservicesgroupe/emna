@@ -248,7 +248,13 @@ async function removeParticipant(actor0, rawId, rawUserId) {
   return c.inTransaction(async (client) => {
     const actor = await scope.resolveActor(client, { id: actor0.userId, role: actor0.role }, { lock: true });
     if (!actor.perms.moderate) throw new HttpError(403, "Permission denied: chat:moderate");
-    await loadVisible(client, actor, id, { lock: true });
+    const conv = await loadVisible(client, actor, id, { lock: true });
+    if (conv.subject_type === "staff") {
+      // A staff room is visible to its explicit participants only: taking the last one out (yourself included) would orphan it for good.
+      const rest = await client.query("SELECT count(*)::int AS n FROM chat_participants WHERE conversation_id = $1 AND added_by IS NOT NULL AND user_id <> $2", [id, userId]);
+      const target = await client.query("SELECT 1 FROM chat_participants WHERE conversation_id = $1 AND user_id = $2 AND added_by IS NOT NULL", [id, userId]);
+      if (target.rowCount > 0 && rest.rows[0].n === 0) throw new HttpError(409, "A staff room must keep at least one participant");
+    }
     const del = await client.query("UPDATE chat_participants SET added_by = NULL WHERE conversation_id = $1 AND user_id = $2 AND added_by IS NOT NULL RETURNING user_id", [id, userId]);
     const changed = del.rowCount > 0;
     if (changed) {

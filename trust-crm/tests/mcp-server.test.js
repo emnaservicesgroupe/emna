@@ -3,13 +3,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawn, spawnSync } = require("child_process");
+const net = require("net");
 const path = require("path");
 const jwt = require("jsonwebtoken");
 const { z } = require("zod");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "mcp-server-test-secret";
-for (const k of ["MCP_ENABLED", "MCP_RATE_PER_MIN", "MCP_MAX_CONCURRENT", "MCP_REQUEST_TIMEOUT_MS", "MCP_TOOL_TIMEOUT_MS"]) delete process.env[k];
+for (const k of ["MCP_ENABLED", "MCP_RATE_PER_MIN", "MCP_MAX_CONCURRENT", "MCP_MAX_CONCURRENT_PER_TOKEN", "MCP_BODY_TIMEOUT_MS", "MCP_AUTH_FAIL_PER_MIN", "MCP_USER_RATE_PER_MIN", "MCP_REQUEST_TIMEOUT_MS", "MCP_TOOL_TIMEOUT_MS"]) delete process.env[k];
 
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StreamableHTTPClientTransport } = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
@@ -17,7 +18,7 @@ const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio
 const { createTestDb, loadApp } = require("./helpers/db");
 const tokens = require("../modules/mcp/tokens");
 const { createRateLimiter, createFailureThrottle } = require("../modules/mcp/limits");
-const { argsDigest, INSTRUCTIONS } = require("../modules/mcp/server");
+const { argsDigest, canonicalJson, INSTRUCTIONS } = require("../modules/mcp/server");
 const pkg = require("../package.json");
 
 const TOOL_NAMES = ["finance_summary", "get_candidate_overview", "list_applications_needing_staff", "list_employer_requests", "list_leads", "my_leave_and_attendance", "platform_status", "search_candidates"];
@@ -230,9 +231,9 @@ test("authentication: missing, malformed, unknown, expired, revoked, deactivated
     assert.deepEqual(JSON.parse([...bodies][0]), { error: "Unauthorized" });
     // A JWT is refused even with the PAT prefix trick or as a bare header.
     assert.equal((await w.post(null, ping, { headers: { authorization: jwtOfOwner } })).status, 401);
-    // The PAT of a deactivated owner works again once reactivated: nothing about the token itself was changed.
+    // Review round 1: deactivation revoked the token; reactivating the owner does not revive it (a leaked token stays dead).
     await w.q("UPDATE users SET is_active = true WHERE id = $1", [deactivated.user.id]);
-    assert.equal((await w.post(deactivated.secret, ping)).status, 200);
+    assert.equal((await w.post(deactivated.secret, ping)).status, 401);
   });
 });
 
@@ -352,7 +353,7 @@ test("per-token rate limit: 429 + Retry-After after N calls, other tokens unaffe
     assert.equal((await w.call(a.secret, "platform_status")).status, 429, "still limited");
     assert.equal(w.route.__test.inflight(), 0);
   });
-  await enabled({ MCP_RATE_PER_MIN: "5", MCP_MAX_CONCURRENT: "50" }, async (w) => {
+  await enabled({ MCP_RATE_PER_MIN: "5", MCP_MAX_CONCURRENT: "50", MCP_MAX_CONCURRENT_PER_TOKEN: "50" }, async (w) => {
     const c = await w.login();
     const results = await Promise.all(Array.from({ length: 14 }, (_, i) => w.call(c.secret, "platform_status", {}, i)));
     const statuses = results.map((r) => r.status);
@@ -373,7 +374,7 @@ test("per-token rate limit: 429 + Retry-After after N calls, other tokens unaffe
 });
 
 test("global concurrency cap: the call over MCP_MAX_CONCURRENT gets 503 + Retry-After; slots are released", async () => {
-  await enabled({ MCP_MAX_CONCURRENT: "2", MCP_RATE_PER_MIN: "1000" }, async (w) => {
+  await enabled({ MCP_MAX_CONCURRENT: "2", MCP_MAX_CONCURRENT_PER_TOKEN: "10", MCP_RATE_PER_MIN: "1000" }, async (w) => {
     let release;
     const gate = new Promise((r) => (release = r));
     w.route.__test.setTools([customTool("slow", async () => (await gate, { done: true })), customTool("fast", async () => ({ ok: 1 }))]);
@@ -597,9 +598,11 @@ test("demotion and deactivation take effect on the very next call", async () => 
       await w.q("UPDATE users SET role = 'Receptionist' WHERE id = $1", [user.id]); // no mcp:use: the token is dead
       await assert.rejects(() => client.callTool({ name: "platform_status", arguments: {} }), /401|Unauthorized|HTTP/i);
       await w.q("UPDATE users SET role = 'Admin' WHERE id = $1", [user.id]);
-      assert.equal((await w.call(secret, "platform_status")).status, 200, "restored role restores access");
+      assert.equal((await w.call(secret, "platform_status")).status, 401, "review round 1: the demotion revoked the token; the restored role does not revive it");
+      const fresh = await tokens.createToken({ id: user.id, role: "Admin" }, { name: "after demotion" });
+      assert.equal((await w.call(fresh.secret, "platform_status")).status, 200, "a new token works");
       await w.q("UPDATE users SET is_active = false WHERE id = $1", [user.id]);
-      assert.equal((await w.call(secret, "platform_status")).status, 401, "deactivated owner");
+      assert.equal((await w.call(fresh.secret, "platform_status")).status, 401, "deactivated owner");
     } finally {
       await client.close().catch(() => {});
     }
@@ -732,4 +735,255 @@ test("stdio launcher: a revoked token or a disabled server is reported plainly (
   assert.notEqual(r.code, 0);
   assert.match(r.err, /refused the token/);
   for (const s of [secret, secret.slice(9)]) assert.ok(!r.out.includes(s) && !r.err.includes(s), "no token in output");
+});
+
+// ================================================================ review round 1
+const nest = (n, inner = 0) => {
+  let v = inner;
+  for (let i = 0; i < n; i++) v = [v];
+  return v;
+};
+/** A raw JSON string nested n arrays deep (built as text: JSON.stringify of that structure would itself recurse). */
+const nestedText = (n) => "[".repeat(n) + "0" + "]".repeat(n);
+const callRaw = (name, argsText, id = 1) => `{"jsonrpc":"2.0","id":${id},"method":"tools/call","params":{"name":"${name}","arguments":${argsText}}}`;
+
+test("review round 1 (HIGH): canonicalJson / argsDigest are depth- and size-limited and never throw", () => {
+  const deep = nest(100000); // far beyond the call stack of a recursive walk
+  assert.doesNotThrow(() => canonicalJson(deep));
+  assert.doesNotThrow(() => argsDigest({ a: deep }));
+  const wide = Array.from({ length: 100000 }, (_, i) => i);
+  assert.doesNotThrow(() => argsDigest({ a: wide }));
+  const obj = {};
+  for (let i = 0; i < 100000; i++) obj["k" + i] = i;
+  assert.doesNotThrow(() => argsDigest(obj));
+  // past the limits the digest is one fixed marker digest (same for every oversized argument), still 16 hex characters
+  const d = argsDigest({ a: deep });
+  assert.match(d, /^[0-9a-f]{16}$/);
+  assert.equal(argsDigest({ other: nest(40) }), d);
+  assert.equal(argsDigest(wide), d);
+  assert.equal(argsDigest(obj), d);
+  // within the limits nothing changes: order independent, distinct for distinct arguments
+  assert.equal(argsDigest({ a: 1, b: [1, { c: 2, d: 3 }] }), argsDigest({ b: [1, { d: 3, c: 2 }], a: 1 }));
+  assert.notEqual(argsDigest({ a: 1 }), argsDigest({ a: 2 }));
+  assert.notEqual(argsDigest({ a: nest(31) }), d, "depth 32 (the object + 31 arrays) is still within the limit");
+  assert.equal(argsDigest({ a: nest(32) }), d, "depth 33 is past it");
+  assert.equal(canonicalJson({ b: [1, "x"], a: null }), '{"a":null,"b":[1,"x"]}');
+  assert.equal(argsDigest(undefined), argsDigest({}));
+});
+
+test("review round 1 (HIGH): deeply nested or huge arguments are refused with a 400 JSON-RPC error, one audit row, and the server stays alive", async () => {
+  await enabled({ MCP_RATE_PER_MIN: "1000", MCP_USER_RATE_PER_MIN: "1000" }, async (w) => {
+    const { secret, user } = await w.login("Admin");
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      const hostile = [
+        ["3000-deep array (6 KB)", `{"x":${nestedText(3000)}}`],
+        ["30000-element wide array", '{"x":[' + "0,".repeat(29999) + "0]}"],
+        ["deep object", '{"a":'.repeat(2000) + "0" + "}".repeat(2000)],
+        ["depth 13 (one over the limit)", `{"x":${nestedText(12)}}`],
+      ];
+      for (const [label, args] of hostile) {
+        const before = await w.lastAuditId();
+        const r = await w.post(secret, undefined, { raw: callRaw("search_candidates", args) });
+        assert.equal(r.status, 400, `${label}: ${r.text.slice(0, 120)}`);
+        assert.equal(r.json.jsonrpc, "2.0", label);
+        assert.equal(r.json.id, 1);
+        assert.equal(typeof r.json.error.code, "number");
+        assert.ok(!r.text.includes("0,0,0"), "nothing of the arguments is echoed");
+        const rows = await w.audits(before);
+        assert.equal(rows.length, 1, `${label}: exactly one audit row`);
+        assert.equal(rows[0].new_data.outcome, "error");
+        assert.equal(rows[0].new_data.tool, "search_candidates");
+        assert.match(rows[0].new_data.args_digest, /^[0-9a-f]{16}$/);
+        assert.equal(rows[0].user_id, user.id);
+        assert.equal(JSON.stringify(rows[0]).includes("0,0,0"), false);
+        // the process is alive and the very next request works
+        const ok = await w.call(secret, "platform_status", {}, 2);
+        assert.equal(ok.status, 200, label);
+      }
+      // an unknown tool name with deep arguments is audited as "(unknown)" and still never reaches the SDK
+      const before = await w.lastAuditId();
+      const unk = await w.post(secret, undefined, { raw: callRaw("no_such_tool", `{"x":${nestedText(3000)}}`) });
+      assert.equal(unk.status, 400);
+      const unkRows = await w.audits(before);
+      assert.equal(unkRows.length, 1);
+      assert.equal(unkRows[0].new_data.tool, "(unknown)");
+      // a non-string id does not break the error answer
+      const weird = await w.post(secret, undefined, { raw: `{"jsonrpc":"2.0","id":{"a":1},"method":"tools/call","params":{"name":"platform_status","arguments":{"x":${nestedText(3000)}}}}` });
+      assert.equal(weird.status, 400);
+      assert.equal(weird.json.id, null);
+      // boundary: arguments {x: 11 arrays} is depth 12 and goes through (the strict schema then answers "invalid arguments" as an ordinary tool error)
+      const okDepth = await w.post(secret, undefined, { raw: callRaw("search_candidates", `{"x":${nestedText(11)}}`) });
+      assert.equal(okDepth.status, 200);
+      assert.equal(okDepth.json.result.isError, true);
+      const tooDeep = await w.post(secret, undefined, { raw: callRaw("search_candidates", `{"x":${nestedText(12)}}`) });
+      assert.equal(tooDeep.status, 400);
+      // other methods without params.arguments are untouched
+      assert.equal((await w.post(secret, { jsonrpc: "2.0", id: 9, method: "tools/list" })).status, 200);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual(uncaught, [], "no uncaught exception anywhere");
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+});
+
+test("review round 1 (HIGH): the close handler cannot crash the process even when the route gate is widened (digest limit is the second line of defence)", async () => {
+  await enabled({ MCP_RATE_PER_MIN: "1000", MCP_USER_RATE_PER_MIN: "1000" }, async (w) => {
+    const { secret } = await w.login("Admin");
+    const uncaught = [];
+    const onUncaught = (e) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    try {
+      // With the gate off the SDK rejects the call (unknown argument) before our handler, so the route's close handler digests the 3000-deep arguments.
+      w.route.__test.setArgLimits({ depth: 1e9, nodes: 1e9 });
+      const before = await w.lastAuditId();
+      const r = await w.post(secret, undefined, { raw: callRaw("search_candidates", `{"x":${nestedText(3000)}}`) });
+      assert.ok([200, 400].includes(r.status), String(r.status));
+      await until(async () => (await w.audits(before)).length >= 1);
+      assert.equal((await w.audits(before)).length, 1, "the call is still audited exactly once");
+      await new Promise((r2) => setTimeout(r2, 100));
+      assert.deepEqual(uncaught, []);
+      assert.equal((await w.call(secret, "platform_status", {}, 2)).status, 200);
+    } finally {
+      w.route.__test.setArgLimits(null);
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+});
+
+/** Opens a raw socket, sends the request head (+ optional partial body) and resolves {status, text, close} once a status line arrives. */
+function rawPost(w, secret, { contentLength = 200, body = "" } = {}) {
+  const port = new URL(w.base).port;
+  const sock = net.connect(Number(port), "127.0.0.1");
+  let buf = "";
+  const done = new Promise((resolve) => {
+    sock.on("data", (d) => {
+      buf += d.toString("utf8");
+      const m = /^HTTP\/1\.1 (\d{3})/.exec(buf);
+      if (m && buf.includes("\r\n\r\n")) resolve({ status: Number(m[1]), text: buf });
+    });
+    sock.on("close", () => resolve({ status: 0, text: buf }));
+    sock.on("error", () => resolve({ status: 0, text: buf }));
+  });
+  sock.write(`POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${secret}\r\nContent-Type: application/json\r\nAccept: ${ACCEPT}\r\nContent-Length: ${contentLength}\r\n\r\n${body}`);
+  return { sock, done };
+}
+
+test("review round 1 (MEDIUM): stalled bodies from one token are capped per token (429), cannot starve other tokens (no 503), and are cut at the body timeout (408) freeing the slot", async () => {
+  await enabled({ MCP_RATE_PER_MIN: "1000", MCP_USER_RATE_PER_MIN: "1000", MCP_MAX_CONCURRENT: "8", MCP_BODY_TIMEOUT_MS: "400" }, async (w) => {
+    const a = await w.login("Admin");
+    const b = await w.login("Admin");
+    const stalled = Array.from({ length: 9 }, () => rawPost(w, a.secret));
+    try {
+      // 2 hold a slot (the per-token cap), the other 7 are refused at once
+      await new Promise((r) => setTimeout(r, 150)); // the 7 refused ones have been answered, the 2 admitted ones are stalled
+      assert.equal(w.route.__test.inflight() <= 2, true, `inflight ${w.route.__test.inflight()}`);
+      // another token is not affected while the stalled ones are still being held (the timeout is 400 ms: be quick)
+      const other = await w.call(b.secret, "platform_status", {}, 1);
+      assert.equal(other.status, 200, "other tokens are not starved");
+      const results = await Promise.all(stalled.map((s) => s.done));
+      const statuses = results.map((r) => r.status).sort();
+      assert.equal(statuses.filter((s) => s === 429).length, 7, `statuses ${statuses}`);
+      assert.equal(statuses.filter((s) => s === 408).length, 2, `statuses ${statuses}`);
+      assert.ok(!statuses.includes(503), "never a 503 for another client's slot exhaustion");
+      assert.match(results.find((r) => r.status === 429).text, /Retry-After: 1/i);
+      await until(() => w.route.__test.inflight() === 0);
+      assert.equal((await w.call(a.secret, "platform_status", {}, 2)).status, 200, "the same token works again once the stalled ones are cut");
+    } finally {
+      for (const s of stalled) s.sock.destroy();
+    }
+  });
+});
+
+test("review round 1 (MEDIUM): MCP_MAX_CONCURRENT_PER_TOKEN is configurable; a body that arrives in time is unaffected by the body timeout", async () => {
+  await enabled({ MCP_RATE_PER_MIN: "1000", MCP_USER_RATE_PER_MIN: "1000", MCP_MAX_CONCURRENT_PER_TOKEN: "1", MCP_BODY_TIMEOUT_MS: "600" }, async (w) => {
+    const a = await w.login("Admin");
+    const s1 = rawPost(w, a.secret);
+    await until(() => w.route.__test.inflight() === 1);
+    const refused = await w.call(a.secret, "platform_status", {}, 1);
+    assert.equal(refused.status, 429);
+    assert.deepEqual(refused.json, { error: "Too many concurrent requests" });
+    assert.ok(refused.headers.get("retry-after"));
+    s1.sock.destroy();
+    await until(() => w.route.__test.inflight() === 0);
+    assert.equal((await w.call(a.secret, "platform_status", {}, 2)).status, 200);
+    // a slow-but-in-time body: head first, body 150 ms later (timeout 600 ms)
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list" });
+    const port = new URL(w.base).port;
+    const sock = net.connect(Number(port), "127.0.0.1");
+    let buf = "";
+    const res = new Promise((resolve) => {
+      sock.on("data", (d) => {
+        buf += d.toString();
+        if (/\r\n\r\n/.test(buf) && /"tools"/.test(buf)) resolve(buf);
+      });
+      sock.on("close", () => resolve(buf));
+    });
+    sock.write(`POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ${a.secret}\r\nContent-Type: application/json\r\nAccept: ${ACCEPT}\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n`);
+    await new Promise((r) => setTimeout(r, 150));
+    sock.write(body);
+    assert.match(await res, /^HTTP\/1\.1 200/);
+    sock.destroy();
+  });
+});
+
+test("review round 1 (LOW): failed authentications from one client are throttled BEFORE the database lookup (429 + Retry-After), per client", async () => {
+  await enabled({ MCP_AUTH_FAIL_PER_MIN: "3", MCP_RATE_PER_MIN: "1000", MCP_USER_RATE_PER_MIN: "1000" }, async (w) => {
+    const { secret } = await w.login("Admin");
+    const real = tokens.authenticate;
+    let lookups = 0;
+    tokens.authenticate = (...a) => {
+      lookups += 1;
+      return real(...a);
+    };
+    try {
+      const bad = "vita_pat_" + "Q".repeat(43);
+      for (let i = 0; i < 3; i++) assert.equal((await w.post(bad, { jsonrpc: "2.0", id: i, method: "tools/list" })).status, 401);
+      assert.equal(lookups, 3);
+      const blocked = await w.post(bad, { jsonrpc: "2.0", id: 4, method: "tools/list" });
+      assert.equal(blocked.status, 429);
+      assert.deepEqual(blocked.json, { error: "Too many failed authentication attempts" });
+      assert.ok(Number(blocked.headers.get("retry-after")) >= 1);
+      const valid = await w.post(secret, { jsonrpc: "2.0", id: 5, method: "tools/list" });
+      assert.equal(valid.status, 429, "once over the limit the client is refused before any lookup, even with a valid token");
+      assert.equal(lookups, 3, "no database lookup for a throttled client");
+      // a request without any credential is a failure too, and the disabled switch is evaluated first
+      w.route.__test.reset();
+      assert.equal((await w.post(secret, { jsonrpc: "2.0", id: 6, method: "tools/list" })).status, 200, "the window resets");
+      // successes never count as failures
+      for (let i = 0; i < 6; i++) assert.equal((await w.post(secret, { jsonrpc: "2.0", id: 10 + i, method: "tools/list" })).status, 200);
+    } finally {
+      tokens.authenticate = real;
+    }
+  });
+});
+
+test("review round 1 (LOW): per-user aggregate limit across tokens (MCP_USER_RATE_PER_MIN), other users unaffected", async () => {
+  await enabled({ MCP_USER_RATE_PER_MIN: "3", MCP_RATE_PER_MIN: "1000" }, async (w) => {
+    const u = await w.mk("Admin");
+    const t1 = await tokens.createToken(u, { name: "one" });
+    const t2 = await tokens.createToken(u, { name: "two" });
+    const other = await w.login("Admin");
+    assert.equal((await w.call(t1.secret, "platform_status", {}, 1)).status, 200);
+    assert.equal((await w.call(t1.secret, "platform_status", {}, 2)).status, 200);
+    assert.equal((await w.call(t2.secret, "platform_status", {}, 3)).status, 200);
+    const over = await w.call(t2.secret, "platform_status", {}, 4);
+    assert.equal(over.status, 429);
+    assert.ok(Number(over.headers.get("retry-after")) >= 1);
+    assert.equal((await w.call(t1.secret, "platform_status", {}, 5)).status, 429, "the other token of the same user shares the budget");
+    assert.equal((await w.call(other.secret, "platform_status", {}, 6)).status, 200, "another user is unaffected");
+  });
+});
+
+test("review round 1 (LOW): limiter helpers - blocked() does not record, counters stay bounded", () => {
+  const l = createRateLimiter();
+  assert.equal(l.blocked("ip", 2, 1000), 0);
+  l.hit("ip", 100, 1000);
+  l.hit("ip", 100, 1001);
+  assert.ok(l.blocked("ip", 2, 1002) >= 1);
+  assert.equal(l.blocked("ip", 3, 1002), 0, "below the limit");
+  assert.equal(l.blocked("ip", 2, 1000 + 61000), 0, "the window slides");
 });

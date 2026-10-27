@@ -10,9 +10,12 @@ const DEFAULT_MAX = 500;
 const CONTROLS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 // Bidi embedding / override / isolate controls.
 const BIDI = /[‪-‮⁦-⁩]/g;
-// Zero-width and invisible format characters EXCEPT ZWNJ (U+200C) and ZWJ (U+200D), which real scripts and emoji need:
-// ZWSP, word joiner and invisible operators, BOM / ZWNBSP, Mongolian vowel separator, interlinear annotation, object replacement.
-const INVISIBLE = /[​⁠-⁤﻿᠎￹-￼]/g;
+// ALL Unicode format characters (\p{Cf}: zero-width space, word joiner, invisible operators, BOM, Mongolian vowel separator, soft hyphen,
+// Arabic letter mark, interlinear annotation, bidi marks, ...) EXCEPT ZWNJ (U+200C) and ZWJ (U+200D), which real scripts and emoji need;
+// plus the default-ignorable characters outside Cf that render as nothing: combining grapheme joiner U+034F, Hangul fillers
+// U+115F-1160 / U+3164 / U+FFA0, Khmer inherent vowels U+17B4-17B5, Mongolian free variation selectors U+180B-180F, variation selectors
+// U+FE00-FE0F and U+E0100-E01EF (tag characters U+E0000-E007F are Cf and also removed by TAGS).
+const INVISIBLE = /(?![\u200C\u200D])\p{Cf}|[\u034F\u115F\u1160\u17B4\u17B5\u180B-\u180F\u3164\uFE00-\uFE0F\uFFA0\u{E0100}-\u{E01EF}]/gu;
 // Unicode "tag" characters (U+E0000-E007F) can smuggle ASCII invisibly.
 const TAGS = /[\u{E0000}-\u{E007F}]/gu;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;

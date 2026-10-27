@@ -1189,3 +1189,26 @@ test("messages are immutable: no API edits or deletes exist, the database refuse
   await assert.rejects(w.q("UPDATE chat_messages SET body = 'x' WHERE id = $1", [mid]), /immutable/);
   await assert.rejects(w.q("DELETE FROM chat_messages WHERE id = $1", [mid]), /immutable/);
 });
+
+test("review round 1: the last remaining participant of a staff room cannot be removed (409), nor can you remove yourself out of an empty room", async () => {
+  const f = await fx();
+  const { w } = f;
+  const del = (token, cid, uid) => w.http("DELETE", `/chat/conversations/${cid}/participants/${uid}`, token);
+  const room = (await mkRoom(w, w.T.mgr, "Two people", [w.id.agent1])).body;
+  const count = async () => (await w.q("SELECT count(*)::int AS n FROM chat_participants WHERE conversation_id = $1 AND added_by IS NOT NULL", [room.id])).rows[0].n;
+  assert.equal(await count(), 2);
+  assert.equal((await del(w.T.mgr, room.id, w.id.agent1)).body.changed, true, "one of two may go");
+  assert.equal(await count(), 1);
+  const last = await del(w.T.mgr, room.id, w.id.mgr); // the moderator removing himself, the last one left
+  assert.equal(last.status, 409, last.text);
+  assert.equal(await count(), 1, "nothing changed");
+  assert.equal((await w.http("GET", `/chat/conversations/${room.id}/messages`, w.T.mgr)).status, 200, "the room is still reachable");
+  // removing somebody who is not a participant stays an idempotent no-op, even in a one-person room
+  const noop = await del(w.T.mgr, room.id, w.id.agent2);
+  assert.equal(noop.status, 200);
+  assert.equal(noop.body.changed, false);
+  // adding a second person makes the removal possible again; a candidate thread is unaffected by the rule
+  assert.equal((await w.http("POST", `/chat/conversations/${room.id}/participants`, w.T.mgr, { user_id: w.id.agent2 })).status, 201);
+  assert.equal((await del(w.T.mgr, room.id, w.id.mgr)).body.changed, true);
+  assert.equal(await count(), 1);
+});

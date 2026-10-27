@@ -10,7 +10,7 @@
 //   B  the SDK client lists the eight read-only tools and calls them: Admin sees every candidate, Manager only his assigned ones, and
 //      another's candidate answers exactly like a nonexistent id; the lead whose message holds an injection string comes back wrapped
 //      (untrusted_content) with the text intact; finance_summary works for Manager
-//   C  authority is live: demoting the Manager to Receptionist in the DB makes the very next call 401, promoting back restores it
+//   C  authority is live: demoting the Manager to Receptionist in the DB makes the very next call 401 and REVOKES his tokens: promoting back does not revive them
 //   D  token lifecycle: revoke -> 401 on the next call (idempotent), expired token -> 401, deactivated owner -> 401
 //   E  separation of credentials: a PAT is refused by every other API (401), a normal JWT is refused by /mcp (401)
 //   F  MCP_ENABLED unset -> /mcp answers 404 while token management still works; rate limit -> 429 with Retry-After
@@ -39,6 +39,8 @@ process.env.MAIL_FROM = "applications@vita.test.invalid";
 process.env.SITE_IP_SALT = "mcp-e2e-salt";
 process.env.MCP_ENABLED = "true";
 process.env.MCP_RATE_PER_MIN = "1000";
+process.env.MCP_USER_RATE_PER_MIN = "100000";
+process.env.MCP_AUTH_FAIL_PER_MIN = "100000";
 for (const k of ["CLAMAV_HOST", "MAIL_REAL_SEND", "MCP_MAX_CONCURRENT", "MCP_REQUEST_TIMEOUT_MS", "MCP_TOOL_TIMEOUT_MS", "MCP_TOKEN_DEFAULT_DAYS"]) delete process.env[k];
 
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
@@ -307,7 +309,7 @@ test("B4: finance_summary works for Manager (finance:read) and Admin; employer r
 });
 
 // ================================================================ C  authority is live
-test("C1: demoting the Manager to Receptionist mid-session makes the next call 401; promoting him back restores it", async () => {
+test("C1: demoting the Manager to Receptionist mid-session makes the next call 401 and revokes his tokens; promoting him back does not revive them", async () => {
   const client = await connect(S.mgr.secret);
   try {
     okData(await client.callTool({ name: "platform_status", arguments: {} }));
@@ -317,7 +319,11 @@ test("C1: demoting the Manager to Receptionist mid-session makes the next call 4
     assert.equal((await call(S.mgr.secret, "platform_status")).status, 401);
     await w.q("UPDATE users SET role = 'Manager' WHERE id = $1", [w.users.mgr]);
     const again = await call(S.mgr.secret, "platform_status");
-    assert.equal(again.status, 200, "the token is still valid once the role is back");
+    assert.equal(again.status, 401, "review round 1: the token was revoked by the demotion; a leaked one is not revived by promoting back");
+    const row = await w.one("SELECT revoked_at, revoked_by FROM api_tokens WHERE id = $1", [S.mgr.id]);
+    assert.ok(row.revoked_at && row.revoked_by === null);
+    S.mgr = await mint("mgr", "manager desktop 2"); // a fresh token for the rest of the journey
+    assert.equal((await call(S.mgr.secret, "platform_status")).status, 200);
   } finally {
     await client.close().catch(() => {});
     await w.q("UPDATE users SET role = 'Manager' WHERE id = $1", [w.users.mgr]);
@@ -358,8 +364,9 @@ test("D1: revoking a token gives 401 on the next call (idempotent); an expired t
   await w.q("UPDATE users SET is_active = false WHERE id = $1", [w.users.mgr]);
   assert.equal((await call(off.secret, "platform_status")).status, 401, "deactivated owner");
   await w.q("UPDATE users SET is_active = true WHERE id = $1", [w.users.mgr]);
-  assert.equal((await call(off.secret, "platform_status")).status, 200, "reactivated");
-  await w.http("DELETE", `/mcp-tokens/${off.id}`, w.tokens.mgr);
+  assert.equal((await call(off.secret, "platform_status")).status, 401, "reactivated: the token was revoked on deactivation and stays dead");
+  S.mgr = await mint("mgr", "manager desktop 3");
+  assert.equal((await call(S.mgr.secret, "platform_status")).status, 200);
 });
 
 // ================================================================ E  credentials are not interchangeable

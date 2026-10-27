@@ -201,7 +201,9 @@ async function listEmployerRequests(user, args) {
 
 async function listApplicationsNeedingStaff(user, args) {
   const limit = args.limit || 10;
-  const attention = ((await dashboard({ user, query: {} })).attention || []).slice(0, limit);
+  // Tasks bound to no candidate (unmatched replies, mailbox problems) are on the staff dashboard but are not "a candidate the caller may see":
+  // drop them BEFORE applying the limit.
+  const attention = ((await dashboard({ user, query: {} })).attention || []).filter((a) => Number.isSafeInteger(a.candidateId)).slice(0, limit);
   const ids = [...new Set(attention.map((a) => a.candidateId).filter((x) => Number.isSafeInteger(x)))];
   const names = new Map();
   if (ids.length) {

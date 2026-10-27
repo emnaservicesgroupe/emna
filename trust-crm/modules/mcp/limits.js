@@ -23,6 +23,14 @@ function createRateLimiter(windowMs = WINDOW_MS) {
       arr.push(now);
       return { ok: true, retryAfterSec: 0 };
     },
+    /** Read-only check: 0 when fewer than `limit` hits are in the window (nothing is recorded), else the seconds until one expires. */
+    blocked(key, limit, now = Date.now()) {
+      const arr = hits.get(key);
+      if (!arr) return 0;
+      while (arr.length && arr[0] <= now - windowMs) arr.shift();
+      if (arr.length < limit) return 0;
+      return Math.max(1, Math.ceil((arr[0] + windowMs - now) / 1000));
+    },
     prune(now = Date.now()) {
       for (const [k, arr] of hits) if (!arr.length || arr[arr.length - 1] <= now - windowMs) hits.delete(k);
     },

@@ -19,11 +19,41 @@ const INSTRUCTIONS = [
 
 const ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
-/** Order-independent JSON of plain data (keys sorted at every level). */
-function canonicalJson(v) {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(",")}}`;
+// Limits of the digest walk (a second line of defence: routes/mcp.js already refuses arguments nested deeper than 12 levels or holding
+// more than 5000 values before anything else runs). Past either limit the canonical form is one fixed marker, so an absurd argument can
+// never exhaust the call stack (RangeError) or the CPU of the audit path.
+const CANON_MAX_DEPTH = 32;
+const CANON_MAX_NODES = 5000;
+const TOO_COMPLEX = "\u0000too-complex";
+
+class TooComplex extends Error {}
+
+function canon(v, depth, st) {
+  st.nodes += 1;
+  if (st.nodes > CANON_MAX_NODES) throw new TooComplex();
+  if (Array.isArray(v)) {
+    if (depth >= CANON_MAX_DEPTH) throw new TooComplex();
+    st.nodes += v.length; // counted before the elements are walked: a huge flat array stops here
+    if (st.nodes > CANON_MAX_NODES) throw new TooComplex();
+    return `[${v.map((x) => canon(x, depth + 1, st)).join(",")}]`;
+  }
+  if (v && typeof v === "object") {
+    if (depth >= CANON_MAX_DEPTH) throw new TooComplex();
+    const keys = Object.keys(v);
+    st.nodes += keys.length;
+    if (st.nodes > CANON_MAX_NODES) throw new TooComplex();
+    return `{${keys.sort().map((k) => `${JSON.stringify(k)}:${canon(v[k], depth + 1, st)}`).join(",")}}`;
+  }
   return JSON.stringify(v === undefined ? null : v);
+}
+
+/** Order-independent JSON of plain data (keys sorted at every level), or the fixed marker when the data is deeper than 32 levels / holds more than 5000 values. Never throws. */
+function canonicalJson(v) {
+  try {
+    return canon(v, 0, { nodes: 0 });
+  } catch {
+    return TOO_COMPLEX;
+  }
 }
 
 /**

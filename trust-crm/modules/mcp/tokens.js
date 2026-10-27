@@ -78,14 +78,14 @@ async function createToken(user, { name, days } = {}) {
   const prefix = random.slice(0, 8);
   return inTx(async (client) => {
     // Serialise concurrent creations of the same user so the cap of 5 cannot be raced.
-    const owner = await client.query("SELECT is_active FROM users WHERE id = $1 FOR UPDATE", [user.id]);
+    const owner = await client.query("SELECT is_active, token_version FROM users WHERE id = $1 FOR UPDATE", [user.id]);
     if (owner.rowCount === 0 || !owner.rows[0].is_active) throw new HttpError(401, "Session expired");
     const active = await client.query("SELECT count(*)::int AS n FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()", [user.id]);
     if (active.rows[0].n >= MAX_ACTIVE) throw new HttpError(409, `At most ${MAX_ACTIVE} active tokens per user: revoke one first`);
     const ins = await client.query(
-      `INSERT INTO api_tokens (user_id, name, prefix, token_hash, expires_at)
-       VALUES ($1, $2, $3, $4, now() + ($5::int * interval '1 day')) RETURNING id, expires_at`,
-      [user.id, n, prefix, sha256hex(secret), d]
+      `INSERT INTO api_tokens (user_id, name, prefix, token_hash, expires_at, owner_token_version)
+       VALUES ($1, $2, $3, $4, now() + ($5::int * interval '1 day'), $6) RETURNING id, expires_at`,
+      [user.id, n, prefix, sha256hex(secret), d, owner.rows[0].token_version]
     );
     const row = ins.rows[0];
     await logAudit({ userId: user.id, action: "mcp.token.create", tableName: "api_tokens", recordId: String(row.id), newData: { name: n, prefix, days: d, expires_at: row.expires_at }, client });
@@ -159,8 +159,8 @@ function ipHash(ip) {
 }
 
 /**
- * Secret -> {user, token}, or null. The CURRENT user row is loaded: it must be active and still hold mcp:use (demotion and deactivation
- * apply at once). One generic null for every failure (malformed, unknown, expired, revoked, deactivated, demoted): the caller cannot tell which.
+ * Secret -> {user, token}, or null. The CURRENT user row is loaded: it must be active, still hold mcp:use and have the token_version the token was created under (demotion,
+ * deactivation and session revocation apply at once). One generic null for every failure (malformed, unknown, expired, revoked, deactivated, demoted): the caller cannot tell which.
  * Never throws for a bad credential and never logs it.
  */
 async function authenticate(secret, { ip } = {}) {
@@ -168,14 +168,16 @@ async function authenticate(secret, { ip } = {}) {
   const hash = sha256hex(secret);
   const r = await db.query(
     `SELECT t.id, t.name, t.prefix, t.scopes, t.token_hash, t.expires_at, t.revoked_at, (t.expires_at > now()) AS live,
-            u.id AS uid, u.full_name, u.role, u.is_active
+            u.id AS uid, u.full_name, u.role, u.is_active, (u.token_version = t.owner_token_version) AS same_version
        FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = $1`,
     [hash]
   );
   const row = r.rows[0];
   if (!row) return null;
   if (!hashEquals(hash, row.token_hash)) return null;
-  if (row.revoked_at || !row.live || !row.is_active || !canUseMcp(row.role)) return null;
+  // same_version: any session revocation (password change, "log out everywhere", suspension) bumps users.token_version and so kills the owner's tokens too.
+  // Deactivation / loss of mcp:use additionally revokes the rows (trigger of migration 024), so reactivation or promotion cannot revive a leaked token.
+  if (row.revoked_at || !row.live || !row.is_active || !row.same_version || !canUseMcp(row.role)) return null;
   // last_used_at moves at most once per minute (one cheap conditional UPDATE, no write amplification on a busy token).
   await db.query(
     `UPDATE api_tokens SET last_used_at = now(), last_used_ip_hash = COALESCE($2, last_used_ip_hash)

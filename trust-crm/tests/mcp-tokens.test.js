@@ -19,6 +19,7 @@ const tokens = require("../modules/mcp/tokens");
 const mcpAuth = require("../modules/mcp/auth");
 
 const ROOT = path.join(__dirname, "..");
+const SQL024 = () => fs.readFileSync(path.join(ROOT, "sql", "migrations", "024_mcp_hardening.sql"), "utf8");
 const SQL023 = () => fs.readFileSync(path.join(ROOT, "sql", "migrations", "023_mcp_tokens.sql"), "utf8");
 const ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Accountant", "HR", "Agent"];
 const ALLOWED = new Set(["SuperAdmin", "Admin", "Manager"]);
@@ -281,15 +282,21 @@ test("expired, revoked, deactivated owner and demoted owner are refused immediat
   await w.q("UPDATE users SET is_active=false WHERE id=$1", [u3.id]);
   assert.equal(await tokens.authenticate(s), null, "deactivated");
   await w.q("UPDATE users SET is_active=true WHERE id=$1", [u3.id]);
-  assert.ok(await tokens.authenticate(s), "reactivated owner works again (token itself intact)");
+  assert.equal(await tokens.authenticate(s), null, "review round 1: reactivation does not revive a token revoked by the deactivation");
+  s = await fresh(u3);
+  assert.ok(await tokens.authenticate(s), "a NEW token works for the reactivated owner");
   // demoted owner: role without mcp:use
   for (const role of ["Agent", "HR", "Accountant", "Receptionist"]) {
     await w.q("UPDATE users SET role=$2 WHERE id=$1", [u3.id, role]);
     assert.equal(await tokens.authenticate(s), null, `demoted to ${role}`);
   }
   await w.q("UPDATE users SET role='Manager' WHERE id=$1", [u3.id]);
+  assert.equal(await tokens.authenticate(s), null, "promoting back does not revive it");
+  s = await fresh({ id: u3.id, role: "Manager" });
   const back = await tokens.authenticate(s);
   assert.equal(back.user.role, "Manager", "the CURRENT role is loaded, not the one at creation");
+  await w.q("UPDATE users SET role='Admin' WHERE id=$1", [u3.id]);
+  assert.equal((await tokens.authenticate(s)).user.role, "Admin", "a change between roles that all hold mcp:use keeps the token");
   // deleted owner: token gone with the user
   await w.q("DELETE FROM users WHERE id=$1", [u3.id]);
   assert.equal(await tokens.authenticate(s), null);
@@ -567,4 +574,96 @@ test("GET /mcp-tokens/usage: limit is 1..50 (default 50), bad limits are 400, ot
   for (const role of ["Receptionist", "Agent", "HR", "Accountant"]) assert.equal((await w.http("GET", "/mcp-tokens/usage", (await w.mk(role)).token)).status, 403, role);
   assert.equal((await w.http("GET", "/mcp-tokens/usage", null)).status, 401);
   assert.equal((await w.http("GET", "/mcp-tokens/usage", `vita_pat_${"A".repeat(43)}`)).status, 401);
+});
+
+// ------------------------------------------------------------------------------------------------ review round 1: lifecycle binding
+test("review round 1: migration 024 is idempotent, registered, backfills owner_token_version once and installs the revoke trigger", async () => {
+  const w = await world();
+  assert.deepEqual(await runMigrations(w.pool), []);
+  assert.equal((await w.q("SELECT 1 FROM schema_migrations WHERE name='024_mcp_hardening.sql'")).rowCount, 1);
+  const u = await w.mk("Manager");
+  const t = await tokens.createToken({ id: u.id, role: "Manager" }, { name: "bf" });
+  // simulate a database that is still on 023: no column, owner already at token_version 7
+  await w.q("DROP TRIGGER api_tokens_revoke_on_account_change ON users");
+  await w.q("ALTER TABLE api_tokens DROP COLUMN owner_token_version");
+  await w.q("UPDATE users SET token_version = 7 WHERE id=$1", [u.id]);
+  await w.q(SQL024());
+  assert.equal((await w.one("SELECT owner_token_version FROM api_tokens WHERE id=$1", [t.id])).owner_token_version, 7, "backfilled from users.token_version");
+  assert.ok(await tokens.authenticate(t.secret), "a pre-existing token keeps working after the migration");
+  await w.q("UPDATE users SET token_version = 8 WHERE id=$1", [u.id]);
+  await w.q(SQL024()); // running again changes nothing (no second backfill)
+  assert.equal((await w.one("SELECT owner_token_version FROM api_tokens WHERE id=$1", [t.id])).owner_token_version, 7);
+  assert.equal(await tokens.authenticate(t.secret), null);
+  const col = await w.one("SELECT is_nullable, column_default FROM information_schema.columns WHERE table_schema = current_schema() AND table_name='api_tokens' AND column_name='owner_token_version'");
+  assert.equal(col.is_nullable, "NO");
+  assert.match(col.column_default, /0/);
+  assert.equal((await w.q("SELECT 1 FROM pg_trigger WHERE tgname='api_tokens_revoke_on_account_change' AND NOT tgisinternal AND tgrelid = 'users'::regclass")).rowCount, 1);
+});
+
+test("review round 1: a token dies when the owner's token_version moves (password change / session revocation / suspension)", async () => {
+  const w = await world();
+  const u = await w.mk("Manager");
+  await w.q("UPDATE users SET token_version = 3 WHERE id=$1", [u.id]);
+  const t = await tokens.createToken({ id: u.id, role: "Manager" }, { name: "tv" });
+  assert.equal((await w.one("SELECT owner_token_version FROM api_tokens WHERE id=$1", [t.id])).owner_token_version, 3, "createToken stores the current token_version");
+  assert.ok(await tokens.authenticate(t.secret));
+  // the repository has no password-change route yet; every revocation path (logout everywhere, suspension, password reset to come) goes through bumpTokenVersion
+  const { bumpTokenVersion } = require("../middleware/auth");
+  assert.equal(await bumpTokenVersion(u.id), 4);
+  assert.equal(await tokens.authenticate(t.secret), null, "token_version bump kills the PAT");
+  assert.equal(await tokens.authenticate(t.secret), null);
+  const fresh = await tokens.createToken({ id: u.id, role: "Manager" }, { name: "after" });
+  assert.equal((await w.one("SELECT owner_token_version FROM api_tokens WHERE id=$1", [fresh.id])).owner_token_version, 4);
+  assert.ok(await tokens.authenticate(fresh.secret), "a token created after the bump works");
+});
+
+test("review round 1: deactivation revokes every live token (revoked_by NULL); reactivation does not revive; already revoked rows keep their data", async () => {
+  const w = await world();
+  const u = await w.mk("Admin");
+  const other = await w.mk("Admin");
+  const a = await tokens.createToken({ id: u.id, role: "Admin" }, { name: "a" });
+  const b = await tokens.createToken({ id: u.id, role: "Admin" }, { name: "b" });
+  const o = await tokens.createToken({ id: other.id, role: "Admin" }, { name: "o" });
+  await tokens.revokeToken({ id: u.id, role: "Admin" }, b.id);
+  const revokedAt = (await w.one("SELECT revoked_at, revoked_by FROM api_tokens WHERE id=$1", [b.id]));
+  assert.equal(revokedAt.revoked_by, u.id);
+  await w.q("UPDATE users SET is_active = false WHERE id=$1", [u.id]);
+  const rows = (await w.q("SELECT id, revoked_at, revoked_by FROM api_tokens WHERE user_id=$1 ORDER BY id", [u.id])).rows;
+  assert.ok(rows.every((r) => r.revoked_at), "all revoked");
+  assert.equal(rows.find((r) => String(r.id) === a.id).revoked_by, null, "revoked by the system (NULL-safe)");
+  assert.equal(rows.find((r) => String(r.id) === b.id).revoked_by, u.id, "an earlier manual revocation is left untouched");
+  assert.deepEqual((await w.one("SELECT revoked_at FROM api_tokens WHERE id=$1", [b.id])).revoked_at, revokedAt.revoked_at);
+  assert.equal((await w.one("SELECT revoked_at FROM api_tokens WHERE id=$1", [o.id])).revoked_at, null, "other users' tokens are untouched");
+  await w.q("UPDATE users SET is_active = true WHERE id=$1", [u.id]);
+  assert.equal(await tokens.authenticate(a.secret), null, "reactivation does not revive");
+  assert.ok(await tokens.authenticate(o.secret));
+  // updates that change neither is_active nor the privilege do nothing
+  const c = await tokens.createToken({ id: u.id, role: "Admin" }, { name: "c" });
+  await w.q("UPDATE users SET full_name = 'Renamed', is_active = true, role = 'Admin' WHERE id=$1", [u.id]);
+  assert.ok(await tokens.authenticate(c.secret));
+});
+
+test("review round 1: losing mcp:use (any role but Admin / Manager / SuperAdmin) revokes the rows at once; promotion back does not revive", async () => {
+  const w = await world();
+  for (const role of ["Employer", "Agency", "Candidate", "HR", "Accountant", "Agent", "Receptionist"]) {
+    const u = await w.mk("Manager");
+    const t = await tokens.createToken({ id: u.id, role: "Manager" }, { name: "d" });
+    await w.q("UPDATE users SET role=$2 WHERE id=$1", [u.id, role]);
+    const row = await w.one("SELECT revoked_at, revoked_by FROM api_tokens WHERE id=$1", [t.id]);
+    assert.ok(row.revoked_at, `${role}: row revoked`);
+    assert.equal(row.revoked_by, null);
+    await w.q("UPDATE users SET role='Manager' WHERE id=$1", [u.id]);
+    assert.equal(await tokens.authenticate(t.secret), null, `${role}: not revived`);
+  }
+  const u = await w.mk("SuperAdmin");
+  const t = await tokens.createToken({ id: u.id, role: "SuperAdmin" }, { name: "keep" });
+  await w.q("UPDATE users SET role='Manager' WHERE id=$1", [u.id]);
+  assert.equal((await w.one("SELECT revoked_at FROM api_tokens WHERE id=$1", [t.id])).revoked_at, null, "SuperAdmin -> Manager keeps mcp:use");
+});
+
+test("review round 1: the trigger's role list equals PERMISSIONS (it cannot drift from middleware/role.js)", () => {
+  const sql = SQL024();
+  const listed = /NOT IN \(([^)]*)\)/.exec(sql)[1].split(",").map((x) => x.trim().replace(/'/g, "")).sort();
+  assert.deepEqual(listed, ROLES.filter((r) => ALLOWED.has(r)).sort());
+  assert.deepEqual(listed, Object.keys(PERMISSIONS).filter((r) => tokens.canUseMcp(r)).sort());
 });
