@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update to the latest code (Task 20): backup first, then git pull (fast-forward only), pull the base images,
+# Works in both modes (Caddy / behind nginx). Update to the latest code (Task 20): backup first, then git pull (fast-forward only), pull the base images,
 # rebuild the app on fresh base images and restart. The app container applies new database migrations itself
 # when it starts (idempotent).
 #
@@ -12,14 +12,16 @@ set -euo pipefail
 
 main() {
   cd "$(dirname "${BASH_SOURCE[0]}")"
-
-  die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+  # shellcheck source=lib.sh
+  . ./lib.sh
+  vita_init
 
   command -v git > /dev/null 2>&1 || die "git is not installed"
-  command -v docker > /dev/null 2>&1 || die "docker is not installed"
-  local DOCKER=(docker)
-  docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
-  compose() { "${DOCKER[@]}" compose "$@"; }
+  # An .env from an earlier version of the kit has no project name / profile: add them (Caddy mode only).
+  if has_caddy && [ -f .env ]; then
+    grep -qE '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=vita\n' >> .env
+    grep -qE '^COMPOSE_PROFILES=' .env || printf 'COMPOSE_PROFILES=caddy\n' >> .env
+  fi
 
   if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     die "the repository has local changes (git status); commit or discard them first"
@@ -48,14 +50,23 @@ TXT
   printf '2/5 Fetching the new code (%s)...\n' "$upstream"
   git pull --ff-only
 
-  printf '3/5 Pulling the newest postgres:16 and caddy:2 images...\n'
-  compose pull db caddy
+  if has_caddy; then
+    printf '3/5 Pulling the newest postgres:16 and caddy:2 images...\n'
+    compose pull db caddy
+  else
+    printf '3/5 Pulling the newest postgres:16 image (nginx mode: no Caddy)...\n'
+    compose pull db
+  fi
 
   printf '4/5 Rebuilding the app image on a fresh node:22-slim...\n'
   compose build --pull app
 
   printf '5/5 Restarting (migrations run on start)...\n'
-  compose up -d
+  if has_caddy; then
+    compose up -d
+  else
+    compose up -d db app
+  fi
   ./status.sh
 }
 

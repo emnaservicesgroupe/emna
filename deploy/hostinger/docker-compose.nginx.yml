@@ -1,0 +1,8 @@
+# nginx mode (./setup.sh --behind-nginx): merged on top of docker-compose.yml through COMPOSE_FILE in .env.
+# The app is published ONLY on the loopback interface of the host, so the existing nginx can proxy to it and
+# nobody else can reach it: 127.0.0.1 is never 0.0.0.0. The database publishes nothing. Caddy is not started
+# (its "caddy" profile is not enabled in this mode).
+services:
+  app:
+    ports:
+      - "127.0.0.1:${VITA_APP_PORT:-8083}:5000"
