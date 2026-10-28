@@ -64,7 +64,7 @@ for (const p of PORTALS) {
     assert.match(html, /src="logo\.webp"[^>]*alt="VITA"|alt="VITA"[^>]*src="logo\.webp"/);
     assert.match(html, new RegExp(`<body data-page="${p.page}" data-title-key="${p.page}\\.title">`));
     const order = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map((m) => m[1]);
-    assert.deepEqual(order, ["i18n.js", "vita.js", "orgs-util.js", "orgs-common.js", p.js]);
+    assert.deepEqual(order, ["i18n.js", "vita.js", "orgs-util.js", "orgs-common.js", "chat-util.js", "chat-panel.js", "chat-portal.js", p.js]); // the messaging panel loads before the page script (tests/chat-ui.test.js)
     assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
     assert.doesNotMatch(html, /\sstyle\s*=/i);
     assert.doesNotMatch(html, /<style\b/i);

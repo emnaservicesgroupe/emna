@@ -32,7 +32,7 @@ test("admin.html: Leads and Site jobs tabs + panels, CRM scripts loaded after ad
     assert.match(html, new RegExp(`<section id="panel-${tab}" role="tabpanel" aria-labelledby="tab-${tab}"`), `panel ${tab}`);
   }
   const order = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map((m) => m[1]);
-  assert.deepEqual(order, ["i18n.js", "vita.js", "admin.js", ...NEW_JS, "orgs-util.js", "orgs-common.js", "crm-orgs.js", "crm-requests.js"], "scripts: external, deferred, ordered (the organisation tabs load last; see tests/orgs-ui.test.js)");
+  assert.deepEqual(order, ["i18n.js", "vita.js", "admin.js", ...NEW_JS, "orgs-util.js", "orgs-common.js", "crm-orgs.js", "crm-requests.js", "chat-util.js", "chat-panel.js", "chat-staff.js", "fin-util.js", "fin-invoices.js", "fin-services.js", "fin-expenses.js", "fin-reports.js", "hr-util.js", "hr-my.js", "hr-team.js", "hr-admin.js", "mcp-util.js", "mcp-admin.js"], "scripts: external, deferred, ordered (the organisation tabs, the messaging tab, the accounting tab and then the HR tab load last; see tests/orgs-ui.test.js, tests/chat-ui.test.js, tests/fin-ui.test.js, tests/hr-ui.test.js)");
   assert.doesNotMatch(html, /\son[a-z]+\s*=/i);
   assert.doesNotMatch(html, /\sstyle\s*=/i);
   assert.doesNotMatch(html, /<script\b(?![^>]*\bsrc=)/i);

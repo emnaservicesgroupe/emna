@@ -37,6 +37,9 @@ function pidAlive(pid) {
 /**
  * @param {{connectionString?: string, maxAgeMs?: number, wait?: boolean, log?: (msg: string) => void}} [opts]
  *   wait: block until another cleanup finishes instead of skipping (the test helper skips)
+ *   callerHoldsLock: the caller already holds the advisory lock (LOCK_KEY) on its own connection; this run does
+ *     not take it (the script's own test builds dead-pid schemas under the lock so that the start-up cleanup of
+ *     a parallel test process cannot drop them half-built)
  * @returns {Promise<{database: string, dropped: string[], kept: number, skipped?: string}>}
  */
 async function cleanupTestSchemas(opts = {}) {
@@ -48,7 +51,9 @@ async function cleanupTestSchemas(opts = {}) {
   try {
     const database = (await client.query("SELECT current_database() AS d")).rows[0].d;
     assertTestDatabase(database);
-    if (opts.wait === true) await client.query("SELECT pg_advisory_lock(hashtext($1))", [LOCK_KEY]);
+    if (opts.callerHoldsLock === true) {
+      /* lock already held by the caller */
+    } else if (opts.wait === true) await client.query("SELECT pg_advisory_lock(hashtext($1))", [LOCK_KEY]);
     else if (!(await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS ok", [LOCK_KEY])).rows[0].ok) {
       return { database, dropped: [], kept: 0, skipped: "another cleanup is running" };
     }
@@ -84,7 +89,7 @@ async function cleanupTestSchemas(opts = {}) {
       }
       return { database, dropped, kept };
     } finally {
-      await client.query("SELECT pg_advisory_unlock(hashtext($1))", [LOCK_KEY]).catch(() => {});
+      if (opts.callerHoldsLock !== true) await client.query("SELECT pg_advisory_unlock(hashtext($1))", [LOCK_KEY]).catch(() => {});
     }
   } finally {
     client.release();
@@ -92,7 +97,7 @@ async function cleanupTestSchemas(opts = {}) {
   }
 }
 
-module.exports = { cleanupTestSchemas, assertTestDatabase, RefusedError, NAME_RE };
+module.exports = { cleanupTestSchemas, assertTestDatabase, RefusedError, NAME_RE, LOCK_KEY };
 
 if (require.main === module) {
   cleanupTestSchemas({ log: (m) => console.log(m) })

@@ -13,10 +13,13 @@
   var REQ_TEXT = ["title", "country", "city", "category", "salary_text"];
   var S = { row: null, org: null, tab: "requests", reqPage: 1, reqTotal: 0, reqLoaded: false, openId: null, formValues: null, presPage: 1, presLoaded: false, presData: null, notes: {}, tabs: null };
 
+  var chat = null; // messaging panel (chat-panel.js); runs while the employer is signed in
+
   function statusBadge(s) { return C.badge(O.requestStatusClass(s), t("orgs.rstatus." + s)); }
 
   // ================================================================ session
   function showLogin() {
+    if (chat) chat.stop();
     S.org = null;
     S.reqLoaded = false;
     S.presLoaded = false;
@@ -35,6 +38,8 @@
       }
       S.org = me.org;
       C.showApp(me.org && me.org.name);
+      if (!chat) chat = window.VITA_CHAT_PORTAL.mount({ root: $("#chat-root"), kind: "employer", badge: $("#chat-tab-badge") });
+      chat.start();
       if (!S.tabs) S.tabs = C.tabs($("#tabs"), function (name) { S.tab = name; refreshCurrent(); });
       S.tabs.select(S.tab, false);
     }).catch(function (err) {
@@ -49,6 +54,7 @@
   function refreshCurrent() {
     if (!S.org) return;
     if (S.tab === "requests") loadRequests();
+    else if (S.tab === "chat") { if (chat) chat.activate(); }
     else loadPresentations();
   }
 

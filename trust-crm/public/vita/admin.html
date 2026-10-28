@@ -19,6 +19,20 @@
   <script src="orgs-common.js" defer></script>
   <script src="crm-orgs.js" defer></script>
   <script src="crm-requests.js" defer></script>
+  <script src="chat-util.js" defer></script>
+  <script src="chat-panel.js" defer></script>
+  <script src="chat-staff.js" defer></script>
+  <script src="fin-util.js" defer></script>
+  <script src="fin-invoices.js" defer></script>
+  <script src="fin-services.js" defer></script>
+  <script src="fin-expenses.js" defer></script>
+  <script src="fin-reports.js" defer></script>
+  <script src="hr-util.js" defer></script>
+  <script src="hr-my.js" defer></script>
+  <script src="hr-team.js" defer></script>
+  <script src="hr-admin.js" defer></script>
+  <script src="mcp-util.js" defer></script>
+  <script src="mcp-admin.js" defer></script>
 </head>
 <body data-page="admin" data-title-key="admin.title">
   <a class="skip-link" href="#main" data-i18n="common.skip">Skip to content</a>
@@ -72,6 +86,10 @@
         <button type="button" role="tab" id="tab-sitejobs" aria-controls="panel-sitejobs" data-tab="sitejobs" data-i18n="tab.siteJobs">Site jobs</button>
         <button type="button" role="tab" id="tab-orgs" aria-controls="panel-orgs" data-tab="orgs" data-i18n="tab.orgs">Organisations</button>
         <button type="button" role="tab" id="tab-employerRequests" aria-controls="panel-employerRequests" data-tab="employerRequests" data-i18n="tab.employerRequests">Employer requests</button>
+        <button type="button" role="tab" id="tab-chat" aria-controls="panel-chat" data-tab="chat"><span data-i18n="tab.chat">Messages</span><span class="tab-badge" id="chat-tab-badge" hidden></span></button>
+        <button type="button" role="tab" id="tab-accounting" aria-controls="panel-accounting" data-tab="accounting" data-i18n="tab.accounting">Accounting</button>
+        <button type="button" role="tab" id="tab-hr" aria-controls="panel-hr" data-tab="hr" data-i18n="tab.hr">HR</button>
+        <button type="button" role="tab" id="tab-mcp" aria-controls="panel-mcp" data-tab="mcp" data-i18n="tab.mcp">Assistant access</button>
         <button type="button" role="tab" id="tab-applications" aria-controls="panel-applications" data-tab="applications" data-i18n="tab.applications">Applications</button>
         <button type="button" role="tab" id="tab-review" aria-controls="panel-review" data-tab="review" data-i18n="tab.review">Review queues</button>
         <button type="button" role="tab" id="tab-interviews" aria-controls="panel-interviews" data-tab="interviews" data-i18n="tab.interviews">Interviews</button>
@@ -227,6 +245,64 @@
           <div class="card-head"><h2 id="rq-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="rq-close" data-i18n="common.close">Close</button></div>
           <div id="rq-body"></div>
         </div>
+      </section>
+
+
+      <!-- ---------------------------------------------------------- messages (chat-*.js; roles with chat:read) -->
+      <section id="panel-chat" role="tabpanel" aria-labelledby="tab-chat" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="chat.title">Messages</h2>
+          <p class="notice info small" data-i18n="chat.staff.hint">Text messages with candidates, employers and agencies you serve. People see only their own conversation. Hidden messages are replaced by "message removed" for them and stay visible to moderators.</p>
+          <div id="chat-staff-root"></div>
+        </div>
+        <div class="card" id="chat-channels">
+          <h3 data-i18n="chat.channels.title">Message channels</h3>
+          <p class="small muted" data-i18n="chat.channels.hint">What is really connected. Nothing is shown as sending unless it is.</p>
+          <div id="chat-channels-body" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- accounting (built by fin-*.js) -->
+      <section id="panel-accounting" role="tabpanel" aria-labelledby="tab-accounting" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="fin.title">Accounting</h2>
+          <p class="notice info small" data-i18n="fin.hint">VITA records what staff say was paid: it does not move money or connect to a payment gateway. Totals are always per currency, with no conversion.</p>
+          <div class="btn-row" role="group" data-i18n-aria-label="fin.sections">
+            <button type="button" class="btn secondary small" id="fin-nav-invoices" aria-pressed="true" data-i18n="fin.sec.invoices">Invoices</button>
+            <button type="button" class="btn secondary small" id="fin-nav-reports" aria-pressed="false" data-i18n="fin.sec.reports">Reports</button>
+            <button type="button" class="btn secondary small" id="fin-nav-expenses" aria-pressed="false" data-i18n="fin.sec.expenses">Expenses</button>
+            <button type="button" class="btn secondary small" id="fin-nav-services" aria-pressed="false" data-i18n="fin.sec.services">Services</button>
+          </div>
+        </div>
+        <div id="fin-sec-invoices"></div>
+        <div id="fin-sec-reports" hidden></div>
+        <div id="fin-sec-expenses" hidden></div>
+        <div id="fin-sec-services" hidden></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- HR (built by hr-*.js; every staff role) -->
+      <section id="panel-hr" role="tabpanel" aria-labelledby="tab-hr" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="hr.title">HR</h2>
+          <p class="notice info small" data-i18n="hr.hint">Clock in and out, request leave or a correction, and follow your requests. Times are the company's time. Managers approve for their direct reports; HR manages profiles, schedules, leave types, holidays and balances.</p>
+          <div class="btn-row" role="group" data-i18n-aria-label="hr.sections">
+            <button type="button" class="btn secondary small" id="hr-nav-my" aria-pressed="true" data-i18n="hr.sec.my">My work</button>
+            <button type="button" class="btn secondary small" id="hr-nav-team" aria-pressed="false" hidden data-i18n="hr.sec.team">Team</button>
+            <button type="button" class="btn secondary small" id="hr-nav-admin" aria-pressed="false" hidden data-i18n="hr.sec.admin">HR admin</button>
+          </div>
+        </div>
+        <div id="hr-sec-my"></div>
+        <div id="hr-sec-team" hidden></div>
+        <div id="hr-sec-admin" hidden></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- assistant access (built by mcp-admin.js; Admin, Manager, SuperAdmin) -->
+      <section id="panel-mcp" role="tabpanel" aria-labelledby="tab-mcp" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="mcp.title">Assistant access</h2>
+          <p class="notice info small" data-i18n="mcp.hint">Let an AI assistant (for example Claude Desktop or Claude Code) answer questions about the VITA data you are already allowed to see. It is read-only and acts as you, with your current permissions.</p>
+        </div>
+        <div id="mcp-root"></div>
       </section>
 
       <!-- ---------------------------------------------------------- applications -->

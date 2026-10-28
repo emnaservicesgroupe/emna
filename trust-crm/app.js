@@ -6,6 +6,9 @@ const alertRoutes = require("./routes/alerts");
 const authRoutes = require("./routes/auth");
 const notificationRoutes = require("./routes/notifications");
 const financeRoutes = require("./routes/finance");
+const financeV2Routes = require("./routes/financeV2");
+const hrRoutes = require("./routes/hr");
+const chatRoutes = require("./routes/chat");
 const documentRoutes = require("./routes/documents");
 const auditRoutes = require("./routes/audit");
 const jobsearchAuthRoutes = require("./routes/jobsearchAuth");
@@ -23,6 +26,8 @@ const { jobsearchBodyErrorHandler } = require("./modules/jobsearch/errorHandler"
 const publicRoutes = require("./routes/public");
 const crmRoutes = require("./routes/crm");
 const employerPortalRoutes = require("./routes/employerPortal");
+const mcpTokenRoutes = require("./routes/mcpTokens");
+const mcpRoutes = require("./routes/mcp");
 const agencyPortalRoutes = require("./routes/agencyPortal");
 const { mountVita } = require("./routes/vitaStatic");
 const { mountSite, siteHome } = require("./routes/siteStatic");
@@ -36,6 +41,8 @@ const trustProxy = trustProxySetting(process.env.TRUST_PROXY);
 if (trustProxy !== null) app.set("trust proxy", trustProxy);
 
 app.use(cors());
+// MCP endpoint (stage 7, off by default): reads its own 64 KB raw body, so it must come BEFORE every JSON parser below. The only route that accepts a PAT.
+app.use("/mcp", mcpRoutes);
 // /jobsearch parses its own JSON first so parser errors (which carry the raw body,
 // possibly an OTP) are answered without logging; the global parser then skips
 // already-parsed requests. Non-jobsearch routes are unaffected.
@@ -47,6 +54,11 @@ app.use("/public", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/crm", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
 app.use("/employer", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
 app.use("/agency", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
+app.use("/finance", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
+app.use("/hr", express.json({ limit: "32kb" }), jobsearchBodyErrorHandler);
+app.use("/chat", express.json({ limit: "16kb" }), jobsearchBodyErrorHandler);
+// PAT management: tiny bodies (a name and a day count).
+app.use("/mcp-tokens", express.json({ limit: "2kb" }), jobsearchBodyErrorHandler);
 app.use(express.json({ limit: "10mb" }));
 
 // Task 20: unauthenticated liveness/readiness probe for Docker and the reverse proxy. Answers only
@@ -88,6 +100,14 @@ app.use("/candidates", candidateRoutes);
 app.use("/alerts", alertRoutes);
 app.use("/notifications", notificationRoutes);
 app.use("/finance", financeRoutes);
+// Accounting v2 (services, numbered invoices, ...). After the legacy router so /dashboard, POST /invoices and POST /payments are unchanged.
+app.use("/finance", financeV2Routes);
+// HR (stage 5): employees, schedules, leave types, holidays, balances and the self-service /hr/me. Staff accounts only.
+app.use("/hr", hrRoutes);
+// Messaging (stage 6): staff, Candidate, Employer and Agency accounts, each scoped to their own conversations in SQL.
+app.use("/chat", chatRoutes);
+// MCP personal access tokens (stage 7): JWT of staff with mcp:use only. /mcp (mounted at the top) is the ONLY route that accepts a PAT.
+app.use("/mcp-tokens", mcpTokenRoutes);
 app.use("/documents", documentRoutes);
 app.use("/audit-logs", auditRoutes);
 // Employer / Agency tokens never reach any /jobsearch handler (except GET /auth/me and the OTP routes).

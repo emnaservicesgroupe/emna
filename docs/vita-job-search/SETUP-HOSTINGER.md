@@ -9,6 +9,11 @@ Docker. It is written for a non-technical owner: copy each command exactly, one 
 and file storage on your server, daily backups, and everything in **safe sandbox mode** — no real e-mail
 is sent and no live job source is connected until you decide to switch them on.
 
+> **Already have a web server (nginx) on this VPS?** This guide starts its own web server (Caddy) on ports
+> 80 and 443, which would collide with it. If something already uses those ports - for example an older
+> CRM served by nginx - follow [SETUP-HOSTINGER-NGINX.md](SETUP-HOSTINGER-NGINX.md) instead
+> (`./setup.sh --behind-nginx`): VITA then runs only on `127.0.0.1` and your nginx forwards to it.
+
 > **Honest status (read this).** This kit has **NOT** been run on a real Hostinger VPS. It was exercised in
 > a development container (Ubuntu 24.04, Docker 29, compose v5) with three important differences from your
 > server - see [section 17](#17-what-was-and-was-not-tested) for the exact list:
@@ -20,6 +25,13 @@ is sent and no live job source is connected until you decide to switch them on.
 > 3. HTTPS was verified only with Caddy's **local** certificate, after setting `SITE_ADDRESS=localhost` **by
 >    editing `.env` by hand** (`setup.sh` refuses `localhost`); no real Let's Encrypt certificate was
 >    issued and no sslip.io address was opened from the internet.
+>
+> 4. The **"behind an existing nginx" mode** ([SETUP-HOSTINGER-NGINX.md](SETUP-HOSTINGER-NGINX.md)) was
+>    exercised in the same kind of development container: the real `setup.sh --behind-nginx` (including the
+>    image build), a throw-away nginx container with the generated server block, `create-admin.sh`, the
+>    bootstrap block, live events, `backup.sh`/`restore.sh`, the refusal on a busy port and on a foreign `vita`
+>    project, and the default Caddy mode. It has **not** run next to your real nginx, with a real certbot
+>    certificate or with real DNS.
 >
 > The hPanel menu names below may differ slightly from what you see. Section 18 is a checklist for your
 > first real run: what to look for and what to report back if something fails.
@@ -240,8 +252,8 @@ Because a demo SuperAdmin then exists, `./create-admin.sh` is disabled. **Before
 everything** (this deletes the whole database and all uploaded files of this install):
 
 ```bash
-docker compose down -v
-docker compose up -d
+./wipe-data.sh        # shows the project and volume names, asks you to type the project name
+./setup.sh
 ./create-admin.sh
 ```
 
@@ -276,6 +288,26 @@ Everything below stays off until you do it; follow the detailed pages:
   **refuses to start** with real mail + unscanned attachments + no ClamAV.
 - **Job sources** (Job Bank feed, partner feeds): [SOURCES_AND_PROVIDERS.md](SOURCES_AND_PROVIDERS.md).
 - **Malware scanning** (ClamAV): [SETUP.md § 8](SETUP.md#8-storage-private-files).
+- **Accounting** (invoices, payments, receipts, expenses, reports) is part of the same VITA app: there is no extra service, container or
+  database to install, and it is already included in the normal backup. Real payments are **recorded manually** by the Accountant; no payment
+  gateway or bank is connected. Optional settings (`FIN_CURRENCIES`, `FIN_TAX_RATE_PERCENT`, `FIN_COMPANY_*`, `FIN_EXPORT_MAX_ROWS`) and the daily
+  workflow: [../vita-accounting/SETUP.md](../vita-accounting/SETUP.md).
+- **Attendance and HR** (clock in/out, leave requests and approvals, corrections, holidays, reports) is part of the same VITA app too: no extra service, container
+  or database, included in the normal backup and switched on by the normal update. The only settings are optional: `HR_TIMEZONE` (default `Africa/Tunis`; set
+  it if your staff work in another timezone), `HR_MAX_OPEN_HOURS` and `HR_EXPORT_MAX_ROWS`. Schedules, leave types, holidays and entitlements are entered by HR; nothing
+  is preloaded. Setup order and daily use: [../vita-hr/SETUP.md](../vita-hr/SETUP.md).
+- **Messaging** (text messages between staff and candidates, employers and agencies, with unread counts and e-mail nudges) is part of the same VITA app too: no extra
+  service, container or database, included in the normal backup and switched on by the normal update. It uses the same mail settings as above (nudges are only
+  *recorded* in the sandbox mailbox until real mail is on) and **WhatsApp is not available** (it needs your provider account and approved templates). Live updates use a
+  server-sent-events stream at `/chat/events` (like `/jobsearch/events`): the bundled Caddy already flushes immediately and does not compress that path. If you put
+  **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/chat/events` and `/jobsearch/events`, or the page falls back to
+  polling every 30 seconds. Because the stream lives inside the app process, run **one** app container. Optional settings (`CHAT_RATE_PER_MIN`, `CHAT_CANDIDATE_CAN_START`,
+  `CHAT_NUDGE_COOLDOWN_MIN`, `CHAT_SSE_*`) and the daily workflow: [../vita-messaging/SETUP.md](../vita-messaging/SETUP.md).
+- **Assistant access (MCP)** lets Claude Desktop or Claude Code read VITA data through a read-only endpoint at `/mcp`, with personal access tokens created in the staff console. It is part of
+  the same app (no extra service or database) and **off by default**: add `MCP_ENABLED=true` to `.env` and run `docker compose up -d` to switch it on. The bundled Caddy already leaves `/mcp`
+  uncompressed and flushes immediately; if you put **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/mcp` too, and do not cache it. Rate limits are
+  kept in the app process (they reset on restart), so run **one** app container. Settings (`MCP_RATE_PER_MIN`, `MCP_MAX_CONCURRENT`, `MCP_REQUEST_TIMEOUT_MS`, `MCP_TOOL_TIMEOUT_MS`,
+  `MCP_TOKEN_DEFAULT_DAYS`), connection steps and the security model: [../vita-mcp/SETUP.md](../vita-mcp/SETUP.md).
 
 After every `.env` change: `docker compose up -d`. If a setting is wrong, the app does not start and
 `./logs.sh app` lists **every** problem (setting names only, never values).
@@ -369,14 +401,16 @@ Only three ports need to be open: **22** (SSH), **80** and **443** (HTTPS; 443/u
 ```bash
 cd ~/emna/deploy/hostinger
 ./status.sh            # containers, health, HTTPS check, disk, latest backup
-./logs.sh app          # app logs (also: ./logs.sh caddy, ./logs.sh db); Ctrl+C to stop
+./logs.sh app          # app logs (also: ./logs.sh db, and ./logs.sh caddy in Caddy mode); Ctrl+C to stop
 docker compose restart app
 docker compose down    # stop everything (data is kept)
 docker compose up -d   # start again
 ```
 
-`docker compose down -v` **deletes all data** (database, files, certificates). Only use it to wipe demo
-data or a test install.
+`./wipe-data.sh` **deletes all data** (database, files, certificates) of this install, after showing the
+Docker project and volume names and asking you to type the project name. Only use it to wipe demo data or a
+test install. **Never** run `docker compose down -v` by hand, and never from any folder other than this one:
+it acts on whatever Docker project that folder belongs to.
 
 ## 16. Troubleshooting
 
@@ -387,15 +421,15 @@ data or a test install.
 | App keeps restarting | `./logs.sh app` | The log lists every wrong setting by name ("refusing to start …"): fix `.env`, `docker compose up -d` |
 | `https://…` does not open / certificate error | `./logs.sh caddy` | Ports 80/443 open in hPanel firewall (and ufw)? DNS A record points at this server? Wait a few minutes after a DNS change |
 | sslip.io address does not work | `getent hosts 203-0-113-10.sslip.io` | sslip.io may be down or rate-limited: use your own domain (section 9) |
-| "Bootstrap is disabled" in `create-admin.sh` | an account already exists | Sign in with it; on a demo-only install wipe with `docker compose down -v` |
+| "Bootstrap is disabled" in `create-admin.sh` | an account already exists | Sign in with it; on a demo-only install wipe with `./wipe-data.sh` |
 | Candidates receive no sign-in code | Health → Mail says Sandbox | Expected in sandbox mode: real addresses get nothing and nothing is stored. Connect real mail (section 10), or allow-list a test address and read its code with `./show-sandbox-mail.sh` (section 7) |
 | "Too many sign-in attempts" | 5 wrong passwords for one e-mail (or 10 from one address) in 15 min | Wait 15 minutes, or `docker compose restart app` |
 | No jobs appear | Sources show `requires_setup` | Expected: connect a source (SOURCES_AND_PROVIDERS.md) or add jobs by hand |
 | Disk full | `./status.sh` (Disk) | Delete old backups after copying them elsewhere; `docker image prune -f` |
 | `update.sh` stops: "local changes" | `git status` | Undo the local edits (`git checkout -- <file>`) or ask your developer |
 | `update.sh` stops: branch "no longer exists" | the cloned branch was merged | Run the `git fetch` / `git switch main` lines it prints |
-| App keeps restarting with "password authentication failed for user vita_app" or "role vita_app does not exist" | the very first start of the database failed or was interrupted, so the role was never created | **Only on a fresh install without data:** `docker compose down -v`, then `./setup.sh` again (the role is created when the database volume is first initialised) |
-| `setup.sh` warns that a database volume already exists | the volume was created by an earlier version of this kit | Demo/test install: `docker compose down -v` (deletes all data) and run `./setup.sh` again. Install with real data: in `.env.db` set `POSTGRES_USER` and `POSTGRES_PASSWORD` to the old `DB_USER` / `DB_PASSWORD` from `.env` so backups and restores work, and ask your developer to move the app to an unprivileged role |
+| App keeps restarting with "password authentication failed for user vita_app" or "role vita_app does not exist" | the very first start of the database failed or was interrupted, so the role was never created | **Only on a fresh install without data:** `./wipe-data.sh`, then `./setup.sh` again (the role is created when the database volume is first initialised) |
+| `setup.sh` warns that a database volume already exists | the volume was created by an earlier version of this kit | Demo/test install: `./wipe-data.sh` (deletes all data) and run `./setup.sh` again. Install with real data: in `.env.db` set `POSTGRES_USER` and `POSTGRES_PASSWORD` to the old `DB_USER` / `DB_PASSWORD` from `.env` so backups and restores work, and ask your developer to move the app to an unprivileged role |
 | `restore.sh` failed | its last messages | The current data is kept when the failure happened before "Switching to the restored database"; the app and Caddy are started again either way |
 
 ## 17. What was and was not tested
@@ -412,6 +446,7 @@ All of this ran in the development container described at the top, **not** on a 
 | Bootstrap protection: `POST /auth/bootstrap-super-admin` through Caddy (6 path variants) → 404; directly from another container → 404; nothing created; `create-admin.sh` from inside the app container → created once | Tested |
 | `/auth/login` limits through Caddy: 5 failures → 429 with `Retry-After` | Tested |
 | `setup.sh` (new install; re-run keeps `.env`/`.env.db`; empty `SITE_ADDRESS` re-detected), `demo-seed.sh` (fresh DB / refused on a real one), candidate sign-in with an allow-listed demo address + `show-sandbox-mail.sh`, non-allow-listed address stores nothing, `backup.sh`, `restore.sh` over a database with **newer** FK-linked tables (succeeded, stack back up), `restore.sh` with a **damaged** dump (failed, data kept, stack back up), graceful stop (exit 0), preflight refusal, `update.sh` refusal on a dirty checkout | Run in the development container |
+| **nginx mode** (`./setup.sh --behind-nginx`, [SETUP-HOSTINGER-NGINX.md](SETUP-HOSTINGER-NGINX.md)): real `setup.sh` run including the image build; only db+app start, the app is published on `127.0.0.1:8083` only, the db publishes nothing, volumes/network/containers are `vita*`; re-run keeps `.env`; refuses a busy port (suggests the next free one) and a `vita` project created from another folder; a throw-away nginx container with the generated server block (`nginx -t` for both generated files, `/healthz`, `/`, `/vita/admin.html`, bootstrap POST in 5 spellings -> 404, `create-admin.sh`, `/chat/events` streamed without buffering, `/jobsearch/events` headers); `backup.sh`, `restore.sh`, `status.sh`, `logs.sh`, `wipe-data.sh` and the project guard (a shell `COMPOSE_PROJECT_NAME` is ignored, a project named `app` is refused); default Caddy mode still starts (3 containers, 80/443 published, app unpublished) | Run in the development container (Caddy HTTPS itself: no DNS there) |
 | Real Hostinger VPS, hPanel steps, real Let's Encrypt certificate, sslip.io from the internet, `--configure-firewall`, `update.sh` doing a real `git pull` + image pulls, SSH hardening steps | **Not tested** |
 
 ## 18. First real run — checklist

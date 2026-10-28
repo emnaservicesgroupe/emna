@@ -10,6 +10,10 @@
   <link rel="stylesheet" href="print.css" media="print">
   <script src="i18n.js" defer></script>
   <script src="vita.js" defer></script>
+  <script src="fin-util.js" defer></script>
+  <script src="chat-util.js" defer></script>
+  <script src="chat-panel.js" defer></script>
+  <script src="chat-portal.js" defer></script>
   <script src="portal.js" defer></script>
 </head>
 <body data-page="portal" data-title-key="portal.title">
@@ -86,6 +90,8 @@
           <li><button type="button" data-step="prefs" data-i18n="steps.prefs">Your preferences</button></li>
           <li><button type="button" data-step="consent" data-i18n="steps.consent">Your consent</button></li>
           <li><button type="button" data-step="status" data-i18n="steps.status">Matches &amp; applications</button></li>
+          <li><button type="button" data-step="payments" data-i18n="fin.me.step">My payments</button></li>
+          <li><button type="button" data-step="chat"><span data-i18n="chat.step">Messages with VITA</span><span class="tab-badge" id="chat-tab-badge" hidden></span></button></li>
         </ol>
       </nav>
 
@@ -139,6 +145,24 @@
         <div id="sp-apps" role="tabpanel" aria-labelledby="st-apps" tabindex="-1" hidden></div>
         <div id="sp-interviews" role="tabpanel" aria-labelledby="st-interviews" tabindex="-1" hidden></div>
         <div id="sp-messages" role="tabpanel" aria-labelledby="st-messages" tabindex="-1" hidden></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- my payments (read only) -->
+      <section id="step-payments" class="card" aria-labelledby="payments-h" tabindex="-1" hidden>
+        <div class="card-head">
+          <h2 id="payments-h" data-i18n="fin.me.title">My payments</h2>
+          <span class="spacer"></span>
+          <button type="button" class="btn secondary small" id="payments-refresh" data-i18n="common.refresh">Refresh</button>
+        </div>
+        <p class="notice info" data-i18n="fin.me.note">The invoices and payments shown here are the ones recorded by VITA staff. This page is read only. If something looks wrong or missing, please contact your VITA staff contact.</p>
+        <div id="payments-box" aria-live="polite"></div>
+      </section>
+
+      <!-- ---------------------------------------------------------- messages with the VITA team -->
+      <section id="step-chat" class="card" aria-labelledby="chat-h" tabindex="-1" hidden>
+        <h2 id="chat-h" data-i18n="chat.portal.title">Messages with VITA</h2>
+        <p class="small muted" data-i18n="chat.portal.candidate">Write to the VITA team here. Only people at VITA can read this conversation.</p>
+        <div id="chat-root"></div>
       </section>
     </div>
   </main>

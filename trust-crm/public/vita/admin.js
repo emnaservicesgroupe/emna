@@ -6,7 +6,9 @@
   var V = window.VITA;
   var t = V.t, tc = V.tc, h = V.h, $ = V.$;
 
-  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"];
+  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant", "HR"]; // every staff role may sign in; the HR tab is for all of them
+  var JOBSEARCH_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]; // jobsearch:read (the Accountant and HR roles use their own tabs; every staff role also sees the HR tab)
+  var JOBSEARCH_TABS = ["dashboard", "applications", "review", "interviews", "sources", "settings", "reports", "directory"];
   var PERMS = {
     SuperAdmin: ["read", "write", "approve", "admin"],
     Admin: ["read", "write", "approve", "admin"],
@@ -49,6 +51,7 @@
   function role() { return S.session ? S.session.role : null; }
   function can(p) { return (PERMS[role()] || []).indexOf(p) >= 0; }
   function isAdmin() { return role() === "Admin" || role() === "SuperAdmin"; }
+  function hasJobsearch() { return JOBSEARCH_ROLES.indexOf(role()) >= 0; }
   function canSeeHealth() { return ["Admin", "SuperAdmin", "Manager"].indexOf(role()) >= 0; }
   function candidateName(id) {
     var c = S.dash && S.dash.candidates.find(function (x) { return x.candidateId === id; });
@@ -88,7 +91,7 @@
 
   // ================================================================ extension API (crm-*.js)
   // Extra tabs/panels live in their own scripts (crm-leads.js, crm-sitejobs.js, crm-candidate.js), loaded after this file.
-  // registerTab(name, {init, load, visible}) wires #tab-<name>/#panel-<name>; onCandidate(fn) runs when the dashboard
+  // registerTab(name, {init, load, visible, onStart, onStop}) wires #tab-<name>/#panel-<name> (onStart / onStop: sign-in / sign-out); onCandidate(fn) runs when the dashboard
   // opens a candidate card, so CRM code can add its section without this file knowing about it.
   var EXT = {};
   var candidateListeners = [];
@@ -101,8 +104,19 @@
   };
 
   // ================================================================ login / session
+  /** Runs def[name]() of every extension tab; onStart only for tabs the signed-in role may use. A failing hook never blocks the console. */
+  function extHook(name) {
+    Object.keys(EXT).forEach(function (tab) {
+      var def = EXT[tab];
+      if (typeof def[name] !== "function") return;
+      if (name === "onStart" && def.visible && !def.visible()) return;
+      try { def[name](); } catch (e) { /* reported by the tab itself */ }
+    });
+  }
+
   function showLogin() {
     if (S.events) { S.events.stop(); S.events = null; }
+    extHook("onStop");
     S.session = null;
     $("#app-view").hidden = true;
     $("#logout").hidden = true;
@@ -165,7 +179,10 @@
         $("#logout").hidden = false;
         renderWho();
         setupTabs();
-        S.events = V.connectEvents({
+        applyRoleTabs();
+        extHook("onStart"); // extension tabs with a session-long job (the Messages stream and its unread badge)
+        // The live stream needs jobsearch:read; an Accountant / HR user works in their own tabs and has no stream.
+        if (hasJobsearch()) S.events = V.connectEvents({
           onEvent: function () { refreshSoon(); },
           onStatus: V.liveIndicator($("#live-status")),
           refetch: function () { refreshCurrent(); },
@@ -182,12 +199,14 @@
   function setupTabs() {
     if (tabsReady) return;
     tabsReady = true;
-    var buttons = V.$all("#tabs [role=tab]");
-    buttons.forEach(function (b, i) {
+    V.$all("#tabs [role=tab]").forEach(function (b) {
       b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab"), true); });
       b.addEventListener("keydown", function (e) {
         var rtl = document.documentElement.dir === "rtl";
         var next = null;
+        var buttons = V.$all("#tabs [role=tab]").filter(function (x) { return !x.hidden; }); // hidden (role-gated) tabs are skipped
+        var i = buttons.indexOf(b);
+        if (i < 0) return;
         if (e.key === (rtl ? "ArrowLeft" : "ArrowRight")) next = buttons[(i + 1) % buttons.length];
         else if (e.key === (rtl ? "ArrowRight" : "ArrowLeft")) next = buttons[(i - 1 + buttons.length) % buttons.length];
         else if (e.key === "Home") next = buttons[0];
@@ -199,12 +218,7 @@
         }
       });
     });
-    // role-dependent tabs
-    $("#tab-health").hidden = !canSeeHealth();
-    $("#tab-scheduler").hidden = !isAdmin();
     Object.keys(EXT).forEach(function (name) {
-      var tab = $("#tab-" + name);
-      if (tab && EXT[name].visible) tab.hidden = !EXT[name].visible();
       if (EXT[name].init) EXT[name].init();
     });
     initDashboard();
@@ -219,6 +233,27 @@
     initDirectory();
     initDrawer();
     window.addEventListener("hashchange", routeFromHash);
+  }
+
+  /** Shows only the tabs the signed-in role may use (re-run at every sign-in, so a role change on the same page is honoured). */
+  function applyRoleTabs() {
+    JOBSEARCH_TABS.forEach(function (name) { $("#tab-" + name).hidden = !hasJobsearch(); });
+    if (hasJobsearch()) {
+      $("#tab-health").hidden = !canSeeHealth();
+      $("#tab-scheduler").hidden = !isAdmin();
+    } else {
+      $("#tab-health").hidden = true;
+      $("#tab-scheduler").hidden = true;
+    }
+    Object.keys(EXT).forEach(function (name) {
+      var tab = $("#tab-" + name);
+      if (tab && EXT[name].visible) tab.hidden = !EXT[name].visible();
+    });
+    var current = $("#tab-" + S.tab);
+    if (!current || current.hidden) {
+      var first = V.$all("#tabs [role=tab]").filter(function (x) { return !x.hidden; })[0];
+      if (first) S.tab = first.getAttribute("data-tab");
+    }
   }
 
   function selectTab(name, focusPanel) {

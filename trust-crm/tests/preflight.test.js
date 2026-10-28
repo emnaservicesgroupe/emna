@@ -221,3 +221,11 @@ test("server.js runs the preflight before anything else; app.js never does", () 
   assert.match(lines[1], /require\("\.\/utils\/preflight"\)\.runPreflight\(\)/);
   assert.ok(!fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8").includes("preflight"));
 });
+
+test("preflight (review round 1): MCP_ENABLED=true without TRUST_PROXY gets a specific warning; with TRUST_PROXY or MCP off it does not", () => {
+  assert.ok(has(check({ MCP_ENABLED: "true", TRUST_PROXY: undefined }).warnings, /MCP_ENABLED=true but TRUST_PROXY is not set/));
+  assert.ok(!has(check({ MCP_ENABLED: "true", TRUST_PROXY: "1" }).warnings, /MCP_ENABLED=true but TRUST_PROXY/));
+  assert.ok(!has(check({ MCP_ENABLED: undefined, TRUST_PROXY: undefined }).warnings, /MCP_ENABLED=true but TRUST_PROXY/));
+  assert.ok(!has(check({ MCP_ENABLED: "false", TRUST_PROXY: undefined }).warnings, /MCP_ENABLED=true but TRUST_PROXY/));
+  assert.deepEqual(check({ MCP_ENABLED: "true", TRUST_PROXY: undefined }).problems, [], "a warning, not a refusal to start");
+});

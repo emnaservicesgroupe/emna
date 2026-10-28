@@ -1,0 +1,177 @@
+# VITA behind an EXISTING nginx - server blocks (template).
+#
+# The host name and the loopback port are written as double-underscore placeholders below.
+# ./setup.sh --behind-nginx (or ./nginx-config.sh) prints this file with your domain and port filled in and
+# writes it to nginx-vita.generated.conf next to it. Review it, then follow the steps that script prints.
+# NOTHING here is installed automatically.
+#
+# Example: ehiservices.online (+ www.ehiservices.online, redirected to the bare name). A subdomain such as
+# vita.your-domain.com works the same way; for testing before DNS exists use vita.<server-ip-with-dashes>.sslip.io.
+#
+# Safety notes
+#  * server_name is ONE specific name. Never add "default_server" to the listen lines: that would steal
+#    requests from the sites nginx already serves (your existing CRM).
+#  * It only listens for your host name; every other host name keeps going to your existing sites untouched.
+#  * The application sets its own security headers (Content-Security-Policy, X-Frame-Options, Referrer-Policy,
+#    Permissions-Policy, X-Content-Type-Options) on the pages it serves. Do NOT add a second Content-Security-
+#    Policy here: two policies would both apply and could break the pages.
+#  * Always check with "sudo nginx -t" before "sudo systemctl reload nginx".
+#  * Rollback: sudo rm /etc/nginx/sites-enabled/vita && sudo nginx -t && sudo systemctl reload nginx
+#
+# Two parts: the HTTP part (port 80) is installed FIRST, so certbot can issue the certificate; once the
+# certificate exists the whole file (HTTP + HTTPS) replaces it.
+
+# BEGIN-HTTP-ONLY
+server {
+    listen 80;
+    # IPv6 is left out on purpose (a "listen [::]:80" line can clash with options of your existing sites).
+    server_name __NAMES__;
+
+    # certbot proves that you own the domain through this folder (certbot certonly --webroot)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/vita-acme;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://__DOMAIN__$request_uri;
+    }
+}
+# END-HTTP-ONLY
+
+# BEGIN-WWW
+# www.__DOMAIN__ is only a redirect to the bare name (it uses the same certificate).
+server {
+    listen 443 ssl;
+    server_name www.__DOMAIN__;
+    ssl_certificate     /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:vita_ssl:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    return 301 https://__DOMAIN__$request_uri;
+}
+# END-WWW
+
+server {
+    listen 443 ssl;
+    server_name __DOMAIN__;
+
+    # The two lines below point to the files certbot creates for this name (certbot-managed).
+    ssl_certificate     /etc/letsencrypt/live/__DOMAIN__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__DOMAIN__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    # the zone name is unique to VITA, so it cannot clash with a zone of your other sites
+    ssl_session_cache shared:vita_ssl:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # Uploads (CVs, documents): the app allows MAX_UPLOAD_MB (10) plus multipart overhead. Raise both together.
+    client_max_body_size 12m;
+    # slow mobile uploads must finish within this
+    client_body_timeout 120s;
+
+    # Optional, only once you are sure HTTPS works for good (browsers remember it): remove the leading "#".
+    # No includeSubDomains. Only add it if the application does not already send this header.
+    # add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # ---- The first administrator is NEVER created through the internet -------------------------------------
+    # Use ./create-admin.sh on the server (it talks to the app inside its container). The application also
+    # refuses this route for anything that arrives through a proxy; these blocks answer 404 before it gets there.
+    location = /auth/bootstrap-super-admin {
+        return 404;
+    }
+    location ^~ /auth/bootstrap-super-admin/ {
+        return 404;
+    }
+    # any upper/lower-case spelling (the application's routes are not case sensitive)
+    location ~* ^/+auth/+bootstrap-super-admin {
+        return 404;
+    }
+
+    # Public liveness answered by nginx itself (no database query from the internet). The real check is
+    # ./status.sh, which asks the app on http://127.0.0.1:__PORT__/healthz.
+    location = /healthz {
+        default_type application/json;
+        return 200 '{"ok":true}';
+    }
+
+    # ---- Live event streams (server-sent events): never buffered, cached or compressed ----------------------
+    # Messaging
+    location = /chat/events {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Job search
+    location = /jobsearch/events {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Assistant access (MCP; only used when MCP_ENABLED=true in .env)
+    location = /mcp {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location ^~ /mcp/ {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        chunked_transfer_encoding on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # ---- Everything else: the public website, /vita/ and the API --------------------------------------------
+    location / {
+        proxy_pass http://127.0.0.1:__PORT__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

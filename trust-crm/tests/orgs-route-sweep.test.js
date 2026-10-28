@@ -10,6 +10,8 @@
 //     never any seeded private data (sentinel strings) - for ALL actors, allowed or not.
 // Staff are not swept (their permissions are covered by the per-module suites); a staff token is only used as a
 // positive control so "denied" can never be vacuous (the routes work, the roles are what is refused).
+// The ONE prefix every portal role and the Candidate may use is /chat/* (stage 6 messaging): each sees only its own conversation
+// (scoped in SQL, identical 404 otherwise), which tests/chat-api.test.js covers in depth and the seeded SWEEP-CHAT-* sentinels cover here.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -57,7 +59,25 @@ const ROUTE_RULES = [
   { re: /^\w+ \/crm\//, allow: NONE, why: "staff CRM" },
   { re: /^POST \/auth\/register$/, allow: NONE, why: "users:write" },
   { re: /^\w+ \/candidates\//, allow: NONE, why: "staff candidate CRUD (/candidates/*)" },
-  { re: /^\w+ \/finance\//, allow: NONE, why: "finance" },
+  // finance: legacy (/dashboard, POST /invoices, POST /payments) and stage-4 routes (routes/financeV2.js: /services*, /invoices*, /payments*,
+  // /expenses*, /expense-categories*, /reports/*, /export/*.csv) are staff permissions only: no portal role and no Candidate.
+  // The ONE exception is the Candidate self-view, GET /finance/me and GET /finance/me/invoices/:id/print (role Candidate only,
+  // ownership from js_candidate_accounts); Employer and Agency never reach it. First match wins, so it sits before the catch-all.
+  { re: /^GET \/finance\/me(\/|$)/, allow: ["candidate"], why: "finance candidate self-view (/finance/me*)" },
+  { re: /^\w+ \/finance\//, allow: NONE, why: "finance (staff permissions)" },
+  // hr (stage 5, routes/hr.js): /hr/me and every admin route sit behind requireStaff (an ACTIVE staff account); Candidate, Employer and
+  // Agency are refused on all of them, /hr/me included. Staff access is by permission / report line and is covered by tests/hr-*.test.js.
+  { re: /^\w+ \/hr\//, allow: NONE, why: "hr (active staff accounts only)" },
+  // chat (stage 6, routes/chat.js): Candidate, Employer and Agency are legitimate users of /chat/* ONLY (own conversation, identical 404 for any
+  // other id, no start for employers / agencies, no moderation). HR / Accountant reach the router but see only staff rooms they were added to (empty list, identical 404); staff access is covered by tests/chat-api.test.js.
+  { re: /^\w+ \/chat\//, allow: ["employer", "agency", "candidate"], why: "chat (own conversations only; anonymous is 401)" },
+  // mcp-tokens (stage 7, routes/mcpTokens.js): personal access token management = a normal JWT of an active staff account holding mcp:use
+  // (Admin, Manager, SuperAdmin). Every other staff role, Candidate, Employer, Agency and anonymous are refused; a PAT bearer is 401 (see PAT_EXEMPT).
+  { re: /^\w+ \/mcp-tokens(\/|$)/, allow: NONE, why: "mcp token management (staff with mcp:use)" },
+  // mcp (stage 7, routes/mcp.js): POST /mcp accepts ONLY a personal access token (PAT_EXEMPT below); a JWT of any actor and anonymous are 401
+  // (404 while MCP_ENABLED is off, which is how the sweep runs). Every other method is 405 + Allow: POST for everyone, enabled or not (MCP_405).
+  { re: /^POST \/mcp$/, allow: NONE, why: "mcp endpoint (PAT only)" },
+  { re: /^(GET|PUT|PATCH|DELETE) \/mcp$/, allow: NONE, why: "mcp endpoint: POST only" },
   { re: /^\w+ \/documents(\/|$)/, allow: NONE, why: "documents" },
   { re: /^\w+ \/audit-logs$/, allow: NONE, why: "audit log" },
   { re: /^\w+ \/notifications\//, allow: NONE, why: "notifications" },
@@ -144,6 +164,12 @@ const JOBSEARCH_STAFF = [
   "DELETE /jobsearch/automation-rules/:id",
 ];
 
+// Routes that accept a personal access token (PAT, "vita_pat_..." bearer). It is the ONLY place a PAT is valid: every other authenticated route
+// must answer it 401 (middleware/auth.js verifyToken). POST /mcp is the only one; the other methods of /mcp are 405 for everyone (MCP_405).
+// Deliberately NOT in ROUTE_RULES: that table fails on a rule matching no route.
+const PAT_EXEMPT = [/^POST \/mcp$/];
+const MCP_405 = /^(GET|PUT|PATCH|DELETE) \/mcp$/;
+
 function classify(key) {
   for (const r of ROUTE_RULES) if (r.re.test(key)) return r;
   if (key === JOBSEARCH_PORTAL_ME) return { allow: ["employer", "agency", "candidate"], why: "own session echo" };
@@ -203,7 +229,7 @@ async function probe(base, method, url, token, { headers = {}, body } = {}) {
   } catch {
     json = null;
   }
-  return { status: res.status, text, json, stream: false };
+  return { status: res.status, text, json, stream: false, headers: res.headers };
 }
 const DENIED = new Set([401, 403, 404]);
 const ERROR_KEYS = new Set(["error", "message", "code"]);
@@ -220,6 +246,8 @@ async function buildWorld() {
   const w = await E.startWorld();
   await E.addStaff(w, "admin", "Admin");
   await E.addStaff(w, "mgr", "Manager");
+  await E.addStaff(w, "hrx", "HR");
+  await E.addStaff(w, "acctx", "Accountant");
   // Candidates: the victim is id 1 (fully onboarded: CV, profile, consent), the attacker id 2 (just an account).
   const victim = await E.onboard(w, "victim", "mgr");
   const attacker = await E.createCandidate(w, "attacker", "mgr");
@@ -268,8 +296,30 @@ async function buildWorld() {
   mark("SWEEP-ORG-AGENCY-B", "agencyB");
   mark("SWEEP-LEAD-AGENCY-A", "agency");
   mark("SWEEP-ORG-AGENCY-A", "agency");
+  // Chat (stage 6): one conversation per party with a staff message, a party message and a HIDDEN message nobody outside staff may ever see.
+  const chat = {};
+  const openChat = async (key, owner, type, subjectId, token) => {
+    const o = await w.http("POST", "/chat/conversations", w.tokens.mgr, { subject_type: type, subject_id: subjectId });
+    assert.equal(o.status, 201, JSON.stringify(o.body));
+    chat[key] = o.body.id;
+    const a = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, w.tokens.mgr, { body: `SWEEP-CHAT-STAFF-${owner}` });
+    const b = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, token, { body: `SWEEP-CHAT-${owner}` });
+    const h = await w.http("POST", `/chat/conversations/${o.body.id}/messages`, w.tokens.mgr, { body: `SWEEP-CHAT-HIDDEN-${owner}` });
+    for (const r of [a, b, h]) assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal((await w.http("POST", `/chat/messages/${h.body.id}/hide`, w.tokens.mgr, { reason: "sweep" })).status, 200);
+    mark(`SWEEP-CHAT-STAFF-${owner}`, owner);
+    mark(`SWEEP-CHAT-${owner}`, owner);
+    mark(`SWEEP-CHAT-HIDDEN-${owner}`, "nobody");
+  };
+  await openChat("victim", "victim", "candidate", victim.id, victim.token);
+  await openChat("attacker", "candidate", "candidate", attacker.id, attacker.token);
+  await openChat("employerB", "employerB", "employer_request", empB.orgId, empB.token);
+  await openChat("employer", "employer", "employer_request", emp.orgId, emp.token);
+  await openChat("agencyB", "agencyB", "agency", agyB.orgId, agyB.token);
+  await openChat("agency", "agency", "agency", agy.orgId, agy.token);
+  assert.deepEqual([chat.victim, chat.attacker], [1, 2], "fixture assumption: chat conversation ids 1 (victim) and 2 (attacker)");
   const routes = walk(require("../app")._router.stack, "", []);
-  return { w, victim, attacker, emp, empB, agy, agyB, sentinels, routes };
+  return { w, victim, attacker, emp, empB, agy, agyB, sentinels, routes, chat };
 }
 
 /** Sentinel strings (other people's data) found in a response body that the actor does not own. */
@@ -292,7 +342,7 @@ test("sweep: every route is classified and every disallowed (route, role) answer
   assert.deepEqual([...unusedRules, ...unusedLists], [], "STALE classification entries that match no registered route");
   assert.equal(new Set([...JOBSEARCH_CANDIDATE, ...JOBSEARCH_STAFF]).size, JOBSEARCH_CANDIDATE.length + JOBSEARCH_STAFF.length, "no route listed twice");
   // Sanity: the enumeration really walked the nested routers (guards against a silent express-internals change).
-  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
+  for (const must of ["GET /employer/requests/:id", "POST /agency/candidates", "GET /crm/leads", "POST /jobsearch/inbound/mail", "GET /jobsearch/events", "GET /chat/conversations/:id/messages", "POST /chat/messages/:id/hide", "GET /chat/events", "GET /chat/prefs", "PUT /chat/prefs", "POST /mcp-tokens", "GET /mcp-tokens", "GET /mcp-tokens/usage", "DELETE /mcp-tokens/:id", "GET /chat/channels", "GET /candidates/all", "GET /healthz", "GET /vita/"]) assert.ok(keys.includes(must), `enumeration found ${must}`);
   assert.ok(routes.length > 120, `enumerated ${routes.length} routes`);
 
   // 2. Every (route, actor, id-set) call.
@@ -312,6 +362,11 @@ test("sweep: every route is classified and every disallowed (route, role) answer
         if (found.length) offenders.push(`${tag}: LEAKS ${found.join(", ")}`);
         if (res.status >= 500) offenders.push(`${tag}: server error`);
         if (allow.includes(role)) continue;
+        if (MCP_405.test(keyOf(r))) {
+          if (res.status !== 405 || res.headers.get("allow") !== "POST") offenders.push(`${tag}: expected 405 with Allow: POST`);
+          else if (!isErrorOnly(res)) offenders.push(`${tag}: refusal body is not error-only`);
+          continue;
+        }
         if (!DENIED.has(res.status)) offenders.push(`${tag}: expected 401/403/404`);
         else if (!res.stream && !isErrorOnly(res)) offenders.push(`${tag}: refusal body is not error-only: ${res.text.slice(0, 80)}`);
       }
@@ -335,8 +390,45 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   assert.equal((await ok(attacker.token, "/jobsearch/auth/me", "candidate")).json.candidate_id, attacker.id);
   await ok(attacker.token, "/jobsearch/applications/2", "candidate own application");
   await ok(attacker.token, "/jobsearch/messages", "candidate messages");
+  // Finance self-view: the Candidate gets its own (empty) statement; staff, Employer, Agency and anonymous are refused on /finance/me*.
+  const finMe = await ok(attacker.token, "/finance/me", "candidate finance self-view");
+  assert.deepEqual(finMe.json, { invoices: [], totals: [] });
+  for (const url of ["/finance/me", "/finance/me/invoices/1/print"]) {
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["admin", w.tokens.admin], ["mgr", w.tokens.mgr], ["anon", null]]) {
+      const r = await probe(w.base, "GET", url, token);
+      assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
+    }
+  }
+  // ...and the Candidate is refused on every staff finance route (the carve-out is /me* only).
+  for (const url of ["/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/invoices.csv"]) {
+    assert.equal((await probe(w.base, "GET", url, attacker.token)).status, 403, `candidate GET ${url}`);
+  }
+  // HR: staff reach /hr/me (any active staff) and the permission-gated admin reads; the portals and the Candidate are refused on all of them.
+  for (const url of ["/hr/me", "/hr/employees", "/hr/employees/1", "/hr/schedules", "/hr/leave-types", "/hr/holidays", "/hr/balances", "/hr/me/attendance", "/hr/me/corrections", "/hr/team/corrections", "/hr/reports/attendance", "/hr/export/attendance.csv", "/hr/me/leave-requests", "/hr/team/leave-requests", "/hr/team/calendar?from=2026-03-01&to=2026-03-31", "/hr/reports/leave", "/hr/staff", "/hr/me/leave-types", "/hr/attendance/open"]) {
+    if (url !== "/hr/employees/1") await ok(w.tokens.admin, url, "admin hr");
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "GET", url, token);
+      assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
+    }
+  }
+  await ok(w.tokens.mgr, "/hr/me", "manager hr self-view");
+  assert.equal((await probe(w.base, "GET", "/hr/employees", w.tokens.mgr)).status, 403, "a Manager has no hr:read");
+  await ok(w.tokens.mgr, "/hr/team/corrections", "manager approvals (own reports)");
+  await ok(w.tokens.mgr, "/hr/me/attendance", "manager own attendance");
+  await ok(w.tokens.mgr, "/hr/team/leave-requests", "manager leave approvals (own reports)");
+  await ok(w.tokens.mgr, "/hr/team/calendar?from=2026-03-01&to=2026-03-31", "manager team calendar");
+  await ok(w.tokens.mgr, "/hr/me/leave-requests", "manager own leave");
+  await ok(w.tokens.mgr, "/hr/me/leave-types", "manager active leave types");
+  for (const url of ["/hr/reports/attendance", "/hr/export/attendance.csv", "/hr/reports/leave", "/hr/staff", "/hr/attendance/open"]) assert.equal((await probe(w.base, "GET", url, w.tokens.mgr)).status, 403, `a Manager has no hr:read: ${url}`);
+  // The POST routes (clock, correction request/cancel/decide) are refused for portal roles and anonymous by the router gate.
+  for (const url of ["/hr/clock-in", "/hr/clock-out", "/hr/me/corrections", "/hr/me/corrections/1/cancel", "/hr/corrections/1/decide", "/hr/me/leave-requests", "/hr/me/leave-requests/1/cancel", "/hr/leave-requests/1/decide", "/hr/attendance/1/close"]) {
+    for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+      const r = await probe(w.base, "POST", url, token);
+      assert.ok(DENIED.has(r.status), `${role} POST ${url} -> ${r.status}`);
+    }
+  }
   // Staff reach every staff-only prefix, and a staff token sees the victim's rows the portal tokens are refused.
-  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
+  for (const url of ["/crm/leads", "/candidates/all", "/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/expenses.csv", "/audit-logs", "/notifications/latest", "/alerts/expiring", "/jobsearch/employers", "/jobsearch/sources", "/jobsearch/candidates/1/profile", "/jobsearch/applications/1", "/jobsearch/messages/1", "/jobsearch/applications/1/recipient"]) {
     await ok(w.tokens.admin, url, "admin");
   }
   // The same victim rows through each portal token and the foreign Candidate: refused.
@@ -347,6 +439,158 @@ test("sweep controls: the refused routes are alive for the roles that own them (
     }
   }
   assert.equal(victim.id, 1);
+
+  // Chat: the one prefix the portal roles and the Candidate DO reach - and only their own conversation. Staff with chat permissions see everything
+  // in scope; HR / Accountant are refused; every foreign id is the same 404 whose body names nothing.
+  const { chat } = await world();
+  for (const k of ["admin", "mgr"]) {
+    const r = await ok(w.tokens[k], "/chat/conversations?limit=50", `${k} chat list`);
+    assert.equal(r.json.rows.length, 6);
+    await ok(w.tokens[k], "/chat/unread-count", `${k} chat unread`);
+  }
+  // HR / Accountant: no blanket 403 any more - an empty list / zero count, and the identical 404 for every conversation they were not added to.
+  for (const k of ["hrx", "acctx"]) {
+    const list = await ok(w.tokens[k], "/chat/conversations", `${k} chat list`);
+    assert.deepEqual(list.json.rows, [], `${k} sees no conversation`);
+    assert.deepEqual((await ok(w.tokens[k], "/chat/unread-count", `${k} chat unread`)).json, { unread: 0, conversations: 0 });
+    for (const id of Object.values(chat)) {
+      const r = await probe(w.base, "GET", `/chat/conversations/${id}/messages`, w.tokens[k]);
+      assert.equal(r.status, 404, `${k} GET thread ${id}`);
+    }
+    const open = await probe(w.base, "POST", "/chat/conversations", w.tokens[k], { body: JSON.stringify({ subject_type: "candidate", subject_id: victim.id }) });
+    assert.equal(open.status, 403, `${k} open`);
+  }
+  const missing = await probe(w.base, "GET", "/chat/conversations/2000000000/messages", attacker.token);
+  assert.equal(missing.status, 404);
+  const parties = [["candidate", attacker.token, chat.attacker], ["employer", emp.token, chat.employer], ["agency", agy.token, chat.agency]];
+  for (const [role, token, own] of parties) {
+    const list = await ok(token, "/chat/conversations", `${role} chat list`);
+    assert.deepEqual(list.json.rows.map((r) => r.id), [own], `${role} sees only its own conversation`);
+    const msgs = await ok(token, `/chat/conversations/${own}/messages`, `${role} chat thread`);
+    assert.equal(msgs.json.rows.length, 3);
+    assert.ok(msgs.text.includes(`SWEEP-CHAT-${role}`), "control: the party sees its own message");
+    assert.ok(!msgs.text.includes("SWEEP-CHAT-HIDDEN"), "a hidden message is a stub");
+    assert.ok(msgs.json.rows.some((m) => m.hidden === true && Object.keys(m).length === 3));
+    for (const other of Object.values(chat).filter((x) => x !== own)) {
+      for (const [m, u] of [["GET", `/chat/conversations/${other}/messages`], ["POST", `/chat/conversations/${other}/messages`], ["POST", `/chat/conversations/${other}/read`]]) {
+        const r = await probe(w.base, m, u, token, m === "POST" ? { body: JSON.stringify({ body: "intrusion", message_id: 1 }) } : {});
+        assert.equal(r.status, 404, `${role} ${m} ${u} -> ${r.status}`);
+        assert.equal(r.text, missing.text, "identical 404 body");
+      }
+    }
+    // No moderation and no cold start for portal roles; Candidate may only open its own.
+    for (const u of [`/chat/conversations/${own}/close`, `/chat/conversations/${own}/reopen`, "/chat/messages/1/hide", "/chat/messages/1/unhide"]) assert.equal((await probe(w.base, "POST", u, token, { body: JSON.stringify({ reason: "x" }) })).status, 403, `${role} POST ${u}`);
+  }
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", emp.token, { body: JSON.stringify({ subject_type: "employer_request", subject_id: emp.orgId }) })).status, 403);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", agy.token, { body: JSON.stringify({ subject_type: "agency", subject_id: agy.orgId }) })).status, 403);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "candidate", subject_id: victim.id }) })).status, 404);
+  assert.equal((await probe(w.base, "POST", "/chat/conversations", attacker.token, { body: JSON.stringify({ subject_type: "agency", subject_id: 1 }) })).status, 403);
+
+  // Realtime / preferences / channels (Task 3). The SSE probe aborts as soon as the headers arrive, so a refusal or an opened stream both return promptly.
+  for (const [role, token] of parties.map(([r, t]) => [r, t]).concat([["mgr", w.tokens.mgr], ["admin", w.tokens.admin]])) {
+    const ev = await probe(w.base, "GET", "/chat/events", token);
+    assert.equal(ev.status, 200, `${role} opens /chat/events`);
+    assert.equal(ev.stream, true);
+    assert.equal((await probe(w.base, "GET", "/chat/prefs", token)).status, 200, `${role} GET /chat/prefs`);
+    assert.equal((await probe(w.base, "PUT", "/chat/prefs", token, { body: JSON.stringify({ email_nudges: true }) })).status, 200, `${role} PUT /chat/prefs`);
+    assert.equal((await probe(w.base, "PUT", "/chat/prefs", token, { body: JSON.stringify({ email_nudges: "yes" }) })).status, 400);
+  }
+  for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token]]) assert.equal((await probe(w.base, "GET", "/chat/channels", token)).status, 403, `${role} GET /chat/channels`);
+  assert.equal((await probe(w.base, "GET", "/chat/channels", w.tokens.mgr)).status, 200);
+  for (const [m, u] of [["GET", "/chat/events"], ["GET", "/chat/prefs"], ["PUT", "/chat/prefs"], ["GET", "/chat/channels"]]) {
+    assert.equal((await probe(w.base, m, u, null)).status, 401, `anon ${m} ${u}`);
+    for (const k of ["hrx", "acctx"]) {
+      const r = await probe(w.base, m, u, w.tokens[k], m === "PUT" ? { body: JSON.stringify({ email_nudges: true }) } : {});
+      assert.equal(r.status, 200, `${k} ${m} ${u}`); // staff accounts: prefs, channel status and their own (room-only) event stream
+    }
+  }
+});
+
+test("sweep controls (mcp-tokens): staff with mcp:use reach it; other staff, portals, Candidate and anonymous are refused", async () => {
+  const { w, emp, agy, attacker } = await world();
+  for (const k of ["admin", "mgr", "super"]) {
+    const r = await probe(w.base, "GET", "/mcp-tokens", w.tokens[k]);
+    assert.equal(r.status, 200, `${k} GET /mcp-tokens -> ${r.status}`);
+    assert.equal(r.json.mcp_enabled, false);
+    const u = await probe(w.base, "GET", "/mcp-tokens/usage", w.tokens[k]);
+    assert.equal(u.status, 200, `${k} GET /mcp-tokens/usage -> ${u.status}`);
+  }
+  for (const [role, token] of [["hrx", w.tokens.hrx], ["acctx", w.tokens.acctx], ["employer", emp.token], ["agency", agy.token], ["candidate", attacker.token], ["anon", null]]) {
+    for (const [m, url] of [["GET", "/mcp-tokens"], ["GET", "/mcp-tokens/usage"], ["POST", "/mcp-tokens"], ["DELETE", "/mcp-tokens/1"]]) {
+      const r = await probe(w.base, m, url, token, m === "POST" ? { body: JSON.stringify({ name: "sweep" }) } : {});
+      assert.ok(DENIED.has(r.status), `${role} ${m} ${url} -> ${r.status}`);
+      assert.ok(isErrorOnly(r), `${role} ${m} ${url}: error-only body`);
+    }
+  }
+});
+
+test("sweep: a PAT bearer is 401 on EVERY authenticated route (only POST /mcp accepts one)", async () => {
+  const { w, routes } = await world();
+  const made = await probe(w.base, "POST", "/mcp-tokens", w.tokens.admin, { body: JSON.stringify({ name: "sweep-pat" }) });
+  assert.equal(made.status, 201, made.text);
+  const pat = made.json.secret;
+  assert.match(pat, /^vita_pat_/);
+  const keyOf = (r) => `${r.method} ${r.template}`;
+  const checked = [];
+  const offenders = [];
+  for (const r of routes) {
+    const key = keyOf(r);
+    if (PAT_EXEMPT.some((re) => re.test(key))) continue; // POST /mcp: the one route that accepts a PAT (covered by the control below)
+    if (MCP_405.test(key)) continue; // the other methods of /mcp are 405 for everyone (main sweep)
+    // Unauthenticated-by-design routes (public API, login, OTP, healthz, static mounts) never read the bearer, so a PAT there is simply ignored.
+    if (classify(key).allow.includes("anon")) continue;
+    for (const id of /:\w+/.test(r.template) ? [1, 2] : [1]) {
+      const url = fill(r.template, id);
+      for (const header of [{ authorization: `Bearer ${pat}` }, { authorization: pat }]) {
+        const res = await probe(w.base, r.method, url, null, { headers: header });
+        checked.push(key);
+        if (res.status !== 401) offenders.push(`${r.method} ${url} with PAT -> ${res.status}`);
+        else if (!res.stream && !isErrorOnly(res)) offenders.push(`${r.method} ${url}: refusal body is not error-only`);
+        if (res.text.includes(pat)) offenders.push(`${r.method} ${url}: echoes the PAT`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `\n${offenders.join("\n  ")}`);
+  for (const must of ["GET /candidates/all", "GET /finance/dashboard", "GET /hr/me", "GET /chat/conversations", "GET /jobsearch/auth/me", "GET /mcp-tokens", "GET /mcp-tokens/usage", "POST /mcp-tokens", "DELETE /mcp-tokens/:id", "POST /jobsearch/inbound/mail"]) assert.ok(checked.includes(must), `PAT checked on ${must}`);
+  assert.ok(checked.length > 150, `made ${checked.length} PAT calls`);
+  // The same PAT is valid for the token service itself (it was not rejected for being malformed) and its owner's JWT still works.
+  assert.ok(await require("../modules/mcp/tokens").authenticate(pat));
+  assert.equal((await probe(w.base, "GET", "/candidates/all", w.tokens.admin)).status, 200);
+});
+
+test("sweep controls (mcp): POST /mcp takes only a PAT - every JWT and anonymous is 401, a PAT works, disabled is 404, other methods are 405", async () => {
+  const { w, emp, agy, attacker } = await world();
+  const rpc = { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }), headers: { accept: "application/json, text/event-stream" } };
+  const made = await probe(w.base, "POST", "/mcp-tokens", w.tokens.mgr, { body: JSON.stringify({ name: "sweep-mcp" }) });
+  assert.equal(made.status, 201, made.text);
+  const actors = { admin: w.tokens.admin, mgr: w.tokens.mgr, hrx: w.tokens.hrx, acctx: w.tokens.acctx, employer: emp.token, agency: agy.token, candidate: attacker.token, anon: null };
+  // Disabled (the default of this suite): even a valid PAT gets the generic 404; the answer never depends on who asks.
+  assert.notEqual(process.env.MCP_ENABLED, "true");
+  for (const [role, token] of Object.entries({ ...actors, pat: made.json.secret })) {
+    const r = await probe(w.base, "POST", "/mcp", token, rpc);
+    assert.equal(r.status, 404, `${role} disabled`);
+    assert.deepEqual(r.json, { error: "MCP is disabled" });
+  }
+  process.env.MCP_ENABLED = "true";
+  try {
+    for (const [role, token] of Object.entries(actors)) {
+      const r = await probe(w.base, "POST", "/mcp", token, rpc);
+      assert.equal(r.status, 401, `${role} POST /mcp with a JWT / nothing`);
+      assert.deepEqual(r.json, { error: "Unauthorized" });
+    }
+    const ok = await probe(w.base, "POST", "/mcp", made.json.secret, rpc);
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.result.tools.length, 8);
+    for (const m of ["GET", "PUT", "PATCH", "DELETE"]) {
+      for (const [role, token] of Object.entries({ ...actors, pat: made.json.secret })) {
+        const r = await probe(w.base, m, "/mcp", token);
+        assert.equal(r.status, 405, `${role} ${m} /mcp`);
+        assert.equal(r.headers.get("allow"), "POST");
+      }
+    }
+  } finally {
+    delete process.env.MCP_ENABLED;
+  }
 });
 
 test("sweep: the inbound mail webhook rejects anything unsigned or wrongly signed, for every actor", async () => {
