@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>EMNA — Talent Showcase</title>
+<style>
+  :root{--bg:#0B1220;--panel:#141d30;--line:#22304b;--ink:#EAF0FA;--soft:#9fb0c9;--gold:#C6A35A;--accent:#2563EB}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,rgba(198,163,90,.10),transparent 60%),var(--bg);color:var(--ink);
+    font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;min-height:100vh;-webkit-user-select:none;user-select:none}
+  header{display:flex;align-items:center;gap:12px;padding:16px clamp(14px,4vw,42px);border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(11,18,32,.9);backdrop-filter:blur(8px);z-index:5}
+  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(150deg,#12294c,#1c3f70);color:#EBD8A6;display:flex;align-items:center;justify-content:center;font-weight:800;font-family:Georgia,serif;flex:none}
+  .brand b{font-size:15px;letter-spacing:.02em}
+  .brand span{display:block;font-size:10.5px;color:var(--soft);letter-spacing:.16em;text-transform:uppercase}
+  .count{margin-inline-start:auto;font-size:12.5px;color:var(--soft);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .wrap{padding:clamp(14px,4vw,42px);max-width:1240px;margin:0 auto}
+  .lead{color:var(--soft);font-size:14px;margin:0 0 14px;max-width:60ch}
+  .filterbar{position:sticky;top:67px;z-index:4;margin:0 -6px 18px;padding:10px 6px;background:linear-gradient(var(--bg),var(--bg) 78%,transparent)}
+  .filterlabel{font-size:11px;color:var(--soft);text-transform:uppercase;letter-spacing:.12em;margin:0 2px 8px;font-weight:700}
+  /* desktop: wrapped chips */
+  .filters{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{background:var(--panel);border:1px solid var(--line);color:var(--soft);border-radius:22px;padding:8px 15px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap;transition:.12s}
+  .chip:hover{border-color:var(--gold);color:var(--ink)}
+  .chip .n{opacity:.7;font-weight:800;margin-inline-start:5px}
+  .chip.on{background:var(--gold);border-color:var(--gold);color:#1a1200}
+  .chip.on .n{opacity:.85}
+  /* mobile: compact dropdown (built from the same data) */
+  .filtersel{display:none;width:100%;padding:13px 40px 13px 14px;border-radius:12px;background:var(--panel);color:var(--ink);
+    border:1px solid var(--line);font-size:16px;font-weight:700;font-family:inherit;-webkit-appearance:none;appearance:none;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239fb0c9' stroke-width='3'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat:no-repeat;background-position:right 14px center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+  /* tappable poster tile — loads NO video until opened (fast + reliable on phones) */
+  .vid{position:relative;aspect-ratio:9/16;background:#000;max-height:420px;display:block;width:100%;
+    border:0;margin:0;padding:0;font:inherit;color:inherit;cursor:pointer;overflow:hidden;
+    -webkit-tap-highlight-color:transparent}
+  .vid .poster{position:absolute;inset:0;background:linear-gradient(160deg,#16305a 0%,#0d1b33 55%,#0a1526 100%)}
+  .vid .poster::after{content:"";position:absolute;inset:0;
+    background:radial-gradient(120px 120px at 50% 38%,rgba(198,163,90,.16),transparent 70%)}
+  .vid .play{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);width:58px;height:58px;border-radius:50%;
+    background:rgba(11,18,32,.55);border:1.5px solid rgba(235,216,166,.85);display:flex;align-items:center;justify-content:center;
+    backdrop-filter:blur(2px);transition:.12s}
+  .vid:hover .play,.vid:focus-visible .play{background:var(--gold);border-color:var(--gold)}
+  .vid:hover .play svg,.vid:focus-visible .play svg{fill:#1a1200}
+  .vid .play svg{width:24px;height:24px;fill:#EBD8A6;margin-inline-start:3px}
+  .vid .hint{position:absolute;left:0;right:0;bottom:12px;text-align:center;font-size:11px;font-weight:700;
+    letter-spacing:.08em;text-transform:uppercase;color:var(--soft)}
+  .vid:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
+  .foot{display:flex;align-items:center;gap:8px;padding:11px 13px}
+  .job{font-weight:800;font-size:13.5px}
+  .tag{margin-inline-start:auto;font-size:10px;font-weight:800;color:var(--gold);border:1px solid rgba(198,163,90,.35);border-radius:20px;padding:2px 9px}
+  .msg{text-align:center;padding:80px 20px;color:var(--soft)}
+  .msg h2{color:var(--ink);font-weight:800;margin:0 0 8px}
+  .foot-note{text-align:center;color:#64748b;font-size:11.5px;padding:30px 16px 40px}
+  /* fullscreen lightbox player */
+  .lb{position:fixed;inset:0;z-index:50;background:rgba(3,7,15,.95);display:none;
+    align-items:center;justify-content:center;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+  .lb.open{display:flex}
+  .lb-inner{width:min(100%,460px);max-height:88vh;aspect-ratio:9/16;background:#000;border-radius:14px;overflow:hidden;position:relative;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .lb-inner video,.lb-inner iframe{width:100%;height:100%;border:0;object-fit:contain;background:#000;display:block}
+  .lb-x{position:absolute;top:calc(env(safe-area-inset-top) + 10px);right:14px;z-index:2;width:46px;height:46px;border-radius:50%;
+    border:1px solid var(--line);background:rgba(20,29,48,.92);color:#fff;font-size:22px;line-height:1;cursor:pointer;
+    display:flex;align-items:center;justify-content:center}
+  .lb-load{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--soft);font-size:13px}
+  @media(max-width:560px){
+    .filterbar{top:59px}
+    .filters{display:none}      /* hide the chip wall on phones */
+    .filtersel{display:block}    /* show the compact dropdown instead */
+    .grid{grid-template-columns:1fr 1fr;gap:10px}
+    .vid{max-height:none}
+    .vid .play{width:50px;height:50px}
+    .vid .play svg{width:21px;height:21px}
+  }
+</style>
+</head>
+<body oncontextmenu="return false">
+  <header>
+    <div class="logo">E</div>
+    <div class="brand"><b>EMNA Global</b><span>Talent Showcase</span></div>
+    <div class="count" id="count"></div>
+  </header>
+  <div class="wrap">
+    <p class="lead">A private preview of our available workers — video profiles only. Powered by Emna Visa Services.</p>
+    <div id="filterbar" class="filterbar" style="display:none">
+      <div class="filterlabel">Filter by profession</div>
+      <select id="filtersel" class="filtersel" aria-label="Filter by profession"></select>
+      <div id="filters" class="filters"></div>
+    </div>
+    <div id="grid" class="grid"></div>
+    <div id="msg" class="msg" style="display:none"></div>
+  </div>
+  <div class="foot-note">© Emna Visa Services — confidential preview. Not for redistribution.</div>
+
+  <!-- fullscreen player -->
+  <div id="lb" class="lb" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Video player">
+    <button id="lbClose" class="lb-x" type="button" aria-label="Close video">&#10005;</button>
+    <div id="lbInner" class="lb-inner"></div>
+  </div>
+
+<script>
+(function(){
+  var FN='https://hukvkunvdgsnuckezunw.supabase.co/functions/v1/guest-showcase';
+  var q=new URLSearchParams(location.search);
+  var token=(q.get('g')||q.get('token')||'').trim();
+  var grid=document.getElementById('grid'), msg=document.getElementById('msg'), countEl=document.getElementById('count');
+  var filterbar=document.getElementById('filterbar'), filters=document.getElementById('filters'), filtersel=document.getElementById('filtersel');
+  var lb=document.getElementById('lb'), lbInner=document.getElementById('lbInner'), lbClose=document.getElementById('lbClose');
+  var ITEMS=[];
+  function show(html){ grid.style.display='none'; filterbar.style.display='none'; msg.style.display='block'; msg.innerHTML=html; }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m];}); }
+  function norm(s){ return String(s==null?'':s).toLowerCase().replace(/\s+/g,' ').trim(); }
+
+  // Only sources we can actually play get a tile. Non-video files (e.g. a .pdf
+  // "presentation") used to be forced into a <video> tag and rendered as broken
+  // black boxes — those are now skipped.
+  function videoType(url){
+    var s=String(url||'');
+    if(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)[\w-]{6,}/.test(s)) return 'youtube';
+    if(/drive\.google\.com\/file\/d\/[\w-]+/.test(s)) return 'drive';
+    if(/\.(mp4|m4v|webm|ogg|ogv|mov)(\?|#|$)/i.test(s)) return 'file';
+    return null;
+  }
+
+  // Build the actual player markup — only created when a tile is tapped, so the
+  // page never loads dozens of large videos up front (the old cause of phones
+  // stalling). Direct files autoplay inline on the user's tap gesture.
+  function embed(url){
+    var yt=String(url).match(/(?:youtube\.com\/(?:watch\?v=|embed\/)|youtu\.be\/)([\w-]{6,})/);
+    if(yt) return '<iframe src="https://www.youtube.com/embed/'+yt[1]+'?rel=0&modestbranding=1&playsinline=1&autoplay=1" allow="autoplay;encrypted-media;fullscreen" allowfullscreen></iframe>';
+    var dr=String(url).match(/drive\.google\.com\/file\/d\/([\w-]+)/);
+    if(dr) return '<iframe src="https://drive.google.com/file/d/'+dr[1]+'/preview" allow="autoplay"></iframe>';
+    return '<video src="'+esc(url)+'#t=0.1" controls autoplay controlsList="nodownload noremoteplayback noplaybackrate" '
+         + 'disablePictureInPicture preload="auto" playsinline oncontextmenu="return false"></video>';
+  }
+
+  function openLb(url){
+    lbInner.innerHTML=embed(url);
+    lb.classList.add('open'); lb.setAttribute('aria-hidden','false');
+    document.body.style.overflow='hidden';
+    var v=lbInner.querySelector('video');
+    if(v){ var p=v.play(); if(p&&p.catch) p.catch(function(){}); } // controls are there if autoplay is blocked
+  }
+  function closeLb(){
+    lb.classList.remove('open'); lb.setAttribute('aria-hidden','true');
+    lbInner.innerHTML=''; // stops any playing media
+    document.body.style.overflow='';
+  }
+  lbClose.addEventListener('click',closeLb);
+  lb.addEventListener('click',function(e){ if(e.target===lb) closeLb(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&lb.classList.contains('open')) closeLb(); });
+
+  function card(job,src){
+    var label=esc(job)||'Worker';
+    return '<div class="card">'
+      + '<button class="vid" type="button" data-src="'+esc(src)+'" aria-label="Play '+label+' video">'
+      +   '<span class="poster"></span>'
+      +   '<span class="play"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg></span>'
+      +   '<span class="hint">Tap to play</span>'
+      + '</button>'
+      + '<div class="foot"><span class="job">'+label+'</span><span class="tag">EMNA</span></div>'
+      + '</div>';
+  }
+
+  // one delegated handler for every tile (works no matter how the grid re-renders)
+  grid.addEventListener('click',function(e){
+    var btn=e.target.closest('.vid'); if(!btn) return;
+    var src=btn.getAttribute('data-src'); if(src) openLb(src);
+  });
+
+  var OTHER=' other'; // sentinel key for candidates with no profession set
+  function jobKey(j){ var n=norm(j); return n||OTHER; }
+  function renderGrid(sel){
+    var html='', n=0;
+    ITEMS.forEach(function(it){
+      if(sel && jobKey(it.job)!==sel) return;
+      (it.sources||[]).forEach(function(src){ html+=card(it.job,src); n++; });
+    });
+    grid.innerHTML=html;
+    countEl.textContent=n+' video'+(n===1?'':'s');
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  // one filter path for BOTH the desktop chips and the mobile dropdown
+  window._applyFilter=function(sel){
+    var cs=document.querySelectorAll('.chip');
+    for(var i=0;i<cs.length;i++){ cs[i].classList.toggle('on', (cs[i].getAttribute('data-sel')||'')===sel); }
+    if(filtersel) filtersel.value=sel;
+    renderGrid(sel);
+  };
+  function buildFilters(){
+    var map={}, total=0;
+    ITEMS.forEach(function(it){
+      var c=(it.sources||[]).length; if(!c) return; total+=c;
+      var k=jobKey(it.job);
+      if(!map[k]) map[k]={label:(String(it.job||'').trim()||'Other'),n:0};
+      map[k].n+=c;
+    });
+    var keys=Object.keys(map).sort(function(a,b){ return map[b].n-map[a].n || map[a].label.localeCompare(map[b].label); });
+    if(keys.length<=1){ filterbar.style.display='none'; return; }
+    // desktop chips
+    var h='<button class="chip on" data-sel="" onclick="_applyFilter(\'\')">🌐 All<span class="n">'+total+'</span></button>';
+    // mobile dropdown options
+    var o='<option value="">🌐 All professions ('+total+')</option>';
+    keys.forEach(function(k){
+      h+='<button class="chip" data-sel="'+esc(k)+'" onclick="_applyFilter(this.getAttribute(\'data-sel\'))">'+esc(map[k].label)+'<span class="n">'+map[k].n+'</span></button>';
+      o+='<option value="'+esc(k)+'">'+esc(map[k].label)+' ('+map[k].n+')</option>';
+    });
+    filters.innerHTML=h;
+    filtersel.innerHTML=o;
+    filtersel.onchange=function(){ _applyFilter(this.value); };
+    filterbar.style.display='block';
+  }
+  if(!token){ show('<h2>Link required</h2><div>This preview needs a valid link. Please ask Emna Visa Services for the correct link.</div>'); return; }
+  fetch(FN,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'videos',token:token})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d||!d.ok){ show('<h2>Link not available</h2><div>This preview link is no longer active. Please request a new one from Emna Visa Services.</div>'); return; }
+      // keep only playable video sources; drop items left with none
+      ITEMS=(d.items||[]).map(function(it){
+        return { job:it.job, sources:(it.sources||[]).filter(function(s){ return videoType(s); }) };
+      }).filter(function(it){ return it.sources.length; });
+      if(!ITEMS.length){ show('<h2>No videos yet</h2><div>New talent videos are added regularly — check back soon.</div>'); return; }
+      buildFilters();
+      renderGrid('');
+    })
+    .catch(function(){ show('<h2>Something went wrong</h2><div>Please try again in a moment.</div>'); });
+})();
+</script>
+</body>
+</html>
