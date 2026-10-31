@@ -59,7 +59,7 @@ const HANDOFF_REASONS = new Set(guard.HANDOFF_REASONS);
 // Handoffs that mean "this posting cannot be completed by e-mail" (everything but a generic staff review).
 const CHANNEL_HANDOFFS = new Set(guard.HANDOFF_REASONS.filter((r) => r !== "staff_review"));
 // Refusals at queue time that leave a note on the application timeline.
-const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES]);
+const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES, "recipient_suppressed", "employer_opted_out", "outreach_basis_not_permitted"]);
 const EVIDENCE_KINDS = ["delivery_receipt", "employer_acknowledgement", "manual_confirmation"];
 const MIN_NOTE = 10;
 // Internal capability for system evidence (Task 13 receipt / reply ingestion). Never passed by routes.

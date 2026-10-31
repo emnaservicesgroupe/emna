@@ -1,5 +1,5 @@
 // Employer directory, automation rules and the employer-confirmation list (Task 18), mounted at /jobsearch:
-//   GET    /employers                    ?q&page&pageSize  staff (jobsearch:read): admins see all; other staff see
+//   GET    /employers                    ?q&province&status&page&pageSize  staff (jobsearch:read): admins see all; other staff see
 //                                        employers of jobs their (non-deleted) candidates have applications for
 //   PUT    /employers/:id                {domain?, verifiedContactEmail?, name?}  jobsearch:admin ONLY (Task 19: domain
 //                                        and verifiedContactEmail decide where automatic sends go; Task 20: a rename
@@ -7,6 +7,15 @@
 //                                        apply, so Managers may not rename either). Domain normalised (URL/www/trailing dot, IDN ->
 //                                        punycode); free-mail domains, e-mail addresses, ports and IPs refused;
 //                                        normalized names stay unique; audited (before/after)
+//   GET    /employers/:id                detail (province, city, industry, phone, recruiter, sourceUrls, eligibilityNote, status,
+//                                        lastVerifiedAt); `notes` (staff-only) only for jobsearch:admin; same scope as the list (404 outside it)
+//   PATCH  /employers/:id                {province?, city?, industry?, phone?, recruiterContactName?, sourceUrls?, eligibilityNote?,
+//                                        status?, lastVerifiedAt?, notes?}  jobsearch:admin ONLY (DECISIONS #10), strict validation, audited
+//   GET    /employers/:id/history        contact history (applications, submissions, messages), scoped by candidateScopeSql; other
+//                                        candidates' contacts are a single number (contactedByOtherCandidates)
+//   GET    /suppressions                 ?kind&source&q&page&pageSize  staff (jobsearch:read)
+//   POST   /suppressions                 {kind: email|domain, value, reason?, employerId?}  staff (jobsearch:write); 201 new / 200 existing
+//   DELETE /suppressions/:id             {reason}  jobsearch:admin ONLY; audited (the do-not-contact list is never shortened silently)
 //   GET    /automation-rules             ?candidateId  jobsearch:admin
 //   POST   /automation-rules             {candidateId, type: auto_submit|ack_reply, countries?, professions?,
 //                                        sources?, employerIds?, note?}  jobsearch:admin; approved_by = caller
@@ -23,6 +32,8 @@ const guard = require("../modules/jobsearch/guard");
 const { normalizeEmployer } = require("../modules/jobsearch/jobStore");
 const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
 const { auditJs } = require("../utils/audit");
+const suppression = require("../modules/jobsearch/suppression");
+const employerHistory = require("../modules/jobsearch/employerHistory");
 
 const router = express.Router();
 const db = () => require("../db");
@@ -60,6 +71,11 @@ function employerScope(user, offset) {
   };
 }
 
+const PROVINCES = Object.freeze(["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"]);
+const EMPLOYER_STATUSES = Object.freeze(["new", "verified", "contacted", "replied", "opted_out", "blocked"]);
+const MAX_SOURCE_URLS = 20;
+const MAX_URL = 500;
+
 function presentEmployer(e) {
   return {
     id: e.id,
@@ -67,9 +83,34 @@ function presentEmployer(e) {
     domain: e.domain || null,
     domainUnicode: e.domain ? url.domainToUnicode(e.domain) || e.domain : null,
     verifiedContactEmail: e.verified_contact_email || null,
+    province: e.province || null,
+    city: e.city || null,
+    industry: e.industry || null,
+    status: e.status || "new",
+    lastVerifiedAt: e.last_verified_at || null,
     jobs: e.jobs === undefined ? undefined : Number(e.jobs),
     applications: e.applications === undefined ? undefined : Number(e.applications),
   };
+}
+
+/** Detail view. `notes` are staff-only: included only for the roles that may edit employers (jobsearch:admin). */
+async function presentEmployerDetail(e, user) {
+  const canEdit = hasPerm(user, "jobsearch:admin");
+  const out = {
+    ...presentEmployer(e),
+    phone: e.phone || null,
+    recruiterContactName: e.recruiter_contact_name || null,
+    sourceUrls: Array.isArray(e.source_urls) ? e.source_urls : [],
+    eligibilityNote: e.eligibility_note || null,
+    createdAt: e.created_at,
+    canEdit,
+  };
+  const probes = [e.verified_contact_email, e.domain ? `postmaster@${e.domain}` : null].filter(Boolean);
+  let hit = null;
+  for (const p of probes) hit = hit || (await suppression.findSuppression(db(), p));
+  out.suppressed = Boolean(hit);
+  if (canEdit) out.notes = e.notes || null;
+  return out;
 }
 
 router.get("/employers", verifyToken, asyncHandler(async (req, res) => {
@@ -82,6 +123,16 @@ router.get("/employers", verifyToken, asyncHandler(async (req, res) => {
     params.push(`%${likeEscape(req.query.q.trim().slice(0, 100))}%`);
     where.push(`(e.name ILIKE $${params.length} OR e.domain ILIKE $${params.length})`);
   }
+  if (req.query.province !== undefined) {
+    if (typeof req.query.province !== "string" || !PROVINCES.includes(req.query.province)) throw new HttpError(400, `province must be one of ${PROVINCES.join(", ")}`);
+    params.push(req.query.province);
+    where.push(`e.province = $${params.length}`);
+  }
+  if (req.query.status !== undefined) {
+    if (typeof req.query.status !== "string" || !EMPLOYER_STATUSES.includes(req.query.status)) throw new HttpError(400, `status must be one of ${EMPLOYER_STATUSES.join(", ")}`);
+    params.push(req.query.status);
+    where.push(`e.status = $${params.length}`);
+  }
   const w = `WHERE ${where.join(" AND ")}`;
   const total = (await db().query(`SELECT count(*)::int AS n FROM js_employers e ${w}`, params)).rows[0].n;
   const rows = (await db().query(
@@ -91,6 +142,216 @@ router.get("/employers", verifyToken, asyncHandler(async (req, res) => {
     [...params, pageSize, (page - 1) * pageSize]
   )).rows;
   res.json({ employers: rows.map(presentEmployer), page, pageSize, total });
+}));
+
+/** One employer the caller may see (same scope as the list), or a 404. */
+async function loadEmployer(user, rawId, c = db(), { lock = false } = {}) {
+  const id = posInt(rawId);
+  if (!id) throw new HttpError(404, "Not found");
+  const scope = employerScope(user, 1);
+  const row = (await c.query(`SELECT e.* FROM js_employers e WHERE e.id = $1 AND ${scope.clause}${lock ? " FOR UPDATE OF e" : ""}`, [id, ...scope.params])).rows[0];
+  if (!row) throw new HttpError(404, "Not found");
+  return row;
+}
+
+router.get("/employers/:id", verifyToken, asyncHandler(async (req, res) => {
+  needStaff(req.user, "jobsearch:read");
+  const e = await loadEmployer(req.user, req.params.id);
+  res.set("Cache-Control", "no-store").json(await presentEmployerDetail(e, req.user));
+}));
+
+router.get("/employers/:id/history", verifyToken, asyncHandler(async (req, res) => {
+  needStaff(req.user, "jobsearch:read");
+  const e = await loadEmployer(req.user, req.params.id);
+  const h = await employerHistory.historyFor(db(), req.user, e.id, { detail: true });
+  res.set("Cache-Control", "no-store").json({ employer: { id: e.id, name: e.name, status: e.status }, ...h });
+}));
+
+// ---- PATCH /employers/:id (administrator only; the profile fields, not the name / domain / contact that decide where mail goes)
+
+const PATCH_FIELDS = ["province", "city", "industry", "phone", "recruiterContactName", "sourceUrls", "eligibilityNote", "status", "lastVerifiedAt", "notes"];
+const PATCH_COLUMN = { province: "province", city: "city", industry: "industry", phone: "phone", recruiterContactName: "recruiter_contact_name", sourceUrls: "source_urls", eligibilityNote: "eligibility_note", status: "status", lastVerifiedAt: "last_verified_at", notes: "notes" };
+
+function cleanText(v, key, max, { multiline = false } = {}) {
+  if (v === null) return null;
+  if (typeof v !== "string") throw new HttpError(400, `${key} must be a string or null`);
+  let s = v.normalize("NFC").replace(/\r\n?/g, "\n");
+  s = multiline ? s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u2028\u2029]+/g, " ") : s.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ");
+  s = s.trim();
+  if (s.length > max) throw new HttpError(400, `${key} must be at most ${max} characters`);
+  return s || null;
+}
+
+function cleanPhone(v) {
+  if (v === null) return null;
+  if (typeof v !== "string") throw new HttpError(400, "phone must be a string or null");
+  const s = v.trim();
+  if (!s) return null;
+  if (!/^[0-9+().\- ]{5,30}$/.test(s) || (s.match(/[0-9]/g) || []).length < 5) throw new HttpError(400, "phone must be a telephone number (digits, spaces, + ( ) . -)");
+  return s;
+}
+
+/** Array of at most 20 http(s) URLs without credentials; returned canonical and de-duplicated. */
+function cleanSourceUrls(v) {
+  if (!Array.isArray(v)) throw new HttpError(400, `sourceUrls must be an array of at most ${MAX_SOURCE_URLS} http(s) URLs`);
+  if (v.length > MAX_SOURCE_URLS) throw new HttpError(400, `sourceUrls must hold at most ${MAX_SOURCE_URLS} URLs`);
+  const out = [];
+  for (const raw of v) {
+    if (typeof raw !== "string" || !raw || raw.length > MAX_URL) throw new HttpError(400, `each source URL must be a string of at most ${MAX_URL} characters`);
+    if (/[\s\u0000-\u001f\u007f]/.test(raw)) throw new HttpError(400, "a source URL must not contain spaces or control characters");
+    let u;
+    try {
+      u = new URL(raw);
+    } catch {
+      throw new HttpError(400, "a source URL is not a valid URL");
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new HttpError(400, "a source URL must start with http:// or https://");
+    if (u.username || u.password) throw new HttpError(400, "a source URL must not contain credentials");
+    if (!u.hostname) throw new HttpError(400, "a source URL needs a host");
+    if (!out.includes(u.href)) out.push(u.href);
+  }
+  return out;
+}
+
+function cleanVerifiedAt(v) {
+  if (v === null) return null;
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(v.trim())) throw new HttpError(400, "lastVerifiedAt must be an ISO date or date-time, or null");
+  const t = Date.parse(v.trim());
+  if (!Number.isFinite(t)) throw new HttpError(400, "lastVerifiedAt is not a valid date");
+  if (t > Date.now() + 24 * 3600 * 1000) throw new HttpError(400, "lastVerifiedAt must not be in the future");
+  return new Date(t).toISOString();
+}
+
+function validateEmployerPatch(b) {
+  const unknown = Object.keys(b).filter((k) => !PATCH_FIELDS.includes(k));
+  if (unknown.length) throw new HttpError(400, `Unknown field(s): ${unknown.join(", ")} (name, domain and verifiedContactEmail are changed with PUT)`);
+  if (!PATCH_FIELDS.some((k) => k in b)) throw new HttpError(400, `Nothing to change: send ${PATCH_FIELDS.join(", ")}`);
+  const patch = {};
+  if ("province" in b) {
+    if (b.province !== null && !PROVINCES.includes(b.province)) throw new HttpError(400, `province must be one of ${PROVINCES.join(", ")} or null`);
+    patch.province = b.province;
+  }
+  if ("city" in b) patch.city = cleanText(b.city, "city", 100);
+  if ("industry" in b) patch.industry = cleanText(b.industry, "industry", 100);
+  if ("phone" in b) patch.phone = cleanPhone(b.phone);
+  if ("recruiterContactName" in b) patch.recruiterContactName = cleanText(b.recruiterContactName, "recruiterContactName", 120);
+  if ("sourceUrls" in b) patch.sourceUrls = cleanSourceUrls(b.sourceUrls);
+  if ("eligibilityNote" in b) patch.eligibilityNote = cleanText(b.eligibilityNote, "eligibilityNote", 1000, { multiline: true });
+  if ("status" in b) {
+    if (!EMPLOYER_STATUSES.includes(b.status)) throw new HttpError(400, `status must be one of ${EMPLOYER_STATUSES.join(", ")}`);
+    patch.status = b.status;
+  }
+  if ("lastVerifiedAt" in b) patch.lastVerifiedAt = cleanVerifiedAt(b.lastVerifiedAt);
+  if ("notes" in b) patch.notes = cleanText(b.notes, "notes", 4000, { multiline: true });
+  // Marking an employer verified stamps the verification time unless the caller states one.
+  if (patch.status === "verified" && !("lastVerifiedAt" in patch)) patch.lastVerifiedAt = new Date().toISOString();
+  return patch;
+}
+
+router.patch("/employers/:id", verifyToken, asyncHandler(async (req, res) => {
+  const user = req.user;
+  if (!hasPerm(user, "jobsearch:admin")) throw new HttpError(403, "Only an administrator (jobsearch:admin) can edit an employer's record");
+  const id = posInt(req.params.id);
+  if (!id) throw new HttpError(404, "Not found");
+  const patch = validateEmployerPatch(body(req));
+  const client = await db().connect();
+  let out;
+  try {
+    await client.query("BEGIN");
+    const cur = await loadEmployer(user, id, client, { lock: true });
+    const keys = Object.keys(patch);
+    const row = (await client.query(
+      `UPDATE js_employers SET ${keys.map((k, i) => `${PATCH_COLUMN[k]} = $${i + 2}${k === "sourceUrls" ? "::jsonb" : ""}`).join(", ")} WHERE id = $1 RETURNING *`,
+      [id, ...keys.map((k) => (k === "sourceUrls" ? JSON.stringify(patch[k]) : patch[k]))]
+    )).rows[0];
+    // Free-text notes are staff-only: the audit row records THAT they changed, never their content.
+    const view = (r) => {
+      const v = {};
+      for (const k of keys) v[k] = k === "notes" ? (r.notes ? "set" : null) : k === "sourceUrls" ? r.source_urls : r[PATCH_COLUMN[k]] instanceof Date ? r[PATCH_COLUMN[k]].toISOString() : r[PATCH_COLUMN[k]];
+      return v;
+    };
+    const after = view(row);
+    if ("notes" in patch && (cur.notes || null) !== (row.notes || null)) after.notes = "changed";
+    await auditJs({ userId: user.id, action: "employer.profile_update", entity: "js_employers", entityId: id, detail: { employerId: id, fields: keys, before: view(cur), after }, client });
+    await client.query("COMMIT");
+    out = row;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  res.json(await presentEmployerDetail(out, user));
+}));
+
+// ---------------------------------------------------------------- suppressions (do-not-contact list)
+
+function presentSuppression(r) {
+  return { id: Number(r.id), kind: r.kind, value: r.value, reason: r.reason || null, source: r.source, employerId: r.employer_id || null, messageId: r.message_id || null, createdBy: r.created_by || null, createdAt: r.created_at };
+}
+
+router.get("/suppressions", verifyToken, asyncHandler(async (req, res) => {
+  needStaff(req.user, "jobsearch:read");
+  const { page, pageSize } = paging(req.query);
+  const where = ["TRUE"];
+  const params = [];
+  if (req.query.kind !== undefined) {
+    if (typeof req.query.kind !== "string" || !suppression.KINDS.includes(req.query.kind)) throw new HttpError(400, "kind must be email or domain");
+    params.push(req.query.kind);
+    where.push(`kind = $${params.length}`);
+  }
+  if (req.query.source !== undefined) {
+    if (typeof req.query.source !== "string" || !suppression.SOURCES.includes(req.query.source)) throw new HttpError(400, "source must be manual, reply_opt_out or bounce");
+    params.push(req.query.source);
+    where.push(`source = $${params.length}`);
+  }
+  if (typeof req.query.q === "string" && req.query.q.trim()) {
+    params.push(`%${likeEscape(req.query.q.trim().toLowerCase().slice(0, 100))}%`);
+    where.push(`value LIKE $${params.length}`);
+  }
+  const w = `WHERE ${where.join(" AND ")}`;
+  const total = (await db().query(`SELECT count(*)::int AS n FROM js_suppressions ${w}`, params)).rows[0].n;
+  const rows = (await db().query(`SELECT * FROM js_suppressions ${w} ORDER BY id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, pageSize, (page - 1) * pageSize])).rows;
+  res.set("Cache-Control", "no-store").json({ suppressions: rows.map(presentSuppression), page, pageSize, total });
+}));
+
+router.post("/suppressions", verifyToken, asyncHandler(async (req, res) => {
+  needStaff(req.user, "jobsearch:write");
+  const b = body(req);
+  const unknown = Object.keys(b).filter((k) => !["kind", "value", "reason", "employerId"].includes(k));
+  if (unknown.length) throw new HttpError(400, `Unknown field(s): ${unknown.join(", ")}`);
+  const client = await db().connect();
+  let result;
+  try {
+    await client.query("BEGIN");
+    result = await suppression.addSuppression(client, { kind: b.kind, value: b.value, reason: b.reason, employerId: b.employerId, createdBy: req.user.id });
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  res.status(result.created ? 201 : 200).json(presentSuppression(result.row));
+}));
+
+router.delete("/suppressions/:id", verifyToken, asyncHandler(async (req, res) => {
+  needAdmin(req.user);
+  const id = posInt(req.params.id);
+  if (!id) throw new HttpError(404, "Not found");
+  const client = await db().connect();
+  let out;
+  try {
+    await client.query("BEGIN");
+    out = await suppression.removeSuppression(client, { id, actor: req.user, reason: body(req).reason });
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  res.json(out);
 }));
 
 /**

@@ -12,6 +12,7 @@ const coverLetter = require("./coverLetter");
 const documentPolicy = require("./documentPolicy");
 const { country, NOTICE } = require("./matching");
 const { normalize } = require("./jobStore");
+const employerHistoryModule = require("./employerHistory");
 const { PERMISSIONS } = require("../../middleware/role");
 const { logAudit } = require("../../utils/audit");
 
@@ -373,9 +374,14 @@ async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT
     };
     await timeline(client, app.id, actor, "package_built", summary);
     await audit(client, actor, "application.prepare", app.candidate_id, app.id, summary);
+    // Stage 8 task 4: staff see a suppressed recipient / opted-out employer / non-permitted outreach basis NOW, not at send time,
+    // and the contact history of this employer (counts and last date, scoped to the caller) before they draft.
+    const outreachBlockers = await require("./guard").outreachBlockers(client, app.id);
+    for (const b of outreachBlockers) await timeline(client, app.id, actor, "outreach_blocked", { code: b.code, stage: "prepare" });
+    const employerHistory = await employerHistoryModule.summaryFor(client, actor, job.employer_id, app.id);
     if (!pkg.blocked.length) app = await transition(app.id, "ready_for_review", actor, { client, reason: "package_complete" });
     await event(client, app.candidate_id, "application.prepared", { applicationId: app.id, status: app.status, blocked: pkg.blocked.length });
-    return { app, pkg: { included: pkg.included, blocked: pkg.blocked, notes }, letter: letter.text };
+    return { app, pkg: { included: pkg.included, blocked: pkg.blocked, notes, outreach_blockers: outreachBlockers.map((b) => ({ code: b.code, detail: b.detail })), employer_history: employerHistory }, letter: letter.text };
   });
   await logAfter(actor, "jobsearch.application.prepare", result.app.id, { status: result.app.status, blocked: result.pkg.blocked.length });
   // Candidates see which documents/versions are in their package, never hashes (same rule as getApplication).
@@ -400,12 +406,21 @@ async function approveApplication({ id, actor, reason }) {
     if (problems.length) throw new HttpError(409, `The package is no longer valid: ${documentPolicy.formatProblems(problems)}`);
     const job = (await client.query("SELECT status FROM js_jobs WHERE id = $1", [locked.job_id])).rows[0];
     if (!job || job.status !== "open") throw new HttpError(409, "The job is no longer open");
+    // The do-not-contact list is absolute (stage 8 task 4): a suppressed recipient / opted-out employer / non-permitted outreach
+    // basis cannot be approved. The refusal leaves a timeline note (this transaction commits it; the 409 follows).
+    const outreachBlockers = await require("./guard").outreachBlockers(client, locked.id);
+    if (outreachBlockers.length) {
+      for (const b of outreachBlockers) await timeline(client, locked.id, actor, "outreach_blocked", { code: b.code, stage: "approve" });
+      await audit(client, actor, "application.approve_refused", locked.candidate_id, locked.id, { blockers: outreachBlockers });
+      return { blockedBy: outreachBlockers.map((b) => b.code) };
+    }
     const row = await transition(locked.id, "approved", actor, { client, reason: why, detail: { approvedBy: actor.id } });
     await client.query("UPDATE js_application_documents SET approved_by = $2, approved_at = now() WHERE application_id = $1 AND removed_at IS NULL", [locked.id, actor.id]);
     await audit(client, actor, "application.approve", locked.candidate_id, locked.id, { reason: why });
     await event(client, locked.candidate_id, "application.approved", { applicationId: locked.id });
     return row;
   });
+  if (app.blockedBy) throw new HttpError(409, `Cannot approve: ${app.blockedBy.join(", ")} (the employer or recipient is on the do-not-contact list, or the outreach basis is not permitted)`);
   await logAfter(actor, "jobsearch.application.approve", app.id, { reason: why });
   return { application: present(app) };
 }
@@ -655,6 +670,9 @@ async function autoApproveEligibility(application, opts = {}) {
     }
     if (match.overseas_accepted !== true) reasons.push("overseas_acceptance_not_confirmed");
   }
+  // Do-not-contact list, employer opt-out and outreach basis (stage 8 task 4): checked here so auto-approval never happens,
+  // and again by the guard at send time with its own codes.
+  reasons.push(...(await require("./guard").outreachBlockers(c, app.id)).map((b) => b.code));
   const uniq = [...new Set(reasons)];
   return { allowed: uniq.length === 0, reasons: uniq };
 }

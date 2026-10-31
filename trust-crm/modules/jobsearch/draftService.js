@@ -11,6 +11,7 @@
 // stored as drafts and still need the same approval to be sent.
 const crypto = require("crypto");
 const guard = require("./guard");
+const suppression = require("./suppression");
 const consentService = require("./consentService");
 const applicationService = require("./applicationService");
 const matcher = require("./replyMatcher");
@@ -36,6 +37,7 @@ const SUMMARY = {
     rejection: "The employer decided not to continue with this application.",
     offer: "The employer sent a message about a possible job offer. Our team will review it with you.",
     info_request: "The employer asked for more information. Our team will contact you.",
+    opt_out: "The employer asked not to be contacted again. They were added to the do-not-contact list.",
     other: "The employer replied. Our team is reviewing the message.",
   },
   fr: {
@@ -44,6 +46,7 @@ const SUMMARY = {
     rejection: "L'employeur a décidé de ne pas poursuivre cette candidature.",
     offer: "L'employeur a envoyé un message concernant une possible offre. Notre équipe l'examinera avec vous.",
     info_request: "L'employeur demande des informations complémentaires. Notre équipe vous contactera.",
+    opt_out: "L'employeur a demandé à ne plus être contacté. Il a été ajouté à la liste de non-sollicitation.",
     other: "L'employeur a répondu. Notre équipe examine le message.",
   },
 };
@@ -102,7 +105,7 @@ function draftReply(message, application, lang) {
   const l = pickLang(lang);
   const t = REPLY[l === "ar" ? "en" : l];
   const title = oneLine((application && (application.jobTitle || application.title)) || "", 120) || (l === "fr" ? "proposé" : "advertised");
-  const body = `${t.greeting}\n\n${t[categoryOf(message)](title)}\n\n${t.closing}\n`;
+  const body = `${t.greeting}\n\n${(t[categoryOf(message)] || t.other)(title)}\n\n${t.closing}\n`;
   return l === "ar" ? `[${AR_NOTE}]\n\n${body}` : body;
 }
 
@@ -131,7 +134,7 @@ async function loadMessageScoped(user, messageId, client) {
 
 async function employerOfApp(c, app) {
   return (await c.query(
-    "SELECT j.title, e.id AS employer_id, e.domain, e.verified_contact_email FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1",
+    "SELECT j.title, e.id AS employer_id, e.domain, e.verified_contact_email, e.status AS employer_status FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1",
     [app.job_id]
   )).rows[0] || {};
 }
@@ -155,6 +158,7 @@ async function createDraft({ messageId, actor, lang }) {
   const msg = await loadMessageScoped(actor, messageId);
   if (msg.direction !== "in" || !msg.application_id) throw httpErr(409, "Only a message matched to an application can be answered");
   if (lang !== undefined && !LANGS.includes(lang)) throw httpErr(400, `lang must be one of ${LANGS.join(", ")}`);
+  if (categoryOf(msg) === "opt_out") throw httpErr(409, "An opt-out request is never answered: the sender is on the do-not-contact list", "opt_out_never_answered");
   const sender = matcher.parseFrom(msg.from_addr);
   if (!sender.ok) throw httpErr(409, "The message has no usable sender address");
   const out = await S.inTx(async (client) => {
@@ -227,6 +231,9 @@ async function checkSend(client, { app, draft, parent, emp, auto }) {
   const to = guard.normalizeEmail(draft.to_addr || "");
   if (!sender.ok || !to || to !== sender.address) return { code: "recipient_changed", detail: "The recipient must be the sender of the employer's message" };
   if (!matcher.senderMatchesEmployer(emp, to)) return { code: "recipient_unverified", detail: "The recipient is not at the employer's verified domain" };
+  // The do-not-contact list is absolute for follow-ups too (stage 8 task 4).
+  if (["opted_out", "blocked"].includes(emp.employer_status)) return { code: "employer_opted_out", detail: `The employer is marked ${emp.employer_status}; no further contact` };
+  if (await suppression.isSuppressed(client, to)) return { code: "recipient_suppressed", detail: "The recipient is on the do-not-contact list" };
   if (auto) {
     const n = (await client.query(
       `SELECT count(*)::int AS n FROM js_messages WHERE direction = 'out' AND auto_sent = true AND thread_ref = $1

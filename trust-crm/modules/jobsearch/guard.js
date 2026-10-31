@@ -25,6 +25,7 @@ const documentPolicy = require("./documentPolicy");
 const jobStore = require("./jobStore");
 const { country } = require("./matching");
 const { detectHandoff } = require("./handoffDetector");
+const suppression = require("./suppression");
 
 const db = () => require("../../db");
 
@@ -50,6 +51,10 @@ const GUARD_CODES = Object.freeze([
   "cap_exceeded",
   "recipient_unverified",
   "handoff_required",
+  // stage 8 task 4: the do-not-contact list and the outreach basis are absolute
+  "recipient_suppressed",
+  "employer_opted_out",
+  "outreach_basis_not_permitted",
 ]);
 const HANDOFF_REASONS = Object.freeze(["staff_review", "unsupported_channel", "captcha", "payment", "login", "legal_declaration", "custom_questions"]);
 
@@ -64,7 +69,7 @@ const DUPLICATE_WINDOW_DAYS = 90;
 
 // autoApproveEligibility reasons the guard handles itself (at send time the status is approved/queued,
 // caps are counted excluding this application, documents/job are checked by their own steps).
-const ELIGIBILITY_HANDLED_HERE = new Set(["status_not_ready_for_review", "cap_not_set", "cap_per_day_exceeded", "cap_per_week_exceeded", "job_not_open", "package_blocked"]);
+const ELIGIBILITY_HANDLED_HERE = new Set(["recipient_suppressed", "employer_opted_out", "outreach_basis_not_permitted", "status_not_ready_for_review", "cap_not_set", "cap_per_day_exceeded", "cap_per_week_exceeded", "job_not_open", "package_blocked"]);
 const LABEL_REASONS = new Set(["employer_support_not_confirmed", "employer_support_unavailable", "employer_support_conflict", "overseas_acceptance_not_confirmed"]);
 
 const posInt = (v) => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : typeof v === "string" && /^\d{1,9}$/.test(v) && Number(v) > 0 ? Number(v) : null);
@@ -229,7 +234,7 @@ function pickRecipient(job, optsRecipient) {
   return out(null, null, { ambiguous: posted.length > 1 });
 }
 
-const JOB_WITH_EMPLOYER_SQL = `SELECT j.*, e.id AS e_id, e.name AS e_name, e.domain AS e_domain, e.verified_contact_email AS e_contact
+const JOB_WITH_EMPLOYER_SQL = `SELECT j.*, e.id AS e_id, e.name AS e_name, e.domain AS e_domain, e.verified_contact_email AS e_contact, e.status AS e_status
        FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1`;
 
 /**
@@ -246,6 +251,54 @@ async function resolveRecipient(applicationId, opts = {}) {
   const job = (await c.query(JOB_WITH_EMPLOYER_SQL, [app.job_id])).rows[0];
   if (!job) return { recipient: null, source: null, domainMatchesEmployer: false, verifiedContact: false };
   return pickRecipient(job, opts.recipient);
+}
+
+
+// ---------------------------------------------------------------- do-not-contact list (stage 8 task 4)
+
+// Outreach bases the guard lets through in this stage. 'employer_requested' / 'other_documented' exist in the schema so a later,
+// lawyer-approved basis needs no migration; until then they are refused (DECISIONS #21).
+const PERMITTED_OUTREACH_BASES = Object.freeze(["published_vacancy_application"]);
+const BLOCKING_EMPLOYER_STATUSES = Object.freeze(["opted_out", "blocked"]);
+
+/**
+ * The reasons this application must not be sent to this recipient(s), in a fixed order. Read-only.
+ * @param {object} client
+ * @param {{outreach_basis?: string}} app  js_applications row
+ * @param {{e_id?: number, e_status?: string}|null} job  js_jobs row joined with its employer (JOB_WITH_EMPLOYER_SQL)
+ * @param {string[]} recipients  addresses (or header-like strings) the mail could go to
+ * @returns {Promise<{code: string, detail: string}[]>}
+ */
+async function outreachChecks(client, app, job, recipients) {
+  const out = [];
+  const basis = app && app.outreach_basis;
+  if (!PERMITTED_OUTREACH_BASES.includes(basis)) out.push({ code: "outreach_basis_not_permitted", detail: `Outreach basis ${basis || "unknown"} is not permitted in this stage; only an application to a published vacancy may be sent` });
+  if (job && job.e_id && BLOCKING_EMPLOYER_STATUSES.includes(job.e_status)) out.push({ code: "employer_opted_out", detail: `The employer is marked ${job.e_status}; no further outreach` });
+  for (const r of recipients) {
+    const hit = r ? await suppression.findSuppression(client, r) : null;
+    if (hit) {
+      out.push({ code: "recipient_suppressed", detail: `The recipient is on the do-not-contact list (${hit.kind} ${hit.value}, ${hit.source})` });
+      break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Early (preparation / approval time) view of the same checks the guard makes at send time: staff see a suppressed recipient,
+ * an opted-out employer or a non-permitted outreach basis BEFORE drafting or approving. When the recipient is not yet
+ * decidable, every address the employer / posting names is checked.
+ * @returns {Promise<{code: string, detail: string}[]>}
+ */
+async function outreachBlockers(client, applicationId) {
+  const id = posInt(applicationId);
+  if (!id) return [];
+  const app = (await client.query("SELECT id, job_id, outreach_basis FROM js_applications WHERE id = $1", [id])).rows[0];
+  if (!app) return [];
+  const job = (await client.query(JOB_WITH_EMPLOYER_SQL, [app.job_id])).rows[0] || null;
+  const target = job ? pickRecipient(job, undefined) : { recipient: null };
+  const recipients = target.recipient ? [target.recipient] : job ? [normalizeEmail(job.e_contact || ""), ...postedAddresses(job)].filter(Boolean) : [];
+  return outreachChecks(client, app, job, recipients);
 }
 
 const canonSet = (urls) => new Set(urls.map((u) => jobStore.canonicalUrl(u)).filter(Boolean));
@@ -448,6 +501,11 @@ async function evaluate(client, id, now, recheck, opts) {
   }
   const recipient = target.recipient;
 
+  // 14b. The do-not-contact list, the employer's opt-out status and the outreach basis are absolute: no human approval,
+  // mode or earlier check overrides them, and they are re-read on every attempt (retries included).
+  const blocked = await outreachChecks(client, app, job, [recipient]);
+  if (blocked.length) return fail(notes, blocked[0].code, blocked[0].detail);
+
   // 15. Handoff-only postings (captcha, payment, legal declaration, login, online-only, custom questions).
   const prefs = (await q("SELECT salary_min, availability, residence_country FROM js_preferences WHERE candidate_id = $1", [cid])).rows[0] || {};
   const handoff = detectHandoff(job, prefs);
@@ -495,4 +553,4 @@ async function findDuplicate(client, app, job, now) {
   return null;
 }
 
-module.exports = { check, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, isFreeMail, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };
+module.exports = { check, outreachBlockers, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, isFreeMail, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };

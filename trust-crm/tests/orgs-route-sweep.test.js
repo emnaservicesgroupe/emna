@@ -168,6 +168,13 @@ const JOBSEARCH_STAFF = [
   "GET /jobsearch/health",
   "GET /jobsearch/employers",
   "PUT /jobsearch/employers/:id",
+  // stage 8 task 4: employer detail / profile edit (admin) / contact history, and the do-not-contact list (staff add, admin remove)
+  "GET /jobsearch/employers/:id",
+  "PATCH /jobsearch/employers/:id",
+  "GET /jobsearch/employers/:id/history",
+  "GET /jobsearch/suppressions",
+  "POST /jobsearch/suppressions",
+  "DELETE /jobsearch/suppressions/:id",
   "GET /jobsearch/automation-rules",
   "POST /jobsearch/automation-rules",
   "DELETE /jobsearch/automation-rules/:id",

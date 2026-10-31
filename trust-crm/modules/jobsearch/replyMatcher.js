@@ -376,7 +376,40 @@ async function match(mail, opts = {}) {
 
 // ---------------------------------------------------------------- classification (proposal only)
 
+// Opt-out / unsubscribe requests (stage 8 task 4). Checked FIRST: a message that both rejects and asks not to be contacted is an
+// opt-out, and an opt-out is NEVER an acknowledgement (its category makes the acknowledgement path veto itself).
+// Asymmetric safety, the opposite way round from the acknowledgement: a false POSITIVE only adds a sender to the do-not-contact list
+// (staff review the task and an administrator can undo it; nothing is deleted or cancelled), a false NEGATIVE could mean mailing
+// someone who asked us to stop - so these lean towards detecting. Still imperative / first-person forms only: a bare "unsubscribe" link in
+// an automated acknowledgement footer ("To unsubscribe click here") is NOT a request. Patterns run on foldText() output (lower-case, accents and
+// Arabic hamza/diacritics stripped, whitespace collapsed); every one is a bounded alternation (no nested open-ended quantifiers).
+const OPT_OUT = [
+  // English
+  /\bunsubscribe (?:me|us|my|our|this)\b/, /\b(?:please|kindly|pls) unsubscribe\b/, /\b(?:want|wish|would like|need|ask|request|like) (?:you )?to unsubscribe\b/,
+  /^\s*(?:please )?(?:unsubscribe|opt[- ]?out|stop|remove me|remove us)[ .!]*$/,
+  /\b(?:remove|delete|take|strike) (?:me|us|my (?:name|e-?mail(?: address)?|address)|our (?:name|e-?mail(?: address)?|address|company|details)) (?:off|from)\b/,
+  /\btake (?:me|us|this address|our address) off\b/,
+  /\b(?:do not|don't|never|no longer) (?:contact|e-?mail|write to|message|call|solicit) (?:us|me)\b/,
+  /\bdo not (?:send|forward) (?:us|me) (?:any )?(?:more|further|other)\b/,
+  /\b(?:stop|cease|quit) (?:e-?mailing|contacting|sending|writing to|messaging|spamming|calling|soliciting)\b/,
+  /\bcease (?:and desist|all (?:contact|communications?|correspondence|e-?mails?|outreach)|(?:any|further) (?:contact|communications?|correspondence))\b/,
+  /\b(?:i|we) (?:want|wish|would like) to opt[- ]?out\b/,
+  // French (accents already folded away)
+  /\bne plus (?:me |nous |m'|n')(?:contacter|ecrire|envoyer|relancer|solliciter|joindre|telephoner|appeler|faire parvenir)/,
+  /\bne (?:me|nous) (?:contactez|ecrivez|envoyez|relancez|sollicitez|telephonez|appelez) plus\b/, /\bne contactez plus\b/,
+  /\b(?:me|nous) desabonner\b/, /\bdesabonn(?:ez|e)[- ](?:moi|nous)\b/, /\bje (?:souhaite|voudrais|veux|desire) (?:me )?desabonner\b/, /\b(?:merci de|veuillez|svp) (?:bien )?(?:nous |me )?desabonner\b/,
+  /^\s*(?:desabonnement|desinscription|stop)[ .!]*$/,
+  /\bretir(?:er|ez|e)\b (?:[a-z']+ ){0,3}de (?:votre|vos|la) (?:liste|listes|base|fichier|diffusion|mailing)/,
+  /\bsupprim(?:er|ez) (?:[a-z']+ ){0,3}de (?:votre|vos|la) (?:liste|listes|base|fichier|diffusion|mailing)/,
+  /\bne plus recevoir (?:vos|de) (?:courriels?|e-?mails?|messages?|mails?|offres?|sollicitations?|communications?)\b/,
+  /\bcessez (?:de )?(?:nous |me )?(?:contacter|ecrire|envoyer)\b/,
+  // Arabic (folded: hamza forms and diacritics removed; unicode-aware word edges because \b is ASCII-only)
+  /لا تراسل(?:ونا|نا|ني|وني)/u, /عدم مراسل(?:تنا|تي)/u, /توقف(?:وا)? عن مراسل(?:تنا|تي)/u,
+  /(?<![\p{L}\p{N}])(?:ازالة|ازيلوا|ازل)(?![\p{L}\p{N}])/u, /الغاء (?:الاشتراك|اشتراكنا|اشتراكي)/u, /لا تتصل(?:وا)? ب(?:نا|ي)(?![\p{L}\p{N}])/u,
+];
+
 const RULES = [
+  ["opt_out", OPT_OUT],
   ["rejection", [
     /\bregret to inform\b/, /\bunfortunately\b/, /\b(?:decided|chosen) to (?:move forward|proceed|continue) with other\b/, /\bnot (?:be )?(?:moving|progressing|proceeding) (?:forward )?with your\b/,
     /\b(?:have|has) not been successful\b/, /\bposition has (?:now )?been filled\b/, /\bnous (?:sommes au )?regret(?:tons|s)\b/, /\bmalheureusement\b/,
