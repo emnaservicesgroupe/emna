@@ -211,6 +211,14 @@ e-mail, job sources and so on works as in [SETUP-HOSTINGER.md](SETUP-HOSTINGER.m
 - The existing **ClamAV** container (`gb-clamav`) is **not used** by VITA yet. Pointing VITA's attachment
   scanning at it is a possible later step and out of scope here.
 
+### The Canada service features (stage 8)
+
+The Canadian-format CV, the PDF/Excel reports and the candidate Activity Report, the employer do-not-contact list, vacancy classification and the contract / legal-review billing gate are part of the
+same VITA app: **no extra service, container, port or nginx location**. They are ordinary requests under `/jobsearch/` and `/finance/`, which the `vita` server block already forwards. PDF, DOCX and
+Excel files are downloaded as normal responses (not streams), and the signed-contract upload on a billing contract uses the same 12 MB body limit as CV uploads (`client_max_body_size 12m`, `MAX_UPLOAD_MB`
+10). New optional settings (`REPORT_TIMEZONE`, `REPORT_SCHEDULE_ENABLED`, `JOBSEARCH_REPORT_MAX_ROWS`, `JOBSEARCH_REPORT_RATE_PER_HOUR`, `FIN_DEFAULT_JURISDICTION`) go in `.env`, then `docker compose up -d`.
+See [../vita-canada/SETUP.md](../vita-canada/SETUP.md).
+
 ## 9. Troubleshooting
 
 | Problem | What to do |

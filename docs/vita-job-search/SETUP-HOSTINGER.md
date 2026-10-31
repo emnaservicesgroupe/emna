@@ -308,6 +308,11 @@ Everything below stays off until you do it; follow the detailed pages:
   uncompressed and flushes immediately; if you put **another proxy** (Nginx, a CDN, Cloudflare) in front, turn off response buffering and compression for `/mcp` too, and do not cache it. Rate limits are
   kept in the app process (they reset on restart), so run **one** app container. Settings (`MCP_RATE_PER_MIN`, `MCP_MAX_CONCURRENT`, `MCP_REQUEST_TIMEOUT_MS`, `MCP_TOOL_TIMEOUT_MS`,
   `MCP_TOKEN_DEFAULT_DAYS`), connection steps and the security model: [../vita-mcp/SETUP.md](../vita-mcp/SETUP.md).
+- **Canada service features** (candidate reference, Canadian-format CV in PDF and DOCX, PDF/Excel reports and the candidate Activity Report, richer employer records with the do-not-contact list,
+  vacancy classification and match accept/reject, service contracts and the legal-review billing gate) are part of the same VITA app: no extra service, container or database, included in the
+  normal backup and switched on by the normal update (new additive database migrations 025-030 run when the app starts, as part of the normal `./update.sh`). Generated CVs and reports are written to the same private storage as uploads. The only
+  new settings are optional: `REPORT_TIMEZONE`, `REPORT_SCHEDULE_ENABLED` (default off), `JOBSEARCH_REPORT_MAX_ROWS`, `JOBSEARCH_REPORT_RATE_PER_HOUR` and `FIN_DEFAULT_JURISDICTION`. Nothing is sent, billed or
+  scheduled until staff and the Administrator use the screens. Steps, limits and what is not built: [../vita-canada/SETUP.md](../vita-canada/SETUP.md), [../vita-canada/CHECKLIST.md](../vita-canada/CHECKLIST.md).
 
 After every `.env` change: `docker compose up -d`. If a setting is wrong, the app does not start and
 `./logs.sh app` lists **every** problem (setting names only, never values).
