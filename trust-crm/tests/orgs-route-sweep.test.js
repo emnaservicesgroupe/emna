@@ -121,6 +121,10 @@ const JOBSEARCH_CANDIDATE = [
   "GET /jobsearch/events",
   "GET /jobsearch/me/extras",
   "PATCH /jobsearch/me/extras",
+  "GET /jobsearch/me/canadian-cv",
+  "POST /jobsearch/me/canadian-cv/:version/authorise",
+  "POST /jobsearch/me/canadian-cv/:version/withdraw-authorisation",
+  "GET /jobsearch/me/canadian-cv/:version/download",
 ];
 // Any portal role may ask who it is (the only /jobsearch route besides OTP that Employer / Agency reach).
 const JOBSEARCH_PORTAL_ME = "GET /jobsearch/auth/me";
@@ -166,6 +170,11 @@ const JOBSEARCH_STAFF = [
   "DELETE /jobsearch/automation-rules/:id",
   "GET /jobsearch/candidates/:id/extras",
   "PATCH /jobsearch/candidates/:id/extras",
+  "POST /jobsearch/candidates/:id/canadian-cv",
+  "GET /jobsearch/candidates/:id/canadian-cv",
+  "POST /jobsearch/candidates/:id/canadian-cv/:version/approve",
+  "GET /jobsearch/candidates/:id/canadian-cv/:version/download",
+  "POST /jobsearch/cv-files/:fileId/staff-approve",
 ];
 
 // Routes that accept a personal access token (PAT, "vita_pat_..." bearer). It is the ONLY place a PAT is valid: every other authenticated route

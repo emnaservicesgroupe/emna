@@ -6,9 +6,13 @@
 //    ones (passport, national_id, police_certificate, medical, ... and anything unknown) need a
 //    non-revoked js_sharing_authorizations row for THIS application and THIS document, with a
 //    non-empty legitimate_need, granted by the candidate's own user account.
+//  - Canadian-format CVs (js_cv_files.kind = 'canadian', stage 8): once a candidate has ANY canadian CV version, ONLY a version that is
+//    staff-approved AND candidate-authorised (and not withdrawn, and built from the profile as it is now) is ever attached - never an
+//    uploaded original. When no version is eligible the approved uploaded CV applies and the package notes it.
 const crypto = require("crypto");
 const storage = require("./storage");
 const { HttpError } = require("./httpError");
+const { profileHash } = require("./cvGenerator");
 
 const db = () => require("../../db");
 
@@ -136,14 +140,59 @@ function validateRequested(requested) {
   return out;
 }
 
+/** Hash of the candidate's CONFIRMED profile now (null when the profile is not confirmed). */
+async function currentProfileHash(client, candidateId) {
+  const p = (await client.query("SELECT confirmed, status FROM js_profiles WHERE candidate_id = $1", [candidateId])).rows[0];
+  return p && p.status === "confirmed" ? profileHash(p.confirmed) : null;
+}
+
+/** A canadian CV row may be attached only when staff approved it, the candidate authorised (and did not withdraw) it, and the profile is unchanged. */
+function canadianRowEligible(row, profHash) {
+  return Boolean(
+    row && row.kind === "canadian" && row.approved === true && row.staff_approved_at && row.candidate_authorised_at && !row.candidate_withdrawn_at &&
+      row.scan_status !== "infected" && scanUsable(row) && profHash && row.source_profile_hash === profHash
+  );
+}
+
+/**
+ * The eligible canadian CV to attach: the latest eligible version, preferring `jobLanguage`; per version the PDF row (ATS friendly),
+ * otherwise the DOCX row. null when there is none.
+ */
+async function pickCanadianCv(candidateId, jobLanguage, client) {
+  const rows = (await client.query("SELECT * FROM js_cv_files WHERE candidate_id = $1 AND kind = 'canadian' ORDER BY version DESC, id DESC", [candidateId])).rows;
+  if (!rows.length) return { any: false, pick: null };
+  const hash = await currentProfileHash(client, candidateId);
+  const groups = new Map();
+  for (const r of rows.filter((x) => canadianRowEligible(x, hash))) {
+    const k = `${r.language}:${r.version}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const best = (rs) => rs.find((r) => r.format === "pdf") || rs[0];
+  const cands = [...groups.values()].map((rs) => ({ cv: best(rs), at: Math.max(...rs.map((r) => new Date(r.generated_at || r.created_at).getTime())) }))
+    .sort((a, b) => b.cv.version - a.cv.version || b.at - a.at);
+  const want = normLang(jobLanguage);
+  const pick = (want && cands.find((c) => normLang(c.cv.language) === want)) || cands[0] || null;
+  return { any: true, pick: pick ? pick.cv : null };
+}
+
 /**
  * Latest APPROVED CV version in `jobLanguage`; otherwise the latest approved CV in another language,
  * flagged with a `language_mismatch` note. Never mutates the files.
+ * Canadian CVs first: when the candidate has any, only an eligible one is returned; with none eligible the uploaded originals apply (noted).
  * @returns {Promise<{cv: object, notes: string[]}|null>}
  */
 async function pickCv(candidateId, jobLanguage, client) {
-  const rows = (await (client || db()).query(
-    "SELECT * FROM js_cv_files WHERE candidate_id = $1 AND approved = true AND scan_status <> 'infected' ORDER BY version DESC, id DESC",
+  const c = client || db();
+  const canadian = await pickCanadianCv(candidateId, jobLanguage, c);
+  const notes = [];
+  if (canadian.pick) {
+    const want = normLang(jobLanguage);
+    return { cv: canadian.pick, notes: want && normLang(canadian.pick.language) !== want ? [`language_mismatch: approved CV is in ${normLang(canadian.pick.language) || "an unknown language"}, the job is in ${want}`] : [] };
+  }
+  if (canadian.any) notes.push("canadian_cv_not_eligible: no Canadian CV version is staff-approved and candidate-authorised; the approved uploaded CV was used");
+  const rows = (await c.query(
+    "SELECT * FROM js_cv_files WHERE candidate_id = $1 AND kind = 'upload' AND approved = true AND scan_status <> 'infected' ORDER BY version DESC, id DESC",
     [candidateId]
   )).rows;
   if (!rows.length) return null;
@@ -153,8 +202,8 @@ async function pickCv(candidateId, jobLanguage, client) {
   const pool = usable.length ? usable : rows;
   const want = normLang(jobLanguage);
   const same = want ? pool.find((r) => normLang(r.language) === want) : null;
-  if (same) return { cv: same, notes: [] };
-  return { cv: pool[0], notes: [`language_mismatch: approved CV is in ${normLang(pool[0].language) || "an unknown language"}, the job is in ${want || "an unknown language"}`] };
+  if (same) return { cv: same, notes };
+  return { cv: pool[0], notes: [...notes, `language_mismatch: approved CV is in ${normLang(pool[0].language) || "an unknown language"}, the job is in ${want || "an unknown language"}`] };
 }
 
 /** Candidate-granted, non-revoked authorization for this application+document with a stated need. */
@@ -185,6 +234,11 @@ async function cvEntry(client, application, cvFileId) {
   if (!cv.approved) return { blocked: { doc, reason: "cv_not_approved" } };
   if (cv.scan_status === "infected") return { blocked: { doc, reason: "cv_infected" } };
   if (!scanUsable(cv)) return { blocked: { doc, reason: "attachment_unscanned" } };
+  if (cv.kind === "canadian") {
+    if (!canadianRowEligible(cv, await currentProfileHash(client, cv.candidate_id))) return { blocked: { doc, reason: "canadian_cv_not_authorised" } };
+  } else if ((await pickCanadianCv(cv.candidate_id, null, client)).pick) {
+    return { blocked: { doc, reason: "superseded_by_canadian_cv" } };
+  }
   const sha = await storedSha(cv.storage_key);
   if (!sha) return { blocked: { doc, reason: "cv_file_unavailable" } };
   if (cv.sha256 && sha !== cv.sha256) return { blocked: { doc, reason: "cv_integrity_mismatch" } };
@@ -192,7 +246,7 @@ async function cvEntry(client, application, cvFileId) {
     // Legacy row without a recorded hash: record it once from the stored bytes (metadata only).
     await client.query("UPDATE js_cv_files SET sha256 = $2 WHERE id = $1 AND sha256 IS NULL", [cv.id, sha]);
   }
-  return { included: { kind: "cv", cvFileId: cv.id, docType: "cv", version: cv.version, sha256: cv.sha256 || sha, language: normLang(cv.language), sensitive: false, sharingAuthorizationId: null } };
+  return { included: { kind: "cv", cvFileId: cv.id, docType: "cv", version: cv.version, sha256: cv.sha256 || sha, language: normLang(cv.language), sensitive: false, sharingAuthorizationId: null, ...(cv.kind === "canadian" ? { sourceRef: `canadian_cv:${cv.canonical_name}` } : {}) } };
 }
 
 // Storage keys are "<candidateId>-<sha256>.<ext>" (storage/local.js). A CRM documents.file_path that is a
@@ -277,11 +331,12 @@ async function revalidateStoredPackage(client, application) {
   for (const r of rows) {
     if (r.cv_file_id) {
       const ref = { cvFileId: r.cv_file_id };
-      const cv = (await client.query("SELECT approved, sha256, version, scan_status, storage_key FROM js_cv_files WHERE id = $1 AND candidate_id = $2", [r.cv_file_id, application.candidate_id])).rows[0];
+      const cv = (await client.query("SELECT approved, sha256, version, scan_status, storage_key, kind, staff_approved_at, candidate_authorised_at, candidate_withdrawn_at, source_profile_hash FROM js_cv_files WHERE id = $1 AND candidate_id = $2", [r.cv_file_id, application.candidate_id])).rows[0];
       if (!cv) problems.push({ code: "cv_missing", ...ref });
       else if (!cv.approved) problems.push({ code: "cv_not_approved", ...ref });
       else if (cv.scan_status === "infected") problems.push({ code: "cv_infected", ...ref });
       else if (!scanUsable(cv)) problems.push({ code: "attachment_unscanned", ...ref });
+      else if (cv.kind === "canadian" && !canadianRowEligible(cv, await currentProfileHash(client, application.candidate_id))) problems.push({ code: "canadian_cv_not_authorised", ...ref });
       else if (cv.sha256 !== r.sha256 || cv.version !== r.version) problems.push({ code: "cv_changed", ...ref });
       else if ((await storedSha(cv.storage_key)) !== r.sha256) problems.push({ code: "cv_bytes_changed", ...ref });
       continue;
@@ -312,4 +367,4 @@ async function revalidateStoredPackage(client, application) {
 
 const formatProblems = (ps) => ps.map((p) => `${p.code}${p.cvFileId ? `:cv${p.cvFileId}` : p.documentId ? `:doc${p.documentId}` : ""}`).join(", ");
 
-module.exports = { formatProblems, normDocType, buildPackage, pickCv, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, unscannedAllowed, ownedStorageKey, SENSITIVE_TYPES };
+module.exports = { formatProblems, normDocType, buildPackage, pickCv, pickCanadianCv, canadianRowEligible, currentProfileHash, sensitiveType, validateRequested, revalidateStoredPackage, findAuthorization, normLang, unscannedAllowed, ownedStorageKey, SENSITIVE_TYPES };

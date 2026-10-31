@@ -179,7 +179,7 @@ async function uploadCv({ user, candidateId, file }) {
   try {
     await client.query("BEGIN");
     await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [id]);
-    const v = await client.query("SELECT COALESCE(MAX(version), 0) + 1 AS next FROM js_cv_files WHERE candidate_id = $1", [id]);
+    const v = await client.query("SELECT COALESCE(MAX(version), 0) + 1 AS next FROM js_cv_files WHERE candidate_id = $1 AND kind = 'upload'", [id]);
     const version = v.rows[0].next;
     const cv = await client.query(
       `INSERT INTO js_cv_files (candidate_id, storage_key, sha256, version, original, scan_status, scan_detail)
@@ -211,7 +211,7 @@ async function getProfile({ user, candidateId, signTtlSec = 300 }) {
   if (p.rowCount === 0) throw new HttpError(404, "Not found");
   const prefs = await db().query("SELECT countries, categories, availability, salary_min, salary_currency, residence_country, needs_work_auth_support FROM js_preferences WHERE candidate_id = $1", [id]);
   const files = await db().query(
-    "SELECT id, version, sha256, storage_key, language, approved, original, scan_status, scan_detail, created_at FROM js_cv_files WHERE candidate_id = $1 ORDER BY version",
+    "SELECT id, version, sha256, storage_key, language, approved, original, scan_status, scan_detail, created_at FROM js_cv_files WHERE candidate_id = $1 AND kind = 'upload' ORDER BY version",
     [id]
   );
   const row = p.rows[0];

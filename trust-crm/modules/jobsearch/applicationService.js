@@ -699,7 +699,7 @@ async function approveCvVersion({ user, cvFileId, language, note }) {
   if (!lang) throw new HttpError(400, "language must be a 2-letter code such as en, fr or ar");
   const { clause, params } = candidateScopeSql(user, "c", 1);
   const cv = (await db().query(
-    `SELECT f.id, f.candidate_id, f.scan_status FROM js_cv_files f JOIN candidates c ON c.id = f.candidate_id
+    `SELECT f.id, f.candidate_id, f.scan_status, f.kind FROM js_cv_files f JOIN candidates c ON c.id = f.candidate_id
       WHERE f.id = $1 AND c.is_deleted = false AND ${clause}`,
     [id, ...params]
   )).rows[0];
@@ -712,6 +712,7 @@ async function approveCvVersion({ user, cvFileId, language, note }) {
     if (!why || why.length < 10) throw new HttpError(400, "note is required (at least 10 characters) when staff approve a CV version on the candidate's behalf");
   }
   if (cv.scan_status === "infected") throw new HttpError(409, "Infected files cannot be approved");
+  if (cv.kind === "canadian") throw new HttpError(409, "Canadian CV versions are approved by staff and authorised by the candidate through the Canadian CV endpoints");
   const row = await inTx(async (client) => {
     await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [cv.candidate_id]);
     const r = (await client.query("UPDATE js_cv_files SET approved = true, language = $2 WHERE id = $1 RETURNING id, candidate_id, version, language, approved, sha256", [id, lang])).rows[0];
