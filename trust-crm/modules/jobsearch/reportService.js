@@ -232,14 +232,14 @@ async function dashboard({ user, query = {} }) {
 
   const total = emptyCounts();
   for (const x of per.values()) for (const k of Object.keys(total)) total[k] += x[k];
-  const names = await c.query(`SELECT c.id, c.full_name FROM candidates c WHERE ${w}${cf} ORDER BY c.id LIMIT ${CANDIDATE_LIST_LIMIT}`, p);
+  const names = await c.query(`SELECT c.id, c.full_name, c.reference FROM candidates c WHERE ${w}${cf} ORDER BY c.id LIMIT ${CANDIDATE_LIST_LIMIT}`, p);
   const totals = shape(total, isCand);
   if (unscopedCount !== null) totals.unassigned_open_tasks = unscopedCount;
   return {
     scope: scopeName(user),
     candidateId: candidateId || null,
     totals,
-    candidates: names.rows.map((r) => ({ candidateId: r.id, name: r.full_name, counts: shape(per.get(r.id) || emptyCounts(), isCand) })),
+    candidates: names.rows.map((r) => ({ candidateId: r.id, reference: r.reference, name: r.full_name, counts: shape(per.get(r.id) || emptyCounts(), isCand) })),
     attention,
   };
 }

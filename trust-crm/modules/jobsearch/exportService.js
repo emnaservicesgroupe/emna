@@ -89,14 +89,14 @@ function columnsFor(type, user) {
     case "applications":
       return cand
         ? [col("id"), col("job_title"), col("employer"), col("country"), col("status"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("created_at"), col("updated_at")]
-        : [col("id"), col("candidate_id"), col("candidate_name"), col("job_id"), col("job_title"), col("employer"), col("country"), col("source"), col("status"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("mode_at_creation"), col("responsible_user_id"), col("created_at"), col("updated_at")];
+        : [col("id"), col("candidate_id"), col("candidate_reference"), col("candidate_name"), col("job_id"), col("job_title"), col("employer"), col("country"), col("source"), col("status"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("mode_at_creation"), col("responsible_user_id"), col("created_at"), col("updated_at")];
     case "matches":
       return cand
         ? [col("id"), col("job_title"), col("employer"), col("country"), col("score"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("created_at")]
-        : [col("id"), col("candidate_id"), col("candidate_name"), col("job_id"), col("job_title"), col("employer"), col("country"), col("source"), col("score"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("created_at")];
+        : [col("id"), col("candidate_id"), col("candidate_reference"), col("candidate_name"), col("job_id"), col("job_title"), col("employer"), col("country"), col("source"), col("score"), col("employer_support"), col("employer_support_evidence"), col("notice"), col("created_at")];
     // Recipient / sender addresses and provider ids: approvers (Manager/Admin) only.
     case "submissions":
-      return [col("id"), col("application_id"), col("candidate_id"), col("candidate_name"), col("attempt"), col("status"), col("channel"), ...(approver ? [col("recipient"), col("provider_message_id")] : []), col("created_at"), col("sent_at"), col("confirmed_at")];
+      return [col("id"), col("application_id"), col("candidate_id"), col("candidate_reference"), col("candidate_name"), col("attempt"), col("status"), col("channel"), ...(approver ? [col("recipient"), col("provider_message_id")] : []), col("created_at"), col("sent_at"), col("confirmed_at")];
     case "messages":
       return [col("id"), col("application_id"), col("candidate_id"), col("direction"), col("review_state"), ...(approver ? [col("from_addr")] : []), col("subject"), col("category"), col("shared_with_candidate"), ...(approver ? [col("message_id")] : []), col("received_at")];
     case "tasks":
@@ -148,7 +148,7 @@ function buildQuery(type, user, f, range, limit) {
   switch (type) {
     case "applications":
       return {
-        sql: `SELECT a.id, a.candidate_id, c.full_name AS candidate_name, a.job_id, j.title AS job_title, e.name AS employer, j.country, j.source_primary AS source,
+        sql: `SELECT a.id, a.candidate_id, c.reference AS candidate_reference, c.full_name AS candidate_name, a.job_id, j.title AS job_title, e.name AS employer, j.country, j.source_primary AS source,
                      a.status, mm.employer_support, mm.employer_support_evidence, a.mode_at_creation, a.responsible_user_id, a.created_at, a.updated_at
                 FROM js_applications a JOIN candidates c ON c.id = a.candidate_id JOIN js_jobs j ON j.id = a.job_id LEFT JOIN js_employers e ON e.id = j.employer_id
                 LEFT JOIN js_matches mm ON mm.candidate_id = a.candidate_id AND mm.job_id = a.job_id
@@ -157,7 +157,7 @@ function buildQuery(type, user, f, range, limit) {
       };
     case "matches":
       return {
-        sql: `SELECT m.id, m.candidate_id, c.full_name AS candidate_name, m.job_id, j.title AS job_title, e.name AS employer, j.country, j.source_primary AS source,
+        sql: `SELECT m.id, m.candidate_id, c.reference AS candidate_reference, c.full_name AS candidate_name, m.job_id, j.title AS job_title, e.name AS employer, j.country, j.source_primary AS source,
                      m.score, m.employer_support, m.employer_support_evidence, m.created_at
                 FROM js_matches m JOIN candidates c ON c.id = m.candidate_id JOIN js_jobs j ON j.id = m.job_id LEFT JOIN js_employers e ON e.id = j.employer_id
                 LEFT JOIN js_applications a ON a.candidate_id = m.candidate_id AND a.job_id = m.job_id
@@ -166,7 +166,7 @@ function buildQuery(type, user, f, range, limit) {
       };
     case "submissions":
       return {
-        sql: `SELECT s.id, s.application_id, a.candidate_id, c.full_name AS candidate_name, s.attempt_no AS attempt, s.status, s.channel, s.recipient, s.provider_message_id,
+        sql: `SELECT s.id, s.application_id, a.candidate_id, c.reference AS candidate_reference, c.full_name AS candidate_name, s.attempt_no AS attempt, s.status, s.channel, s.recipient, s.provider_message_id,
                      s.created_at, s.sent_at, s.confirmed_at
                 FROM js_submissions s JOIN js_applications a ON a.id = s.application_id JOIN candidates c ON c.id = a.candidate_id JOIN js_jobs j ON j.id = a.job_id
                WHERE ${W} ORDER BY s.id LIMIT ${lim}`,

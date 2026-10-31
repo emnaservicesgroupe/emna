@@ -15,7 +15,7 @@ const { loadScoped, inTransaction, hasPerm, parseId } = require("./leadsAdmin");
 
 const db = () => require("../../db");
 const STAGES = ["lead", "documents", "submitted", "interview", "visa", "travel", "closed"];
-const CANDIDATE_COLUMNS = "id, full_name, nationality, passport_number, email, phone, assigned_to, crm_stage, visa_status, created_at";
+const CANDIDATE_COLUMNS = "id, reference, full_name, nationality, passport_number, email, phone, assigned_to, crm_stage, visa_status, created_at";
 
 function text(v, label, { max, required = false } = {}) {
   if (v === undefined || v === null) {

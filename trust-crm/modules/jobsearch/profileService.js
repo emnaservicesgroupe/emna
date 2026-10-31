@@ -215,8 +215,10 @@ async function getProfile({ user, candidateId, signTtlSec = 300 }) {
     [id]
   );
   const row = p.rows[0];
+  const ref = await db().query("SELECT reference FROM candidates WHERE id = $1", [id]);
   return {
     candidate_id: id,
+    reference: ref.rowCount ? ref.rows[0].reference : null,
     status: row.status,
     extracted: row.extracted,
     confirmed: row.confirmed,
