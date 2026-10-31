@@ -37,6 +37,11 @@ const LEADING_INVISIBLE = /^[\s\u00A0\u200B-\u200D\u2060\uFEFF]+/;
 // ASCII and full-width formula triggers.
 const FORMULA_TRIGGER = /^[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]/;
 
+/** A text that a spreadsheet could read as a formula (also after leading blanks / invisible characters, also full-width triggers) gets a leading apostrophe. */
+function neutraliseFormula(s) {
+  return /^[\t\r]/.test(s) || FORMULA_TRIGGER.test(s.replace(LEADING_INVISIBLE, "")) ? `'${s}` : s;
+}
+
 /**
  * One cell: capped at 2000 characters ('…' marks a cut); a leading apostrophe when the cell starts with
  * TAB/CR or its first visible character is a formula trigger (= + - @, also full-width); quoted when needed.
@@ -45,7 +50,7 @@ function csvCell(v) {
   if (v === null || v === undefined) return "";
   let s = v instanceof Date ? v.toISOString() : typeof v === "object" ? JSON.stringify(v) : String(v);
   if (s.length > MAX_CELL) s = `${Array.from(s.slice(0, MAX_CELL)).slice(0, MAX_CELL - 1).join("")}…`;
-  if (/^[\t\r]/.test(s) || FORMULA_TRIGGER.test(s.replace(LEADING_INVISIBLE, ""))) s = `'${s}`;
+  s = neutraliseFormula(s);
   if (/[",\r\n]/.test(s) || /^\s|\s$/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
   return s;
 }
@@ -223,4 +228,4 @@ async function exportCsv({ user, query = {} }) {
   return { filename: `vita-${type}-${day}.csv`.replace(/[^A-Za-z0-9._-]/g, "_"), body, rows: out.length, truncated };
 }
 
-module.exports = { exportCsv, csvCell, toCsv, TYPES, SUPPORT_NOTICE, SUPPORT_NOTICE_CONFIRMED, supportNotice, _resetRateLimit };
+module.exports = { exportCsv, csvCell, neutraliseFormula, toCsv, TYPES, SUPPORT_NOTICE, SUPPORT_NOTICE_CONFIRMED, supportNotice, _resetRateLimit };

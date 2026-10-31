@@ -26,6 +26,7 @@
     "pdf-parse": "^2.4.5",
     "pdfkit": "0.20.2",
     "pg": "^8.12.0",
+    "write-excel-file": "4.1.1",
     "zod": "4.6.6"
   },
   "overrides": {

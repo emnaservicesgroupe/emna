@@ -74,6 +74,23 @@ async function put(buf, meta = {}) {
   return { key, sha256, size: buf.length, mime };
 }
 
+/**
+ * Server-generated report files only (PDF / XLSX). Not an upload path: xlsx is deliberately NOT understood by sniffMime(), so
+ * a user can still not upload a spreadsheet as a CV. Key `<scopeId>-<sha256>.<ext>`; scopeId 0 = company-level (no candidate).
+ */
+async function putGenerated(buf, { ext, candidateId = 0 } = {}) {
+  if (!Buffer.isBuffer(buf)) throw fail("Generated file must be a Buffer", "INVALID_UPLOAD");
+  if (ext !== "pdf" && ext !== "xlsx") throw fail("Unsupported generated file type", "INVALID_UPLOAD");
+  if (!Number.isInteger(candidateId) || candidateId < 0) throw fail("candidateId must be a non-negative integer", "INVALID_UPLOAD");
+  const okMagic = ext === "pdf" ? buf.length >= 8 && buf.toString("latin1", 0, 5) === "%PDF-" : buf.length >= 22 && buf.readUInt32LE(0) === 0x04034b50;
+  if (!okMagic) throw fail("Generated file content does not match its type", "INVALID_UPLOAD");
+  if (buf.length > maxBytes()) throw fail("File too large", "FILE_TOO_LARGE");
+  const sha256 = crypto.createHash("sha256").update(buf).digest("hex");
+  const key = `${candidateId}-${sha256}.${ext}`;
+  await local.put(key, buf);
+  return { key, sha256, size: buf.length };
+}
+
 const get = (key) => local.get(key);
 const del = (key) => local.remove(key);
 
@@ -119,4 +136,4 @@ function verifyUrl(url) {
   }
 }
 
-module.exports = { put, get, delete: del, signUrl, verifyUrl, sniffMime };
+module.exports = { put, putGenerated, get, delete: del, signUrl, verifyUrl, sniffMime };

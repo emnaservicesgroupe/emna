@@ -380,6 +380,8 @@ module.exports = {
   renderPdf,
   renderDocx,
   pdfUnrenderable,
+  winAnsiOk,
+  stableStringify,
   LatinSpellingNeededError,
   profileHash,
   canonicalName,

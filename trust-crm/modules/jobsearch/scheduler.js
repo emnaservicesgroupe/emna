@@ -738,6 +738,18 @@ async function stepSweepDrafts(ctx) {
   ctx.summary.draftsSwept = (ctx.summary.draftsSwept || 0) + out.swept;
 }
 
+/**
+ * Company-level report snapshots (daily / weekly / monthly) for the previous full period of the report timezone, when
+ * report_schedule_enabled (off by default). Idempotent per (kind, period_start); uses the tick clock. Only kinds and error codes are
+ * recorded on failure - never report data.
+ */
+async function stepReportSnapshots(ctx) {
+  const out = await require("./reportExport").ensureScheduledSnapshots({ now: ctx.now });
+  if (!out.enabled) return;
+  ctx.summary.reportSnapshots = { created: out.created.length, existing: out.existing.length };
+  for (const e of out.errors) ctx.summary.errors.push({ step: "report_snapshots", message: `report_snapshot_failed:${e.kind}:${e.code}` });
+}
+
 async function step(ctx, name, fn) {
   try {
     // Observability / test hook: deps.onStep(name) runs before each step; returning 'skip' skips it.
@@ -795,6 +807,7 @@ async function tick(now = new Date(), { deps = {} } = {}) {
     await step(ctx, "expiry", stepExpiry);
     await step(ctx, "stale", async (c) => { await queue.reclaimStale({ now: c.now }); });
     await step(ctx, "sweep_drafts", stepSweepDrafts);
+    await step(ctx, "report_snapshots", stepReportSnapshots);
     await step(ctx, "prune_state", stepPruneState);
     await recordTick(summary);
     return summary;
