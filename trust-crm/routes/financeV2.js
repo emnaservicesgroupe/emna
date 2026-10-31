@@ -23,6 +23,15 @@
 //   GET   /reports/by-service ?from&to               finance:read;   GET /reports/by-staff ?from&to   finance:read
 //   GET   /reports/candidate/:id                     finance:read -> chronological statement with running balance per currency
 //   GET   /export/{invoices,payments,expenses}.csv ?from&to   finance:export -> text/csv (X-Row-Limit-Hit when cut at the row cap)
+//   POST  /legal-reviews {jurisdiction,status,reviewer_name,reviewed_at,valid_until?,reviewer_role?,note?,evidence_key?,service_kind?}   users:write (Admin, SuperAdmin; 201; reviews are insert-only, a newer row supersedes)
+//   GET   /legal-reviews ?jurisdiction&service_kind&limit&offset   finance:read (history, `current` marks the deciding row)
+//   POST  /contracts {candidate_id,service_id,start_date?,end_date?,refund_terms?}   finance:write (201, draft)
+//   GET   /contracts ?candidate_id&service_id&status&limit&offset   finance:read;   GET /contracts/:id   finance:read
+//   POST  /contracts/:id/sign {signed_by_name,signed_at?} (JSON, or multipart with an optional "file")   finance:write (draft -> active)
+//   POST  /contracts/:id/end | /cancel {reason?}     finance:void
+//   GET   /contracts/:id/document                    finance:read (the stored signed document, if any)
+//   GET   /billing-status ?candidate_id              finance:read -> {candidate_fee_billable, reasons, jurisdiction, review, contract}
+//   GET   /me/contracts                              role Candidate ONLY -> own non-draft contracts (no staff data)
 //   GET   /me                                        role Candidate ONLY -> own invoices, payments and totals (no staff data)
 //   GET   /me/invoices/:id/print ?lang=ar|en|fr      role Candidate ONLY, own invoice only (anything else: the same 404)
 const express = require("express");
@@ -36,6 +45,12 @@ const expenses = require("../modules/finance/expenses");
 const reports = require("../modules/finance/reports");
 const exportCsv = require("../modules/finance/exportCsv");
 const candidateView = require("../modules/finance/candidateView");
+const legalReviews = require("../modules/finance/legalReviews");
+const contracts = require("../modules/finance/contracts");
+const billingGate = require("../modules/finance/billingGate");
+const common = require("../modules/finance/common");
+const multer = require("multer");
+const { HttpError } = require("../modules/jobsearch/httpError");
 
 const router = express.Router();
 const body = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
@@ -143,6 +158,57 @@ for (const kind of ["invoices", "payments", "expenses"]) {
   );
 }
 
+router.post("/legal-reviews", checkPermission("users:write"), asyncHandler(async (req, res) => res.status(201).json(await legalReviews.record(req.user, body(req)))));
+router.get("/legal-reviews", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await legalReviews.list(req.user, req.query))));
+
+router.post("/contracts", checkPermission("finance:write"), asyncHandler(async (req, res) => res.status(201).json(await contracts.create(req.user, body(req)))));
+router.get("/contracts", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await contracts.list(req.user, req.query))));
+router.get("/contracts/:id", checkPermission("finance:read"), asyncHandler(async (req, res) => res.json(await contracts.get(req.user, req.params.id))));
+// Optional signed document: multipart with one "file" (permission is checked first, so a forbidden caller never makes us buffer a file).
+function receiveSignedDocument(req, res, next) {
+  const mb = Number(process.env.MAX_UPLOAD_MB);
+  const maxBytes = (Number.isFinite(mb) && mb > 0 ? mb : 10) * 1024 * 1024;
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxBytes, files: 1, fields: 4, parts: 6 } }).single("file");
+  upload(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") return next(new HttpError(413, "File too large"));
+    return next(new HttpError(400, "Invalid upload"));
+  });
+}
+router.post(
+  "/contracts/:id/sign",
+  checkPermission("finance:write"),
+  receiveSignedDocument,
+  asyncHandler(async (req, res) => res.json(await contracts.sign(req.user, req.params.id, body(req), req.file || null)))
+);
+router.post("/contracts/:id/end", checkPermission("finance:void"), asyncHandler(async (req, res) => res.json(await contracts.end(req.user, req.params.id, body(req)))));
+router.post("/contracts/:id/cancel", checkPermission("finance:void"), asyncHandler(async (req, res) => res.json(await contracts.cancel(req.user, req.params.id, body(req)))));
+router.get(
+  "/contracts/:id/document",
+  checkPermission("finance:read"),
+  asyncHandler(async (req, res) => {
+    const doc = await contracts.document(req.user, req.params.id);
+    res.set({ "Content-Type": doc.mime, "Content-Disposition": `attachment; filename="${doc.filename}"`, "X-Content-Type-Options": "nosniff" });
+    res.send(doc.buffer);
+  })
+);
+router.get(
+  "/billing-status",
+  checkPermission("finance:read"),
+  asyncHandler(async (req, res) => {
+    const raw = common.oneValue(req.query.candidate_id, "candidate_id");
+    const candidateId = common.parseId(raw, { label: "candidate_id" });
+    const client = await require("../db").connect();
+    try {
+      if (!(await client.query("SELECT 1 FROM candidates WHERE id = $1 AND is_deleted = false", [candidateId])).rowCount) throw new HttpError(404, "Candidate not found");
+      res.json(await billingGate.billingStatus(client, candidateId));
+    } finally {
+      client.release();
+    }
+  })
+);
+
+router.get("/me/contracts", asyncHandler(async (req, res) => res.json(await contracts.myContracts(req.user))));
 router.get("/me", asyncHandler(async (req, res) => res.json(await candidateView.me(req.user))));
 router.get(
   "/me/invoices/:id/print",

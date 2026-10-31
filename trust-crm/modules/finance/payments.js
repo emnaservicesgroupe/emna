@@ -12,6 +12,7 @@ const { logAudit } = require("../../utils/audit");
 const { parseMoney, formatMoney } = require("./money");
 const c = require("./common");
 const invoices = require("./invoices");
+const billingGate = require("./billingGate");
 
 const { HttpError } = c;
 const db = () => require("../../db");
@@ -100,6 +101,8 @@ async function assertPayable(client, inv, amount, { legacy = false } = {}) {
     if (inv.status === "Draft") throw new HttpError(409, "Invoice is a draft and cannot receive payments");
     if (inv.status === "Paid" || inv.status === "Refunded" || cmp.settled) throw new HttpError(409, `Invoice is already settled (${inv.status})`);
   }
+  // A NEW payment on a candidate-fee invoice is refused once the jurisdiction's latest review is 'prohibited' (refunds / voids are not gated).
+  await billingGate.assertPaymentAllowed(client, inv);
   if (cmp.over) {
     throw new HttpError(400, legacy ? "amount_paid cannot exceed remaining invoice balance" : `amount exceeds the remaining balance (remaining: ${cmp.remaining})`);
   }

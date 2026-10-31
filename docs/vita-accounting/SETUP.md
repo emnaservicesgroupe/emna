@@ -15,6 +15,7 @@ Put them in `.env` (on the VPS: `deploy/hostinger/.env`), then `docker compose u
 | `FIN_COMPANY_NAME` | empty | Legal name printed in the invoice / receipt header. Hidden when empty. |
 | `FIN_COMPANY_ADDRESS` | empty | Postal address in the header. Hidden when empty. |
 | `FIN_COMPANY_TAX_ID` | empty | Tax / registration number in the header (your accountant gives you the exact wording). Hidden when empty. |
+| `FIN_DEFAULT_JURISDICTION` | empty | Jurisdiction (for example `CA-ON`) used by the candidate-fee billing gate for a candidate with **no desired province**. Empty = such a candidate cannot be billed a candidate-fee service (`jurisdiction_unknown`). See section 7. |
 | `FIN_EXPORT_MAX_ROWS` | `50000` (also the maximum) | Row cap per CSV export. When more rows match, the file is cut and the response carries `X-Row-Limit-Hit: true`; narrow the dates and export again. |
 
 The company facts are **your** inputs: the platform cannot know them. Ask your accountant to confirm the invoice number format
@@ -90,3 +91,16 @@ remaining checks are completed. Running 017 twice never duplicates anything.
 - Accounting lives in the same Postgres database as the CRM, so the normal `./backup.sh` already covers it. Keep several generations, copy them off the
   server, and run the restore test from [SETUP-HOSTINGER.md](../vita-job-search/SETUP-HOSTINGER.md) section 12 before you depend on them.
 - Take a backup before every update and at every month end; keep the month-end CSV exports with it.
+
+## 7. Candidate fees: contracts and the legal-review gate
+
+The platform **records** legal reviews and contracts and blocks billing until they are in place. It gives **no legal advice**: whether you may charge a
+candidate (in Ontario, Quebec, Tunisia or anywhere else) is a question for your lawyer. **No package price is preloaded.**
+
+1. **Create the services.** As an administrator, add Package A and Package B (name, price, currency) in the price list and set their kind to `candidate_fee`. Only an Admin or SuperAdmin can set or change the kind. Employer-funded services stay `standard`: nothing in this section applies to them.
+2. **Record the legal review per jurisdiction** (administrator only, through `POST /finance/legal-reviews`; the console screen comes with the next UI task): jurisdiction (`CA-ON`, `CA-QC`, ...), the decision (`pending`, `approved`, `prohibited`), who reviewed it and when, an optional expiry date and a note. A review is never edited; to change the position, record a new one (the latest wins). Set `valid_until` if the lawyer's advice has a shelf life: after that date the gate blocks again.
+3. **Make a contract** for the candidate and the service (Accountant or Admin), have the candidate sign, then record the signature (signer name, date, and the signed PDF if you have it). The contract is `active` from then on; end or cancel it when the service stops.
+4. **Invoice** from the catalogue (`POST /finance/invoices/v2`). The system checks: active signed contract **and** an approved, unexpired review for the candidate's province (`CA-` + desired province; `FIN_DEFAULT_JURISDICTION` if the province is empty). If not, you get a clear message and no invoice is created. `GET /finance/billing-status?candidate_id=` tells you what is missing.
+5. If the latest review for a province becomes `prohibited`, new invoices **and new payments** for candidate-fee services are blocked there; refunds and voids always work.
+
+The older "create invoice" screen (without catalogue lines) refuses candidates who have an active candidate-fee contract or sit in a prohibited province; use the catalogue invoice for them.

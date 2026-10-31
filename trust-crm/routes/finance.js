@@ -9,12 +9,13 @@ const { logAudit } = require("../utils/audit");
 const { parseMoney } = require("../modules/finance/money");
 const common = require("../modules/finance/common");
 const payments = require("../modules/finance/payments");
+const billingGate = require("../modules/finance/billingGate");
 
 const router = express.Router();
 const bodyOf = (req) => (req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {});
 
 function fail(res, err) {
-  if (err instanceof common.HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof common.HttpError) return res.status(err.status).json(err.code ? { error: err.message, code: err.code } : { error: err.message });
   return res.status(500).json({ error: err.message });
 }
 
@@ -56,6 +57,9 @@ router.post("/invoices", verifyToken, checkPermission("finance:write"), async (r
     const row = await common.inTransaction(async (client) => {
       const cand = (await client.query("SELECT id FROM candidates WHERE id = $1 AND is_deleted = false FOR SHARE", [candidateId])).rows[0];
       if (!cand) throw new common.HttpError(404, "Candidate not found");
+      // Billing gate: this route creates a plain invoice with no catalogue items, so it is refused for a candidate with an active
+      // candidate-fee contract or in a jurisdiction whose latest legal review is 'prohibited'; otherwise it behaves as before.
+      await billingGate.assertLegacyInvoiceAllowed(client, { candidateId });
       const { number, ts } = await common.nextNumber(client, "VITA", "invoice");
       const inv = (
         await client.query(

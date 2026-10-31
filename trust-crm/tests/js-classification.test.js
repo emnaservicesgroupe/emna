@@ -693,7 +693,7 @@ test("preparation blockers matrix: classification x work_authorization_status", 
     }
   }
   // other classes (and no classification) never block on their own
-  for (const cl of [null, "verified_active", "foreign_applicants_stated", "eligibility_unclear", "prospective_no_vacancy"]) {
+  for (const cl of [null, "verified_active", "foreign_applicants_stated", "eligibility_unclear"]) {
     const c = await mkCandidate({ wa: "none" });
     const a = await appFor(c, { classification: cl, text: cl === "foreign_applicants_stated" ? `${LONG} Visa sponsorship available.` : LONG });
     const r = await prep(a.appId);
@@ -705,6 +705,17 @@ test("preparation blockers matrix: classification x work_authorization_status", 
   const a = await appFor(c, { classification: "foreign_applicants_stated", text: `${LONG} Visa sponsorship available.` });
   const r = await prep(a.appId);
   assert.ok(!JSON.stringify(r.body.package.notes).match(/lmia|sponsorship confirmed/i));
+});
+
+test("preparation refuses prospective_no_vacancy for every candidate status (outreach basis not approved)", async () => {
+  for (const wa of ["citizen", "pr", "none", null]) {
+    const c = await mkCandidate({ wa: wa === null ? undefined : wa });
+    const a = await appFor(c, { classification: "prospective_no_vacancy" });
+    const r = await prep(a.appId);
+    assert.equal(r.status, 409, `prospective ${wa}`);
+    assert.equal(r.body.code, "no_vacancy_outreach_not_permitted");
+    assert.equal((await q("SELECT status FROM js_applications WHERE id=$1", [a.appId])).rows[0].status, "matched", "a refused preparation leaves the application untouched");
+  }
 });
 
 test("require_match_acceptance: admin-only toggle, default off; on => preparation needs an accepted match", async () => {

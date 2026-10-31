@@ -61,7 +61,7 @@ const ROUTE_RULES = [
   { re: /^\w+ \/candidates\//, allow: NONE, why: "staff candidate CRUD (/candidates/*)" },
   // finance: legacy (/dashboard, POST /invoices, POST /payments) and stage-4 routes (routes/financeV2.js: /services*, /invoices*, /payments*,
   // /expenses*, /expense-categories*, /reports/*, /export/*.csv) are staff permissions only: no portal role and no Candidate.
-  // The ONE exception is the Candidate self-view, GET /finance/me and GET /finance/me/invoices/:id/print (role Candidate only,
+  // The ONE exception is the Candidate self-view, GET /finance/me, GET /finance/me/invoices/:id/print and GET /finance/me/contracts (role Candidate only,
   // ownership from js_candidate_accounts); Employer and Agency never reach it. First match wins, so it sits before the catch-all.
   { re: /^GET \/finance\/me(\/|$)/, allow: ["candidate"], why: "finance candidate self-view (/finance/me*)" },
   { re: /^\w+ \/finance\//, allow: NONE, why: "finance (staff permissions)" },
@@ -429,14 +429,16 @@ test("sweep controls: the refused routes are alive for the roles that own them (
   // Finance self-view: the Candidate gets its own (empty) statement; staff, Employer, Agency and anonymous are refused on /finance/me*.
   const finMe = await ok(attacker.token, "/finance/me", "candidate finance self-view");
   assert.deepEqual(finMe.json, { invoices: [], totals: [] });
-  for (const url of ["/finance/me", "/finance/me/invoices/1/print"]) {
+  // stage 8 task 6: own service contracts (none yet); the contract / legal-review / billing-status routes are staff permissions only
+  assert.deepEqual((await ok(attacker.token, "/finance/me/contracts", "candidate own contracts")).json, { contracts: [] });
+  for (const url of ["/finance/me", "/finance/me/invoices/1/print", "/finance/me/contracts"]) {
     for (const [role, token] of [["employer", emp.token], ["agency", agy.token], ["admin", w.tokens.admin], ["mgr", w.tokens.mgr], ["anon", null]]) {
       const r = await probe(w.base, "GET", url, token);
       assert.ok(DENIED.has(r.status), `${role} GET ${url} -> ${r.status}`);
     }
   }
   // ...and the Candidate is refused on every staff finance route (the carve-out is /me* only).
-  for (const url of ["/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/invoices.csv"]) {
+  for (const url of ["/finance/dashboard", "/finance/services", "/finance/invoices", "/finance/expenses", "/finance/reports/summary", "/finance/export/invoices.csv", "/finance/contracts", "/finance/contracts/1", "/finance/legal-reviews", "/finance/billing-status?candidate_id=1"]) {
     assert.equal((await probe(w.base, "GET", url, attacker.token)).status, 403, `candidate GET ${url}`);
   }
   // HR: staff reach /hr/me (any active staff) and the permission-gated admin reads; the portals and the Candidate are refused on all of them.

@@ -325,12 +325,16 @@ async function createFromMatch({ matchId, actor, [SCHEDULER_GRANT]: schedulerGra
 const AUTHORIZED_STATUSES = ["work_permit_open", "work_permit_employer_specific", "pr", "citizen"];
 
 /**
- * closed_unsuitable blocks preparation; work_authorization_required blocks it unless the candidate's recorded status is a permit / PR /
+ * closed_unsuitable and prospective_no_vacancy block preparation (prospective outreach stays blocked until a lawyer approves its CASL
+ * basis); work_authorization_required blocks it unless the candidate's recorded status is a permit / PR /
  * citizen state (then it is allowed and noted in the package). Returns the package note, or null. A classification is a review aid
  * read from an advertisement; it never grants eligibility.
  */
 async function classificationGate(client, app, job) {
   if (job.classification === "closed_unsuitable") throw new HttpError(409, "The job is closed or unsuitable; the application cannot be prepared", "job_closed_unsuitable");
+  if (job.classification === "prospective_no_vacancy") {
+    throw new HttpError(409, "The posting is a prospective one with no stated vacancy; outreach without a vacancy is not permitted", "no_vacancy_outreach_not_permitted");
+  }
   if (job.classification !== "work_authorization_required") return null;
   const status = (await client.query("SELECT work_authorization_status FROM candidates WHERE id = $1", [app.candidate_id])).rows[0]?.work_authorization_status || null;
   if (!AUTHORIZED_STATUSES.includes(status)) {

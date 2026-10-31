@@ -8,7 +8,8 @@ const { HttpError } = c;
 const db = () => require("../../db");
 const CODE_RE = /^[A-Z0-9_-]{2,30}$/;
 const NAME_MAX = 160;
-const COLS = "id, code, name_ar, name_en, name_fr, default_price::text AS default_price, currency, active, created_by, created_at";
+const KINDS = ["standard", "candidate_fee"];
+const COLS = "id, code, kind, name_ar, name_en, name_fr, default_price::text AS default_price, currency, active, created_by, created_at";
 const NAME_FIELDS = ["name_ar", "name_en", "name_fr"];
 
 function validateCode(v) {
@@ -18,7 +19,7 @@ function validateCode(v) {
 
 function validate(input, { creating }) {
   if (!c.isObj(input)) throw new HttpError(400, "A JSON object body is required");
-  const allowed = creating ? ["code", ...NAME_FIELDS, "default_price", "currency", "active"] : [...NAME_FIELDS, "default_price", "currency", "active"];
+  const allowed = creating ? ["code", ...NAME_FIELDS, "default_price", "currency", "active", "kind"] : [...NAME_FIELDS, "default_price", "currency", "active", "kind"];
   for (const k of Object.keys(input)) {
     if (k === "code" && !creating) throw new HttpError(400, "code cannot be changed");
     if (!allowed.includes(k)) throw new HttpError(400, `Unknown field: ${k}`);
@@ -30,6 +31,10 @@ function validate(input, { creating }) {
   else if (creating) out.default_price = "0.00";
   if (input.currency !== undefined) out.currency = c.parseCurrency(input.currency);
   else if (creating) out.currency = c.allowedCurrencies().includes("TND") ? "TND" : c.allowedCurrencies()[0];
+  if (input.kind !== undefined) {
+    if (!KINDS.includes(input.kind)) throw new HttpError(400, `kind must be one of ${KINDS.join(", ")}`);
+    out.kind = input.kind;
+  }
   if (input.active !== undefined) {
     if (typeof input.active !== "boolean") throw new HttpError(400, "active must be true or false");
     out.active = input.active;
@@ -60,12 +65,14 @@ async function createService(user, input) {
   c.requirePerm(user, "finance:write");
   const v = validate(input, { creating: true });
   if (!NAME_FIELDS.some((f) => v[f])) throw new HttpError(400, "At least one of name_ar, name_en, name_fr is required");
+  // A candidate_fee service switches the legal-review billing gate on for it: administrators only.
+  if (v.kind !== undefined && v.kind !== "standard") c.requirePerm(user, "users:write");
   try {
     return await c.inTransaction(async (client) => {
       const r = await client.query(
-        `INSERT INTO fin_services (code, name_ar, name_en, name_fr, default_price, currency, active, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${COLS}`,
-        [v.code, v.name_ar || null, v.name_en || null, v.name_fr || null, v.default_price, v.currency, v.active === undefined ? true : v.active, user.id]
+        `INSERT INTO fin_services (code, name_ar, name_en, name_fr, default_price, currency, active, created_by, kind)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING ${COLS}`,
+        [v.code, v.name_ar || null, v.name_en || null, v.name_fr || null, v.default_price, v.currency, v.active === undefined ? true : v.active, user.id, v.kind || "standard"]
       );
       await logAudit({ client, userId: user.id, action: "CREATE", tableName: "fin_services", recordId: r.rows[0].id, newData: r.rows[0] });
       return r.rows[0];
@@ -84,6 +91,8 @@ async function updateService(user, rawId, input) {
   return c.inTransaction(async (client) => {
     const cur = (await client.query(`SELECT ${COLS} FROM fin_services WHERE id = $1 FOR UPDATE`, [id])).rows[0];
     if (!cur) throw new HttpError(404, "Service not found");
+    // Switching a service into or out of candidate_fee changes what the billing gate protects: administrators only.
+    if (v.kind !== undefined && v.kind !== cur.kind) c.requirePerm(user, "users:write");
     const next = { ...cur, ...v };
     if (!NAME_FIELDS.some((f) => next[f])) throw new HttpError(400, "At least one of name_ar, name_en, name_fr is required");
     const sets = [];

@@ -4,6 +4,7 @@
 const { logAudit } = require("../../utils/audit");
 const { parseMoney, parseQuantity, formatMoney } = require("./money");
 const c = require("./common");
+const billingGate = require("./billingGate");
 
 const { HttpError } = c;
 const db = () => require("../../db");
@@ -137,6 +138,9 @@ async function createInvoice(user, input, opts = {}) {
       if (unitPrice === null) throw new HttpError(400, `${it.at}.unit_price is required${it.serviceId !== null ? " (service price is in another currency)" : ""}`);
       return { serviceId: it.serviceId, description, quantity: it.quantity, unitPrice };
     });
+
+    // Billing gate: a candidate_fee line needs an active signed contract and a current approved legal review (409 otherwise).
+    await billingGate.assertBillable(client, { candidateId: v.candidateId, items: v.items }, { now: nowArg });
 
     // Totals in SQL. Rejects totals that cannot be stored (numeric(12,2)) with a 400 instead of a database error.
     const tot = (

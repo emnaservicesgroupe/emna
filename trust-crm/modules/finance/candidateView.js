@@ -104,4 +104,4 @@ async function printMyInvoice(user, rawId, { lang = "en" } = {}) {
   }
 }
 
-module.exports = { me, printMyInvoice };
+module.exports = { me, printMyInvoice, requireCandidate, ownCandidateId };
