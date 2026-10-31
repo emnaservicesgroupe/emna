@@ -3,6 +3,8 @@
 //   POST /sources/:key/pause|resume                                          (jobsearch:admin)
 //   POST /search/run                   {candidateId?, sourceKey?}   (write; no candidateId => admin)
 //   GET  /jobs                         ?country&source&status&q&page&pageSize (staff/admin; Candidate 403)
+//   GET  /jobs/:id                     one vacancy with its classification      (staff)
+//   POST /jobs/:id/classification      {classification|null, evidence?, note?} staff override, audited (jobsearch:write)
 //   POST /jobs/manual                  staff-entered vacancy                   (jobsearch:write)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
@@ -14,6 +16,7 @@ const registry = require("../modules/jobsearch/sources");
 const { ensureSources, enqueueSearch, runStatus } = require("../modules/jobsearch/searchRunner");
 const consentService = require("../modules/jobsearch/consentService");
 const jobStore = require("../modules/jobsearch/jobStore");
+const classification = require("../modules/jobsearch/classification");
 const { logAudit } = require("../utils/audit");
 
 const router = express.Router();
@@ -111,6 +114,8 @@ router.get("/jobs", verifyToken, asyncHandler(async (req, res) => {
   const total = (await db().query(`SELECT count(*)::int AS n FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id ${w}`, params)).rows[0].n;
   const rows = (await db().query(
     `SELECT j.id, j.title, e.name AS employer, j.location, j.country, j.url, j.status, j.published_at, j.last_checked_at, j.closing_at, j.source_primary,
+            j.classification, j.classification_evidence, j.classified_by, j.classified_at, j.salary_text, j.employment_type, j.required_experience_text,
+            to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date,
             (SELECT array_agg(src.key ORDER BY src.key) FROM js_job_sightings s JOIN js_sources src ON src.id = s.source_id WHERE s.job_id = j.id) AS sources
        FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id ${w}
       ORDER BY COALESCE(j.published_at, j.created_at) DESC, j.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -119,12 +124,38 @@ router.get("/jobs", verifyToken, asyncHandler(async (req, res) => {
   res.json({ jobs: rows, page, pageSize, total });
 }));
 
+const jobView = (j) => ({
+  id: j.id, title: j.title, status: j.status, url: j.url, location: j.location, country: j.country, source_primary: j.source_primary,
+  salaryText: j.salary_text || null, employmentType: j.employment_type || null, requiredExperienceText: j.required_experience_text || null,
+  closingDate: j.closing_date_s !== undefined ? j.closing_date_s : j.closing_date ? new Date(j.closing_date).toISOString().slice(0, 10) : null,
+  ...classification.presentClassification(j, { staff: true }),
+});
+
+router.get("/jobs/:id", verifyToken, asyncHandler(async (req, res) => {
+  if (req.user.role === "Candidate") throw new HttpError(403, "Candidates see jobs through their matches");
+  need(req.user, "jobsearch:read");
+  const id = /^\d{1,9}$/.test(req.params.id) ? Number(req.params.id) : 0;
+  const r = id ? await db().query("SELECT j.*, to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date_s, e.name AS employer FROM js_jobs j LEFT JOIN js_employers e ON e.id = j.employer_id WHERE j.id = $1", [id]) : { rows: [] };
+  if (!r.rows[0]) throw new HttpError(404, "Not found");
+  res.json({ job: { ...jobView(r.rows[0]), employer: r.rows[0].employer, description: r.rows[0].description_text }, notice: classification.NOTICE });
+}));
+
+router.post("/jobs/:id/classification", verifyToken, asyncHandler(async (req, res) => {
+  if (req.user.role === "Candidate") throw new HttpError(403, "Staff access required");
+  need(req.user, "jobsearch:write");
+  const b = body(req);
+  const row = await classification.setStaffClassification({ jobId: req.params.id, user: req.user, classification: b.classification, evidence: b.evidence, note: b.note });
+  const full = (await db().query("SELECT j.*, to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date_s FROM js_jobs j WHERE j.id = $1", [row.id])).rows[0];
+  res.json({ job: jobView(full), notice: classification.NOTICE });
+}));
+
 router.post("/jobs/manual", verifyToken, asyncHandler(async (req, res) => {
   if (req.user.role === "Candidate") throw new HttpError(403, "Staff access required");
   need(req.user, "jobsearch:write");
   const out = await jobStore.importManual(body(req), req.user);
   await logAudit({ userId: req.user.id, action: "jobsearch.job.manual_import", tableName: "js_jobs", recordId: out.job.id });
-  res.status(out.created ? 201 : 200).json({ created: out.created, job: { id: out.job.id, title: out.job.title, status: out.job.status, url: out.job.url, location: out.job.location, country: out.job.country, source_primary: out.job.source_primary } });
+  const full = (await db().query("SELECT j.*, to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date_s FROM js_jobs j WHERE j.id = $1", [out.job.id])).rows[0];
+  res.status(out.created ? 201 : 200).json({ created: out.created, job: jobView(full) });
 }));
 
 router.use(jobsearchErrorHandler);

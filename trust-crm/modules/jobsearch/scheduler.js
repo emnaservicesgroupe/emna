@@ -24,6 +24,7 @@ const searchRunner = require("./searchRunner");
 const matchService = require("./matchService");
 const consentService = require("./consentService");
 const applicationService = require("./applicationService");
+const settingsService = require("./settingsService");
 const submitter = require("./submitter");
 const jobStore = require("./jobStore");
 
@@ -591,12 +592,16 @@ async function stepOrchestrate(ctx) {
       }
       if (blockers.length) continue; // paused / suspended / deleted: quietly skipped
       await resolveCandidateTask(cid, "prepare_consent_missing");
+      // Never auto-proposed: a not_recommended band (score under 50 or an essential veto) and a staff-rejected match; with
+      // require_match_acceptance on, only accepted matches. MATCH_AUTO_PREPARE_MIN stays a floor on top of this.
+      const needAccepted = (await settingsService.getMatchSettings()).require_match_acceptance;
       const matches = (await db().query(
         `SELECT m.id FROM js_matches m JOIN js_jobs j ON j.id = m.job_id
           WHERE m.candidate_id = $1 AND m.score >= $2 AND j.status = 'open'
+            AND m.band IS DISTINCT FROM 'not_recommended' AND m.decision <> 'rejected' AND ($4::boolean = false OR m.decision = 'accepted')
             AND NOT EXISTS (SELECT 1 FROM js_applications a WHERE a.candidate_id = m.candidate_id AND a.job_id = m.job_id)
           ORDER BY m.score DESC, m.id LIMIT $3`,
-        [cid, ctx.L.minScore, ctx.L.applicationsPerTick]
+        [cid, ctx.L.minScore, ctx.L.applicationsPerTick, needAccepted]
       )).rows;
       for (const m of matches) {
         try {

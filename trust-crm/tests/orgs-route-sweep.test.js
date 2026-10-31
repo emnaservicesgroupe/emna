@@ -175,6 +175,13 @@ const JOBSEARCH_STAFF = [
   "GET /jobsearch/suppressions",
   "POST /jobsearch/suppressions",
   "DELETE /jobsearch/suppressions/:id",
+  // stage 8 task 5: vacancy classification (staff override), match accept/reject (approvers), module match settings (admin PUT)
+  "GET /jobsearch/jobs/:id",
+  "POST /jobsearch/jobs/:id/classification",
+  "POST /jobsearch/matches/:id/accept",
+  "POST /jobsearch/matches/:id/reject",
+  "GET /jobsearch/match-settings",
+  "PUT /jobsearch/match-settings",
   "GET /jobsearch/automation-rules",
   "POST /jobsearch/automation-rules",
   "DELETE /jobsearch/automation-rules/:id",

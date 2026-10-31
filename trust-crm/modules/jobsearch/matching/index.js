@@ -193,6 +193,22 @@ function neutralPoints(max) {
   return max / 2;
 }
 
+// ---- bands (stage 8 task 5) ----
+// >= 85 strong, 70-84 good, 50-69 manual_review, < 50 not_recommended. An essential veto is a HARD override that can only lower the
+// band: a not_recommended veto forces not_recommended; a manual_review veto caps strong/good at manual_review and never raises a low
+// score. A vetoed match can therefore never be strong or good.
+const BAND_LABELS = Object.freeze({ strong: "Strong", good: "Good", manual_review: "Manual review", not_recommended: "Not recommended" });
+const BAND_THRESHOLDS = Object.freeze({ strong: 85, good: 70, manual_review: 50 });
+
+function computeBand(score, vetoes) {
+  const s = Number.isFinite(score) ? score : 0;
+  const list = Array.isArray(vetoes) ? vetoes : [];
+  if (list.some((v) => v && v.severity === "not_recommended")) return "not_recommended";
+  const band = s >= BAND_THRESHOLDS.strong ? "strong" : s >= BAND_THRESHOLDS.good ? "good" : s >= BAND_THRESHOLDS.manual_review ? "manual_review" : "not_recommended";
+  if (list.length && (band === "strong" || band === "good")) return "manual_review";
+  return band;
+}
+
 /**
  * @param {object} profile confirmed profile (js_profiles.confirmed)
  * @param {object} prefs js_preferences row (countries, categories, salary_min, salary_currency, residence_country, needs_work_auth_support)
@@ -208,6 +224,10 @@ function scoreMatch(profile, prefs, job, opts = {}) {
   const missing = [];
   const uncertain = [];
   const breakdown = {};
+  const vetoes = []; // essential vetoes: {code, severity: 'not_recommended'|'manual_review', reason}
+  const veto = (code, severity, reason) => {
+    if (!vetoes.some((v) => v.code === code)) vetoes.push({ code, severity, reason });
+  };
 
   const titleN = neutralize(job.title);
   const descN = neutralize(job.description_text ?? job.description);
@@ -303,8 +323,13 @@ function scoreMatch(profile, prefs, job, opts = {}) {
       }
       let ok = 0;
       for (const [lang, quote] of req) {
-        if (!held.has(lang)) missing.push(`Language: ${lang} is required ("${clip(quote, 120)}") but is not in your confirmed languages`);
-        else if (held.get(lang) && LOW_LEVEL.test(fold(held.get(lang)))) missing.push(`Language: ${lang} is required but your confirmed level is basic`);
+        if (!held.has(lang)) {
+          missing.push(`Language: ${lang} is required ("${clip(quote, 120)}") but is not in your confirmed languages`);
+          veto("required_language_missing", "manual_review", `Required language not held: ${lang}`);
+        } else if (held.get(lang) && LOW_LEVEL.test(fold(held.get(lang)))) {
+          missing.push(`Language: ${lang} is required but your confirmed level is basic`);
+          veto("required_language_missing", "manual_review", `Required language only at a basic level: ${lang}`);
+        }
         else {
           ok += 1;
           reasons.push(`Language requirement met: ${lang}`);
@@ -335,6 +360,7 @@ function scoreMatch(profile, prefs, job, opts = {}) {
     } else {
       breakdown.location = 0;
       missing.push("Job is outside your preferred destinations");
+      veto("outside_destination", "not_recommended", "The job is outside the preferred destinations");
     }
   }
 
@@ -367,6 +393,7 @@ function scoreMatch(profile, prefs, job, opts = {}) {
         uncertain.push(`The ad requires a licence or certificate ("${clip(req.quote, 100)}"); it is unclear whether yours qualifies`);
       } else {
         breakdown.licensing = 0;
+        veto("required_licence_missing", "manual_review", "A required licence or certificate is not in the confirmed profile");
         missing.push(`Licence/certification required ("${clip(req.quote, 120)}") but not found in your confirmed certificates`);
       }
     }
@@ -390,6 +417,7 @@ function scoreMatch(profile, prefs, job, opts = {}) {
       reasons.push(`The ad mentions overseas candidates ("${clip(overseas.evidence, 120)}")`);
     } else if (overseas.accepted === false) {
       o = 0;
+      veto("applicants_must_be_local", "manual_review", "The ad says applicants must already be in the country");
       missing.push(`The ad says applicants must already be in the country ("${clip(overseas.evidence, 120)}")`);
     } else {
       o = 0.5;
@@ -402,11 +430,13 @@ function scoreMatch(profile, prefs, job, opts = {}) {
       uncertain.push("It is unknown whether you need employer support for work authorization");
     } else if (employerSupport.conflict) {
       a = 0.5;
+      veto("support_conflict", "manual_review", "Staff confirmation and the advertisement disagree");
     } else if (employerSupport.label === "confirmed" || employerSupport.label === "stated_in_ad") {
       a = 1;
       reasons.push(`The ad mentions employer support for work authorization ("${clip(employerSupport.evidence, 120)}"); this is not verified`);
     } else if (employerSupport.label === "unavailable") {
       a = 0;
+      veto("work_authorization_unavailable", "manual_review", "The candidate needs employer support and the ad says it is not available");
       missing.push(`The ad says work authorization must already be held ("${clip(employerSupport.evidence, 120)}")`);
     } else {
       a = 0.5;
@@ -415,10 +445,16 @@ function scoreMatch(profile, prefs, job, opts = {}) {
     breakdown.overseasAuth = (max * (o + a)) / 2;
   }
 
+  // job state (status / classification stored on the job)
+  if (job.status === "expired" || job.status === "closed" || job.classification === "closed_unsuitable") veto("job_closed", "not_recommended", "The vacancy is closed or unsuitable");
+  if (job.classification === "work_authorization_required" && prefs.needs_work_auth_support === true && !(country(prefs.residence_country) && jobCountry && country(prefs.residence_country) === jobCountry)) {
+    veto("work_authorization_required", "manual_review", "The ad requires work authorization the candidate may not hold");
+  }
+
   const total = Object.values(breakdown).reduce((x, y) => x + y, 0);
   const score = Math.max(0, Math.min(100, Math.round(total)));
   for (const k of Object.keys(breakdown)) breakdown[k] = Math.round(breakdown[k] * 10) / 10;
-  return { score, reasons, missing, uncertain, overseas, employerSupport, breakdown };
+  return { score, band: computeBand(score, vetoes), vetoes, reasons, missing, uncertain, overseas, employerSupport, breakdown };
 }
 
-module.exports = { scoreMatch, detectEmployerSupport, detectOverseas, sanitizeUntrusted, WEIGHTS, NOTICE, country, neutralize };
+module.exports = { scoreMatch, computeBand, BAND_LABELS, BAND_THRESHOLDS, detectEmployerSupport, detectOverseas, sanitizeUntrusted, WEIGHTS, NOTICE, country, neutralize };

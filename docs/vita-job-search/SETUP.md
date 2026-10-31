@@ -101,7 +101,7 @@ the meaning, the default, whether the value is a secret, and whether production 
 | `JOBBANK_CA_FEED_URL` | Authorized Job Bank feed URL (https, public host) | unset → `requires_setup` | treat as secret if it carries a key | to use Job Bank |
 | `PARTNER_FEED_URLS` | Approved partner feed URLs, comma separated | unset → `requires_setup` | same | to use partner feeds |
 | `JOBSEARCH_USER_AGENT` | User-Agent sent to feeds | `VITA-JobSearch/1.0 …` | no | recommended (with a contact address) |
-| `MATCH_MIN_SCORE` | Matches below this score are not stored | `40` | no | no |
+| `MATCH_MIN_SCORE` | Matches below this score are not stored (stored matches under 50, or with an essential veto that forces it, are band `not_recommended` and are never auto-proposed; see DECISIONS 24) | `40` | no | no |
 
 ### Scheduler and workers
 
