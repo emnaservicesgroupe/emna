@@ -205,6 +205,9 @@ test("stage 8 task 5: the scheduler never proposes a not_recommended or rejected
   assert.equal(s1.applicationsCreated, 0, "acceptance required: a pending match creates nothing");
   const m = (await q("SELECT * FROM js_matches WHERE candidate_id=$1", [c.id])).rows[0];
   assert.ok(m && m.band, "the stored match has a band");
+  // The later ticks must only ORCHESTRATE the stored match: a scheduled search would re-score it (the band is recomputed on every match
+  // run) and which tick runs a search depends on the wall-clock minute/hour the suite starts at. Pause the source so the forced band holds.
+  await q("UPDATE js_sources SET paused = true");
   // 2. accepted but not_recommended: still not proposed
   await q("UPDATE js_matches SET decision='accepted', band='not_recommended' WHERE id=$1", [m.id]);
   const s2 = await tick(new Date(t0.getTime() + HOUR));
