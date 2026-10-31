@@ -66,11 +66,11 @@ test("portal pages: a Messages tab / step with the panel root, chat scripts in o
   const pages = [
     { f: "employer.html", before: ["i18n.js", "vita.js", "orgs-util.js", "orgs-common.js"], last: "employer.js", tab: /<button type="button" role="tab" id="tab-chat" aria-controls="panel-chat" data-tab="chat">/, panel: /<section id="panel-chat" role="tabpanel" aria-labelledby="tab-chat"/ },
     { f: "agency.html", before: ["i18n.js", "vita.js", "orgs-util.js", "orgs-common.js"], last: "agency.js", tab: /<button type="button" role="tab" id="tab-chat" aria-controls="panel-chat" data-tab="chat">/, panel: /<section id="panel-chat" role="tabpanel" aria-labelledby="tab-chat"/ },
-    { f: "portal.html", before: ["i18n.js", "vita.js", "fin-util.js"], last: "portal.js", tab: /<button type="button" data-step="chat">/, panel: /<section id="step-chat"[^>]*aria-labelledby="chat-h"/ },
+    { f: "portal.html", before: ["i18n.js", "vita.js", "fin-util.js"], after: ["canada-util.js", "canada-portal.js"], last: "portal.js", tab: /<button type="button" data-step="chat">/, panel: /<section id="step-chat"[^>]*aria-labelledby="chat-h"/ },
   ];
   for (const p of pages) {
     const html = read(p.f);
-    assert.deepEqual(scripts(html), [...p.before, "chat-util.js", "chat-panel.js", "chat-portal.js", p.last], p.f);
+    assert.deepEqual(scripts(html), [...p.before, "chat-util.js", "chat-panel.js", "chat-portal.js", ...(p.after || []), p.last], p.f);
     assert.match(html, p.tab, `${p.f} tab`);
     assert.match(html, p.panel, `${p.f} panel`);
     assert.match(html, /id="chat-root"/, `${p.f} panel root`);
@@ -82,7 +82,7 @@ test("portal pages: a Messages tab / step with the panel root, chat scripts in o
     for (const l of LANGS) assert.match(html, new RegExp(`data-disclaimer-lang="${l}"`), `${p.f} ${l}`);
     assert.ok(html.includes(DISCLAIMER_EN), `${p.f} English disclaimer text`);
   }
-  assert.match(read("portal.js"), /var STEPS = \["upload", "review", "prefs", "consent", "status", "payments", "chat"\]/);
+  assert.match(read("portal.js"), /var STEPS = \["upload", "review", "prefs", "consent", "status", "payments", "canada", "chat"\]/);
 });
 
 test("the API client allows /chat/ besides the existing prefixes (which are unchanged); connectEvents takes the stream path and uses the shared frame parser", () => {

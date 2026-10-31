@@ -87,7 +87,7 @@
         h("td", { text: s.name_en || "—" }),
         h("td", { text: s.name_fr || "—" }),
         h("td", { class: "num" }, F.money(s.default_price, s.currency)),
-        h("td", null, h("span", { class: "badge " + (s.active ? "ok" : "neutral"), text: s.active ? t("fin.svc.active") : t("fin.svc.inactive") })),
+        h("td", null, h("span", { class: "badge " + (s.active ? "ok" : "neutral"), text: s.active ? t("fin.svc.active") : t("fin.svc.inactive") }), s.kind === "candidate_fee" ? [" ", h("span", { class: "badge info", text: t("fin.svc.kind.candidate_fee") })] : null),
         h("td", null, acts));
     });
     V.setContent($("#fin-svc-table"), A.table(
@@ -104,6 +104,10 @@
     var nameFr = h("input", { id: "fin-sv-fr", type: "text", attrs: { maxlength: String(FU.LIMITS.name), autocomplete: "off" }, value: creating ? "" : svc.name_fr || "" });
     var price = h("input", { id: "fin-sv-price", type: "text", attrs: { inputmode: "decimal", autocomplete: "off", dir: "ltr", maxlength: "13" }, value: creating ? "0.00" : svc.default_price });
     var currency = F.select("fin-sv-currency", F.currencyItems(false), creating ? "TND" : svc.currency);
+    // Stage 8: a candidate_fee service switches the legal-review billing gate on; only administrators (users:write) may set it
+    var canKind = Boolean(window.VITA_CRM_UTIL) && window.VITA_CRM_UTIL.can(F.role(), "users:write");
+    var kindSel = F.select("fin-sv-kind", [["standard", t("fin.svc.kind.standard")], ["candidate_fee", t("fin.svc.kind.candidate_fee")]], creating ? "standard" : svc.kind || "standard");
+    kindSel.disabled = !canKind;
     var err = h("p", { class: "form-error", attrs: { role: "alert" } });
     var go = h("button", { type: "submit", class: "btn", text: creating ? t("fin.svc.create") : t("common.save") });
     var cancel = h("button", { type: "button", class: "btn secondary", text: t("common.cancel") });
@@ -114,17 +118,18 @@
       F.field("fin-sv-fr", t("fin.svc.nameFr"), nameFr, t("fin.svc.namesHint")),
       F.field("fin-sv-price", t("fin.svc.price"), price, t("fin.svc.priceHint")),
       F.field("fin-sv-currency", t("fin.currency"), currency),
+      F.field("fin-sv-kind", t("fin.svc.kind"), kindSel, t("fin.svc.kindHint")),
       err,
       h("div", { class: "btn-row" }, go, cancel),
     ]);
     var state = { sending: false };
-    var fields = { code: code, name: nameEn, name_ar: nameAr, name_en: nameEn, name_fr: nameFr, default_price: price, currency: currency };
+    var fields = { code: code, name: nameEn, name_ar: nameAr, name_en: nameEn, name_fr: nameFr, default_price: price, currency: currency, kind: kindSel };
     cancel.addEventListener("click", m.close);
     m.form.addEventListener("submit", function (e) {
       e.preventDefault();
       err.textContent = "";
       F.unflag(m.form);
-      var built = FU.servicePayload({ code: code.value, name_ar: nameAr.value, name_en: nameEn.value, name_fr: nameFr.value, default_price: price.value, currency: currency.value }, { creating: creating, base: svc });
+      var built = FU.servicePayload({ code: code.value, name_ar: nameAr.value, name_en: nameEn.value, name_fr: nameFr.value, default_price: price.value, currency: currency.value, kind: canKind ? kindSel.value : undefined }, { creating: creating, base: svc });
       if (!built.ok) return F.flag(fields[built.field] || go, err, F.errText(built));
       F.submit(go, state, function () {
         var call = creating ? V.api("POST", "/finance/services", { body: built.payload }) : V.api("PATCH", "/finance/services/" + svc.id, { body: built.payload });

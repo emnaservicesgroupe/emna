@@ -13,6 +13,7 @@
 
   var CURRENCIES = ["TND", "EUR", "CAD", "USD"]; // default FIN_CURRENCIES; the API refuses anything the owner did not enable
   var INVOICE_STATUSES = ["Draft", "Pending", "Partial", "Paid", "Void", "Refunded"];
+  var SERVICE_KINDS = ["standard", "candidate_fee"];
   var METHODS = ["cash", "bank_transfer", "card", "mobile", "cheque", "other"];
   var STATEMENT_KINDS = ["invoice", "payment", "refund"];
   var BUCKETS = ["current", "0-30", "31-60", "61-90", "90+", "no_due_date"];
@@ -287,12 +288,20 @@
     if (!price.ok) return fail("default_price", price.error);
     var currency = trimmed(f.currency);
     if (CURRENCIES.indexOf(currency) < 0) return fail("currency");
+    // Stage 8: kind (standard | candidate_fee) only when the form sends it (administrators); a candidate_fee service is gated by a legal review.
+    var kind;
+    if (f.kind !== undefined && f.kind !== null) {
+      kind = trimmed(f.kind);
+      if (SERVICE_KINDS.indexOf(kind) < 0) return fail("kind");
+    }
     if (creating) {
       NAME_FIELDS.forEach(function (k3) { withDefined(payload, k3, names[k3]); });
       payload.default_price = price.value;
       payload.currency = currency;
+      if (kind !== undefined) payload.kind = kind;
       return { ok: true, payload: payload };
     }
+    if (kind !== undefined && kind !== (base.kind || "standard")) payload.kind = kind;
     NAME_FIELDS.forEach(function (k4) {
       var before = base[k4] === undefined || base[k4] === null || base[k4] === "" ? null : String(base[k4]);
       if (before !== names[k4]) payload[k4] = names[k4];

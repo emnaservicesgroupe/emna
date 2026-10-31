@@ -13,7 +13,7 @@
   var CURRENCIES = ["CAD", "EUR", "ALL", "RON", "USD", "GBP", "TND", "MAD", "DZD", "EGP"];
   var SCALARS = ["name", "email", "phone", "profession"];
   var LISTS = ["skills", "education", "certificates"];
-  var STEPS = ["upload", "review", "prefs", "consent", "status", "payments", "chat"];
+  var STEPS = ["upload", "review", "prefs", "consent", "status", "payments", "canada", "chat"];
 
   var S = {
     session: null,
@@ -130,6 +130,7 @@
         onStatus: V.liveIndicator($("#live-status")),
         refetch: function () { refreshState(false); },
       });
+      window.VITA_CANADA_PORTAL.loadBanner($("#canada-ref-banner")); // my CAN-YYYY-NNNN reference, visible on every step
       refreshState(true);
     }).catch(function (err) {
       if (err && err.status !== 401) V.toast(V.errorMessage(err), "bad");
@@ -208,6 +209,7 @@
     if (step === "consent") renderConsent();
     if (step === "status") renderStatus();
     if (step === "payments") loadPayments();
+    if (step === "canada") window.VITA_CANADA_PORTAL.render($("#canada-root"));
     if (step === "chat" && chat) chat.activate();
     if (focus) $("#step-" + step).focus();
   }

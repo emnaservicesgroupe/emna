@@ -95,12 +95,19 @@
   // opens a candidate card, so CRM code can add its section without this file knowing about it.
   var EXT = {};
   var candidateListeners = [];
+  // Canada service layer (canada-*.js): extra cards after a built-in tab's loader, extra sections in the application drawer and an extra button per employer row.
+  var tabLoadListeners = {};
+  var drawerListeners = [];
+  var employerRowListeners = [];
   window.VITA_ADMIN = {
     role: role,
     registerTab: function (name, def) { EXT[name] = def; },
     onCandidate: function (fn) { candidateListeners.push(fn); },
+    onTabLoad: function (name, fn) { (tabLoadListeners[name] = tabLoadListeners[name] || []).push(fn); },
+    onDrawer: function (fn) { drawerListeners.push(fn); },
+    onEmployerRow: function (fn) { employerRowListeners.push(fn); },
     selectTab: function (name, focusPanel) { selectTab(name, focusPanel); },
-    errorBox: errorBox, kv: kv, table: table, fillSelect: fillSelect, option: option,
+    errorBox: errorBox, kv: kv, table: table, fillSelect: fillSelect, option: option, qs: qs,
   };
 
   // ================================================================ login / session
@@ -296,6 +303,7 @@
     var loaders = { dashboard: loadDashboard, applications: loadApplications, review: loadReview, interviews: loadInterviews, sources: loadSources, settings: loadSettings, reports: function () {}, health: loadHealth, scheduler: loadScheduler, directory: loadDirectory };
     Object.keys(EXT).forEach(function (name) { if (EXT[name].load) loaders[name] = EXT[name].load; });
     (loaders[S.tab] || function () {})();
+    (tabLoadListeners[S.tab] || []).forEach(function (fn) { try { fn(); } catch (e) { /* an extension failure must not break the console */ } });
     if (S.drawerAppId) renderDrawer(S.drawerAppId, true);
   }
 
@@ -717,6 +725,11 @@
       matchSec.appendChild(V.scoreBlock(m));
     } else matchSec.appendChild(h("p", { class: "muted", text: t("drawer.noMatch") }));
     out.push(matchSec);
+    // ---- Canada service layer: classification, match decision, outreach checks and employer history (canada-*.js)
+    var drawerCtx = { lastPackage: S.lastPackage && S.lastPackage.id === a.id ? S.lastPackage.pkg : null, refresh: function () { renderDrawer(a.id, true); } };
+    drawerListeners.forEach(function (fn) {
+      try { out.push(fn(d, drawerCtx)); } catch (e) { /* an extension failure must not break the drawer */ }
+    });
 
     // ---- auto approval
     if (d.autoApproval) {
@@ -807,6 +820,17 @@
     return h("div", { class: "field" }, b, reason && !enabled ? h("span", { class: "hint", id: id, text: reason }) : null);
   }
 
+  /**
+   * The server refuses an approval with 409 "Cannot approve: <codes> (...)" when the recipient is on the do-not-contact list, the employer opted out
+   * or the outreach basis is not permitted. Shown as a localized sentence instead of the raw codes.
+   */
+  function outreachRefusal(err) {
+    var m = err && err.status === 409 && /^Cannot approve: ([a-z_, ]+) \(/.exec(String(err.message || ""));
+    if (!m) return err;
+    var reasons = m[1].split(/,\s*/).map(function (c) { return V.has("canada.outreach." + c) ? t("canada.outreach." + c) : String(c).replace(/_/g, " "); }).join(" · ");
+    return new V.ApiError(409, t("canada.outreach.refused", { reasons: reasons }), "outreach_blocked", err.body);
+  }
+
   function actionsBlock(d, recipient) {
     var a = d.application;
     var blocked = (a.packageBlocked || []).length > 0;
@@ -834,13 +858,28 @@
     var row = h("div", { class: "btn-row" });
     var canPrep = can("write") && PREPARABLE.indexOf(a.status) >= 0;
     row.appendChild(actionButton(t("action.prepare"), canPrep, !can("write") ? t("why.noPermission") : t("why.status", { status: tc("status", a.status) }), "secondary", function (b) {
-      V.busy(b, function () { return V.api("POST", "/jobsearch/applications/" + a.id + "/prepare", { body: {} }).then(function () { after(t("action.prepared")); }); }).catch(function () {});
+      V.busy(b, function () {
+        return V.api("POST", "/jobsearch/applications/" + a.id + "/prepare", { body: {} }).then(function (r) {
+          S.lastPackage = r && r.pkg ? { id: a.id, pkg: r.pkg } : null; // outreach_blockers + employer_history of the package (shown in the drawer)
+          after(t("action.prepared"));
+        });
+      }).catch(function () {});
     }));
     var approveWhy = !can("approve") ? t("why.approverOnly") : a.status !== "ready_for_review" ? t("why.status", { status: tc("status", a.status) }) : blocked ? t("why.blocked") : null;
     row.appendChild(actionButton(t("action.approve"), !approveWhy, approveWhy, "", function (b) {
       V.confirmDialog(t("action.approveConfirm") + " " + recipientText, t("action.approve")).then(function (ok) {
         if (!ok) return;
-        V.busy(b, function () { return V.api("POST", "/jobsearch/applications/" + a.id + "/approve", { body: reason.value.trim() ? { reason: reason.value.trim() } : {} }).then(function () { after(t("action.approved")); }); }).catch(function () {});
+        V.busy(b, function () {
+          return V.api("POST", "/jobsearch/applications/" + a.id + "/approve", { body: reason.value.trim() ? { reason: reason.value.trim() } : {} }).catch(function (e) { throw outreachRefusal(e); }).then(function (r) {
+            // the do-not-contact list, an opted-out employer and the outreach basis refuse approval with 200 + blockedBy
+            if (r && Array.isArray(r.blockedBy) && r.blockedBy.length) {
+              V.toast(t("canada.outreach.refused", { reasons: r.blockedBy.map(function (c) { return V.has("canada.outreach." + c) ? t("canada.outreach." + c) : String(c).replace(/_/g, " "); }).join(" · ") }), "bad");
+              renderDrawer(a.id, true);
+              return;
+            }
+            after(t("action.approved"));
+          });
+        }).catch(function () {});
       });
     }));
     var queueWhy = !can("approve") ? t("why.approverOnly") : a.status !== "approved" ? t("why.status", { status: tc("status", a.status) }) : null;
@@ -1553,6 +1592,9 @@
           b.addEventListener("click", function () { V.setContent(actions, employerForm(e)); });
           actions.appendChild(b);
         }
+        employerRowListeners.forEach(function (fn) {
+          try { var extra = fn(e); if (extra) actions.appendChild(extra); } catch (err) { /* an extension failure must not break the list */ }
+        });
         cells.push(actions);
         return h("tr", null, cells);
       });

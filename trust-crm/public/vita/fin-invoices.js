@@ -20,7 +20,7 @@
     service: "fin.err.service", description: "fin.err.description", quantity: "fin.err.quantity", unit_price: "fin.err.unitPrice", amount: "fin.err.amount",
     method: "fin.err.method", payment_date: "fin.err.paymentDate", reference: "fin.err.tooLong", reason: "fin.err.reason", title: "fin.err.title",
     spent_on: "fin.err.spentOn", code: "fin.err.code", name: "fin.err.name", name_ar: "fin.err.tooLong", name_en: "fin.err.tooLong", name_fr: "fin.err.tooLong",
-    default_price: "fin.err.defaultPrice", nothing: "fin.err.nothing", category: "fin.err.category", invoice: "fin.err.invoice", payee: "fin.err.tooLong",
+    default_price: "fin.err.defaultPrice", kind: "fin.err.kind", nothing: "fin.err.nothing", category: "fin.err.category", invoice: "fin.err.invoice", payee: "fin.err.tooLong",
   };
   var MONEY_ERR = { format: "fin.err.money.format", decimals: "fin.err.money.decimals", zero: "fin.err.money.zero", large: "fin.err.money.large", empty: "fin.err.money.empty" };
 

@@ -137,7 +137,7 @@ main { max-inline-size: 1280px; margin-inline: auto; padding: 1rem; }
 .field { margin-block-end: 0.85rem; }
 .field > label, .field > .label, fieldset > legend { display: block; font-weight: 600; margin-block-end: 0.25rem; color: var(--ink); }
 .hint { display: block; font-size: 0.85rem; color: var(--muted); margin-block-start: 0.2rem; }
-input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="date"],
+input[type="text"], input[type="tel"], input[type="search"], input[type="email"], input[type="password"], input[type="number"], input[type="date"],
 input[type="datetime-local"], input[type="search"], select, textarea {
   inline-size: 100%; min-block-size: 44px; padding: 0.5rem 0.65rem; font: inherit; color: var(--ink);
   background: var(--white); border: 1px solid #8a96a8; border-radius: 8px;
@@ -397,3 +397,26 @@ ol.stepper button .tab-badge { margin-inline-start: 0.4rem; }
 .mcp-snippet-wrap { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .mcp-limits { display: grid; gap: 1rem; grid-template-columns: 1fr; }
 @media (min-width: 700px) { .mcp-limits { grid-template-columns: 1fr 1fr; } }
+
+/* ---------------------------------------------------------------- Canada service layer (stage 8) */
+.cx-section { margin-block-start: 1rem; }
+.cx-section > h3 { margin-block-start: 0; }
+.cx-ref { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem; margin-block: 0.4rem 0.9rem; padding: 0.6rem 0.9rem; border: 1px solid var(--line); border-inline-start: 6px solid var(--gold); border-radius: 8px; background: var(--gold-50); }
+.cx-ref-label { color: var(--muted); font-size: 0.9rem; }
+.cx-ref-value { font-size: 1.5rem; letter-spacing: 0.04em; color: var(--navy); overflow-wrap: anywhere; }
+.cx-ref-banner { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; margin: 0 0 0.75rem; padding: 0.5rem 0.9rem; border: 1px solid var(--line); border-inline-start: 6px solid var(--gold); border-radius: 8px; background: var(--gold-50); }
+.cx-ref-banner[hidden] { display: none; }
+.cx-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.cx-list { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.6rem; }
+.cx-item, .cx-version { border: 1px solid var(--line); border-radius: 8px; padding: 0.6rem 0.8rem; background: var(--white); min-inline-size: 0; overflow-wrap: anywhere; }
+.cx-item p, .cx-version p { margin-block: 0.3rem; }
+.cx-versions { display: grid; gap: 0.6rem; margin-block-start: 0.75rem; }
+.cx-version-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; justify-content: space-between; }
+.cx-version-head h4 { margin: 0; }
+.cx-class { margin-block: 0.5rem; }
+.hint.ok { color: var(--ok); }
+.hint.bad { color: var(--bad); }
+label.check { display: inline-flex; gap: 0.4rem; align-items: center; font-weight: 500; }
+.cx-section .btn-row { margin-block-start: 0.5rem; }
+details > summary { cursor: pointer; margin-block: 0.4rem; }
+@media (max-width: 480px) { .cx-ref-value { font-size: 1.25rem; } dialog { max-inline-size: 96vw; } }

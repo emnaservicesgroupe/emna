@@ -19,6 +19,11 @@
   <script src="orgs-common.js" defer></script>
   <script src="crm-orgs.js" defer></script>
   <script src="crm-requests.js" defer></script>
+  <script src="canada-util.js" defer></script>
+  <script src="canada-candidate.js" defer></script>
+  <script src="canada-employers.js" defer></script>
+  <script src="canada-reports.js" defer></script>
+  <script src="canada-billing.js" defer></script>
   <script src="chat-util.js" defer></script>
   <script src="chat-panel.js" defer></script>
   <script src="chat-staff.js" defer></script>
@@ -99,6 +104,7 @@
         <button type="button" role="tab" id="tab-health" aria-controls="panel-health" data-tab="health" data-i18n="tab.health">Health</button>
         <button type="button" role="tab" id="tab-scheduler" aria-controls="panel-scheduler" data-tab="scheduler" data-i18n="tab.scheduler">Scheduler</button>
         <button type="button" role="tab" id="tab-directory" aria-controls="panel-directory" data-tab="directory" data-i18n="tab.directory">Employers &amp; rules</button>
+        <button type="button" role="tab" id="tab-suppressions" aria-controls="panel-suppressions" data-tab="suppressions" data-i18n="canada.supp.tab">Do-not-contact list</button>
       </div>
 
       <!-- ---------------------------------------------------------- dashboard -->
@@ -123,6 +129,7 @@
           <p class="small muted" id="dash-search-status" aria-live="polite"></p>
           <div id="dash-lanes" class="lanes"></div>
           <div id="dash-crm-candidate"></div>
+          <div id="dash-canada"></div>
         </div>
         <div class="card">
           <h2 data-i18n="dash.candidates">Candidates</h2>
@@ -423,6 +430,7 @@
           <p class="small muted" data-i18n="export.hint">The export uses the report date range above, is limited to what you are allowed to see, and is audited.</p>
           <p class="small" id="export-status" aria-live="polite"></p>
         </div>
+        <div class="card" id="canada-reports-card"></div>
       </section>
 
       <!-- ---------------------------------------------------------- health -->
@@ -466,6 +474,9 @@
           <div id="rules-box"></div>
         </div>
       </section>
+
+      <!-- ---------------------------------------------------------- do-not-contact list (built by canada-employers.js) -->
+      <section id="panel-suppressions" role="tabpanel" aria-labelledby="tab-suppressions" tabindex="-1" hidden></section>
     </div>
   </main>
 
