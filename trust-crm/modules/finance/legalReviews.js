@@ -76,7 +76,7 @@ async function list(user, query = {}) {
       `SELECT r.id, r.jurisdiction, r.service_kind, r.status, r.reviewer_name, r.reviewer_role, to_char(r.reviewed_at,'YYYY-MM-DD') AS reviewed_at,
               to_char(r.valid_until,'YYYY-MM-DD') AS valid_until, r.note, r.evidence_key, r.recorded_by, r.created_at, (l.id IS NOT NULL) AS current
          FROM fin_legal_reviews r LEFT JOIN fin_legal_reviews_latest l ON l.id = r.id ${w}
-        ORDER BY r.reviewed_at DESC, r.id DESC LIMIT ${add(limit)} OFFSET ${add(offset)}`,
+        ORDER BY r.id DESC LIMIT ${add(limit)} OFFSET ${add(offset)}`,
       params
     )
   ).rows;

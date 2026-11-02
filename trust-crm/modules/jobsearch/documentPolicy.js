@@ -8,7 +8,8 @@
 //    non-empty legitimate_need, granted by the candidate's own user account.
 //  - Canadian-format CVs (js_cv_files.kind = 'canadian', stage 8): once a candidate has ANY canadian CV version, ONLY a version that is
 //    staff-approved AND candidate-authorised (and not withdrawn, and built from the profile as it is now) is ever attached - never an
-//    uploaded original. When no version is eligible the approved uploaded CV applies and the package notes it.
+//    uploaded original. When the candidate has Canadian CV versions but none is eligible, preparation / attachment is BLOCKED (409
+//    canadian_cv_not_eligible): the uploaded original is never a fallback (review round 1). A candidate who never had one keeps the old path.
 const crypto = require("crypto");
 const storage = require("./storage");
 const { HttpError } = require("./httpError");
@@ -176,10 +177,12 @@ async function pickCanadianCv(candidateId, jobLanguage, client) {
   return { any: true, pick: pick ? pick.cv : null };
 }
 
+const notEligible = () => new HttpError(409, "The candidate has Canadian CV versions but none is staff-approved, candidate-authorised and current; the uploaded CV is not used instead. Approve and authorise a Canadian CV version first.", "canadian_cv_not_eligible");
+
 /**
  * Latest APPROVED CV version in `jobLanguage`; otherwise the latest approved CV in another language,
  * flagged with a `language_mismatch` note. Never mutates the files.
- * Canadian CVs first: when the candidate has any, only an eligible one is returned; with none eligible the uploaded originals apply (noted).
+ * Canadian CVs first: when the candidate has any, only an eligible one is returned; with none eligible this throws 409 canadian_cv_not_eligible.
  * @returns {Promise<{cv: object, notes: string[]}|null>}
  */
 async function pickCv(candidateId, jobLanguage, client) {
@@ -190,7 +193,7 @@ async function pickCv(candidateId, jobLanguage, client) {
     const want = normLang(jobLanguage);
     return { cv: canadian.pick, notes: want && normLang(canadian.pick.language) !== want ? [`language_mismatch: approved CV is in ${normLang(canadian.pick.language) || "an unknown language"}, the job is in ${want}`] : [] };
   }
-  if (canadian.any) notes.push("canadian_cv_not_eligible: no Canadian CV version is staff-approved and candidate-authorised; the approved uploaded CV was used");
+  if (canadian.any) throw notEligible();
   const rows = (await c.query(
     "SELECT * FROM js_cv_files WHERE candidate_id = $1 AND kind = 'upload' AND approved = true AND scan_status <> 'infected' ORDER BY version DESC, id DESC",
     [candidateId]
@@ -236,8 +239,10 @@ async function cvEntry(client, application, cvFileId) {
   if (!scanUsable(cv)) return { blocked: { doc, reason: "attachment_unscanned" } };
   if (cv.kind === "canadian") {
     if (!canadianRowEligible(cv, await currentProfileHash(client, cv.candidate_id))) return { blocked: { doc, reason: "canadian_cv_not_authorised" } };
-  } else if ((await pickCanadianCv(cv.candidate_id, null, client)).pick) {
-    return { blocked: { doc, reason: "superseded_by_canadian_cv" } };
+  } else {
+    const can = await pickCanadianCv(cv.candidate_id, null, client);
+    if (can.pick) return { blocked: { doc, reason: "superseded_by_canadian_cv" } };
+    if (can.any) return { blocked: { doc, reason: "canadian_cv_not_eligible" } };
   }
   const sha = await storedSha(cv.storage_key);
   if (!sha) return { blocked: { doc, reason: "cv_file_unavailable" } };

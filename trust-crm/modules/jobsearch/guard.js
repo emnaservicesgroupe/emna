@@ -26,6 +26,7 @@ const jobStore = require("./jobStore");
 const { country } = require("./matching");
 const { detectHandoff } = require("./handoffDetector");
 const suppression = require("./suppression");
+const settingsService = require("./settingsService");
 
 const db = () => require("../../db");
 
@@ -55,6 +56,11 @@ const GUARD_CODES = Object.freeze([
   "recipient_suppressed",
   "employer_opted_out",
   "outreach_basis_not_permitted",
+  // review round 1: the vacancy classification and the staff decision on the match are re-checked on every path to a send
+  "job_classification_blocked",
+  "work_authorization_required",
+  "match_rejected",
+  "match_not_accepted",
 ]);
 const HANDOFF_REASONS = Object.freeze(["staff_review", "unsupported_channel", "captcha", "payment", "login", "legal_declaration", "custom_questions"]);
 
@@ -69,7 +75,7 @@ const DUPLICATE_WINDOW_DAYS = 90;
 
 // autoApproveEligibility reasons the guard handles itself (at send time the status is approved/queued,
 // caps are counted excluding this application, documents/job are checked by their own steps).
-const ELIGIBILITY_HANDLED_HERE = new Set(["recipient_suppressed", "employer_opted_out", "outreach_basis_not_permitted", "status_not_ready_for_review", "cap_not_set", "cap_per_day_exceeded", "cap_per_week_exceeded", "job_not_open", "package_blocked"]);
+const ELIGIBILITY_HANDLED_HERE = new Set(["recipient_suppressed", "employer_opted_out", "outreach_basis_not_permitted", "job_classification_blocked", "work_authorization_required", "match_rejected", "match_not_accepted", "status_not_ready_for_review", "cap_not_set", "cap_per_day_exceeded", "cap_per_week_exceeded", "job_not_open", "package_blocked"]);
 const LABEL_REASONS = new Set(["employer_support_not_confirmed", "employer_support_unavailable", "employer_support_conflict", "overseas_acceptance_not_confirmed"]);
 
 const posInt = (v) => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : typeof v === "string" && /^\d{1,9}$/.test(v) && Number(v) > 0 ? Number(v) : null);
@@ -82,6 +88,10 @@ const FREE_MAIL_DOMAINS = new Set([
   "mail.com", "mail.ru", "inbox.ru", "bk.ru", "list.ru", "rambler.ru", "pm.me", "me.com", "mac.com", "web.de", "t-online.de",
   "laposte.net", "orange.fr", "wanadoo.fr", "free.fr", "sfr.fr", "libero.it", "qq.com", "163.com", "126.com", "yeah.net",
   "tutanota.com", "tuta.io", "fastmail.com", "hushmail.com", "zoho.com", "zohomail.com",
+  // review round 1: Canadian ISP mailboxes and the common consumer providers by exact domain
+  "bell.net", "rogers.com", "shaw.ca", "telus.net", "sympatico.ca", "videotron.ca", "cogeco.ca", "eastlink.ca",
+  "yahoo.com", "yahoo.ca", "yahoo.fr", "hotmail.com", "hotmail.fr", "live.com", "msn.com", "icloud.com", "aol.com",
+  "proton.me", "protonmail.com", "gmx.com",
 ]);
 const LOCAL_RE = /^[a-z0-9_+-]+(?:\.[a-z0-9_+-]+)*$/; // no %, !, quotes, comments or routing
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -301,6 +311,64 @@ async function outreachBlockers(client, applicationId) {
   return outreachChecks(client, app, job, recipients);
 }
 
+// ---------------------------------------------------------------- classification and match decision (review round 1)
+
+// Candidate work_authorization_status values (migration 025) that hold a permit, PR or citizenship (same list as applicationService's
+// classificationGate, which gates preparation).
+const AUTHORIZED_STATUSES = Object.freeze(["work_permit_open", "work_permit_employer_specific", "pr", "citizen"]);
+const BLOCKED_CLASSES = Object.freeze(["prospective_no_vacancy", "closed_unsuitable"]);
+
+/**
+ * The vacancy classification and the staff decision on the match, re-read from the database. Blocking: classification
+ * prospective_no_vacancy / closed_unsuitable; work_authorization_required unless the candidate's recorded status is a permit / PR /
+ * citizen state; match decision 'rejected'; and, while the module setting require_match_acceptance is on, any match that is not
+ * 'accepted' (including no match row). Read-only; used by approval, queueing, the send-time guard and the final pre-provider check.
+ * @returns {Promise<{code: string, detail: string}[]>}
+ */
+async function reviewBlockersFor(client, app, job) {
+  const out = [];
+  const cls = job ? job.classification : null;
+  if (BLOCKED_CLASSES.includes(cls)) out.push({ code: "job_classification_blocked", detail: `The vacancy is classified ${cls}; no application may be approved or sent` });
+  else if (cls === "work_authorization_required") {
+    const st = (await client.query("SELECT work_authorization_status FROM candidates WHERE id = $1", [app.candidate_id])).rows[0];
+    if (!AUTHORIZED_STATUSES.includes(st && st.work_authorization_status)) out.push({ code: "work_authorization_required", detail: "The vacancy requires work authorization and the candidate's recorded status does not show a permit, permanent residence or citizenship" });
+  }
+  const match = (await client.query("SELECT decision FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [app.candidate_id, app.job_id])).rows[0];
+  if (match && match.decision === "rejected") out.push({ code: "match_rejected", detail: "Staff rejected this match" });
+  else if ((await settingsService.getMatchSettings(client)).require_match_acceptance && !(match && match.decision === "accepted")) out.push({ code: "match_not_accepted", detail: "Match acceptance is required and this match has not been accepted" });
+  return out;
+}
+
+/** reviewBlockersFor by application id (early approval / auto-approval view). */
+async function reviewBlockers(client, applicationId) {
+  const id = posInt(applicationId);
+  if (!id) return [];
+  const app = (await client.query("SELECT id, candidate_id, job_id FROM js_applications WHERE id = $1", [id])).rows[0];
+  if (!app) return [];
+  const job = (await client.query("SELECT id, classification FROM js_jobs WHERE id = $1", [app.job_id])).rows[0] || null;
+  return reviewBlockersFor(client, app, job);
+}
+
+/**
+ * The very last look before the provider call. Deliberately NOT given a transaction: every query goes to the pool on its own
+ * (a fresh connection, READ COMMITTED autocommit), so a suppression, opt-out, rejection or reclassification committed a moment
+ * after the intent transaction took its snapshot is honoured. Read-only.
+ * @param {number} applicationId
+ * @param {{recipient: string}} args
+ * @returns {Promise<{ok: true} | {ok: false, code: string, detail: string}>}
+ */
+async function finalCheck(applicationId, { recipient } = {}) {
+  const id = posInt(applicationId);
+  const c = db();
+  const app = id ? (await c.query("SELECT id, candidate_id, job_id, status, outreach_basis FROM js_applications WHERE id = $1", [id])).rows[0] : null;
+  if (!app) return { ok: false, code: "application_not_sendable", detail: "Unknown application" };
+  if (!SENDABLE.includes(app.status)) return { ok: false, code: "application_not_sendable", detail: `Application is ${app.status}; only approved or queued applications may be sent` };
+  const job = (await c.query(JOB_WITH_EMPLOYER_SQL, [app.job_id])).rows[0] || null;
+  const blocked = [...(await outreachChecks(c, app, job, [recipient])), ...(await reviewBlockersFor(c, app, job))];
+  if (blocked.length) return { ok: false, code: blocked[0].code, detail: blocked[0].detail };
+  return { ok: true };
+}
+
 const canonSet = (urls) => new Set(urls.map((u) => jobStore.canonicalUrl(u)).filter(Boolean));
 
 // ---------------------------------------------------------------- the guard
@@ -412,6 +480,10 @@ async function evaluate(client, id, now, recheck, opts) {
   if (job.closing_at && new Date(job.closing_at).getTime() <= now.getTime()) return fail(notes, "job_closed", "The closing date has passed");
   if (recheck.status && recheck.status !== "open") return fail(notes, "job_closed", `Re-check reports the job ${recheck.status}`);
   if (job.status !== "open") return fail(notes, "job_closed", `The job is ${job.status}`);
+
+  // 9b. Classification and match decision (review round 1): re-read on every attempt, retries included.
+  const review = await reviewBlockersFor(client, app, job);
+  if (review.length) return fail(notes, review[0].code, review[0].detail);
 
   // 10. Duplicates: earlier attempts of THIS application, then other applications for the same vacancy.
   const prior = (await q("SELECT id, status FROM js_submissions WHERE application_id = $1 AND status = ANY($2::text[]) ORDER BY id", [app.id, PRIOR_SUBMISSIONS])).rows;
@@ -553,4 +625,4 @@ async function findDuplicate(client, app, job, now) {
   return null;
 }
 
-module.exports = { check, outreachBlockers, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, isFreeMail, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };
+module.exports = { check, finalCheck, reviewBlockers, outreachBlockers, resolveRecipient, verifyRecipient, normalizeEmail, normalizeDomain, isFreeMail, postedAddresses, detectHandoff, GUARD_CODES, HANDOFF_REASONS };

@@ -5,6 +5,7 @@ const { HttpError } = require("./httpError");
 const { candidateScopeSql } = require("./scope");
 const { PERMISSIONS } = require("../../middleware/role");
 const { logAudit } = require("../../utils/audit");
+const consentService = require("./consentService");
 
 const db = () => require("../../db");
 const MAX_NOTE = 500;
@@ -82,6 +83,16 @@ async function decide({ matchId, actor, decision, note }) {
         JSON.stringify({ matchId: id, jobId: row.job_id, previous: cur.decision, decision, noteProvided: text !== null, noteChanged }),
       ]);
       out = { ...present(row, true), action };
+      // A rejection pulls back this job's approved / queued (never sent) application of the candidate: the guard would refuse it anyway,
+      // but nothing should sit in the queue waiting to be refused. Same cancellation mechanism as consent withdrawal; sent ones are untouched.
+      if (decision === "rejected") {
+        const ids = (await client.query("SELECT id FROM js_applications WHERE candidate_id = $1 AND job_id = $2 AND status IN ('approved','queued')", [row.candidate_id, row.job_id])).rows.map((r) => r.id);
+        if (ids.length) {
+          const n = await consentService.cancelQueuedForCandidate(row.candidate_id, "match_rejected", client, { includeReady: false, actor: `staff:${actor.id}`, onlyApplicationIds: ids });
+          await client.query("INSERT INTO js_audit_events (actor, action, candidate_id, detail) VALUES ($1,'match.cancel_applications',$2,$3::jsonb)", [`user:${actor.id}`, row.candidate_id, JSON.stringify({ matchId: id, jobId: row.job_id, cancelled: n })]);
+          out.cancelledApplications = n;
+        }
+      }
     }
     await client.query("COMMIT");
   } catch (err) {

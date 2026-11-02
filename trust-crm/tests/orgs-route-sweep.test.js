@@ -194,6 +194,7 @@ const JOBSEARCH_STAFF = [
   "POST /jobsearch/cv-files/:fileId/staff-approve",
   // stage 8 task 3: PDF / Excel company reports, snapshots and report settings (Candidate, Employer, Agency, Accountant, HR refused)
   "GET /jobsearch/reports/export",
+  "DELETE /jobsearch/candidates/:id/report-snapshots",
   "GET /jobsearch/reports/snapshots",
   "GET /jobsearch/reports/snapshots/:id/download",
   "GET /jobsearch/reports/settings",

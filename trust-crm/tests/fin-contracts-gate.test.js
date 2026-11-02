@@ -84,14 +84,19 @@ async function withWorld(fn) {
   };
   /** A contract in the requested state: draft | active | ended | cancelled. */
   const contract = async (candidateId, serviceId, state = "active", over = {}) => {
-    const c = await http("POST", "/finance/contracts", T.acct, { candidate_id: candidateId, service_id: serviceId, refund_terms: "Refund terms text", ...over });
+    const { jurisdiction: jur, signed_at: signedAt, ...createOver } = over;
+    const c = await http("POST", "/finance/contracts", T.acct, { candidate_id: candidateId, service_id: serviceId, refund_terms: "Refund terms text", ...createOver });
     assert.equal(c.status, 201, c.text);
     if (state === "draft") return c.body;
     if (state === "cancelled") {
       assert.equal((await http("POST", `/finance/contracts/${c.body.id}/cancel`, T.acct, { reason: "x" })).status, 200);
       return { ...c.body, status: "cancelled" };
     }
-    const s = await http("POST", `/finance/contracts/${c.body.id}/sign`, T.acct, { signed_by_name: "Amine Trabelsi" });
+    // The jurisdiction of a candidate-fee contract is recorded by staff at signing (review round 1); default: the candidate's province.
+    const fee = (await one("SELECT kind FROM fin_services WHERE id = $1", [serviceId])).kind === "candidate_fee";
+    const prov = (await one("SELECT desired_province FROM candidates WHERE id = $1", [candidateId])).desired_province;
+    const jurisdiction = jur !== undefined ? jur : fee && prov ? `CA-${prov}` : undefined;
+    const s = await http("POST", `/finance/contracts/${c.body.id}/sign`, T.acct, { signed_by_name: "Amine Trabelsi", ...(jurisdiction ? { jurisdiction } : {}), ...(signedAt ? { signed_at: signedAt } : {}) });
     assert.equal(s.status, 200, s.text);
     if (state === "ended") assert.equal((await http("POST", `/finance/contracts/${c.body.id}/end`, T.acct, {})).status, 200);
     return s.body;
@@ -131,7 +136,7 @@ test("migration 030: idempotent, kind defaults to standard, constraints and immu
   }));
 
 // ------------------------------------------------------------------------------------------------ review immutability
-test("legal reviews are insert-only; the newest row (reviewed_at, then id) supersedes", () =>
+test("legal reviews are insert-only; the newest RECORDED row (id) supersedes", () =>
   withWorld(async ({ q, one, http, T, review }) => {
     const a = await review("CA-ON", "approved");
     await assert.rejects(q("UPDATE fin_legal_reviews SET status = 'prohibited' WHERE id = $1", [a.id]), /insert-only/);
@@ -144,10 +149,10 @@ test("legal reviews are insert-only; the newest row (reviewed_at, then id) super
     const b = await review("CA-ON", "prohibited");
     let latest = await one("SELECT id, status FROM fin_legal_reviews_latest WHERE jurisdiction = 'CA-ON'");
     assert.deepEqual([String(latest.id), latest.status], [String(b.id), "prohibited"]);
-    // an OLDER reviewed_at recorded later does not supersede; the same reviewed_at is decided by id
-    await http("POST", "/finance/legal-reviews", T.admin, { jurisdiction: "CA-ON", status: "approved", reviewer_name: "Late entry", reviewed_at: "2020-01-01" });
+    // review round 1: the review RECORDED last decides, whatever its (informational) reviewed_at says
+    const late = await http("POST", "/finance/legal-reviews", T.admin, { jurisdiction: "CA-ON", status: "approved", reviewer_name: "Late entry", reviewed_at: "2020-01-01" });
     latest = await one("SELECT id, status FROM fin_legal_reviews_latest WHERE jurisdiction = 'CA-ON'");
-    assert.equal(String(latest.id), String(b.id));
+    assert.deepEqual([String(latest.id), latest.status], [String(late.body.id), "approved"]);
     const d = b.reviewed_at;
     const c2 = await http("POST", "/finance/legal-reviews", T.admin, { jurisdiction: "CA-ON", status: "pending", reviewer_name: "Same day", reviewed_at: d });
     latest = await one("SELECT id, status FROM fin_legal_reviews_latest WHERE jurisdiction = 'CA-ON'");
@@ -247,11 +252,13 @@ test("contract lifecycle: draft -> sign (+ private document) -> end / cancel; pe
     const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from("signed agreement body")]);
     const fd = new FormData();
     fd.append("signed_by_name", "Amine Trabelsi");
+    fd.append("jurisdiction", "ca-on");
     fd.append("file", new Blob([pdf]), "../../evil.name.pdf");
     const sg = await fetch(`${base}/finance/contracts/${id}/sign`, { method: "POST", headers: { authorization: `Bearer ${T.acct}` }, body: fd });
     const sgBody = await sg.json();
     assert.equal(sg.status, 200, JSON.stringify(sgBody));
     assert.equal(sgBody.status, "active");
+    assert.equal(sgBody.jurisdiction, "CA-ON", "the jurisdiction is normalised and stored on the contract");
     assert.ok(sgBody.agreement_signed_at);
     assert.equal(sgBody.has_signed_document, true);
     assert.equal(sgBody.signed_document_key, undefined, "the storage key is never returned");
@@ -265,7 +272,7 @@ test("contract lifecycle: draft -> sign (+ private document) -> end / cancel; pe
     // signing again, a second active contract for the same pair
     assert.equal((await http("POST", `/finance/contracts/${id}/sign`, T.acct, { signed_by_name: "A" })).status, 409);
     const d2 = await mk({ candidate_id: c, service_id: s.id });
-    assert.equal((await http("POST", `/finance/contracts/${d2.body.id}/sign`, T.acct, { signed_by_name: "A" })).status, 409, "one active contract per candidate + service");
+    assert.equal((await http("POST", `/finance/contracts/${d2.body.id}/sign`, T.acct, { signed_by_name: "A", jurisdiction: "CA-ON" })).status, 409, "one active contract per candidate + service");
     // end / cancel need finance:void
     assert.equal((await http("POST", `/finance/contracts/${id}/end`, T.mgr, {})).status, 403);
     assert.equal((await http("POST", `/finance/contracts/${id}/end`, T.acct, { reason: "x".repeat(501) })).status, 400);
@@ -400,10 +407,12 @@ test("gate: mixed standard + candidate_fee lines, standard-only invoices, free-t
     assert.equal(ft.status, 409);
     assert.equal(ft.body.code, "candidate_fee_use_catalogue");
     assert.equal((await invoice(c, [line(std.id)])).status, 201, "catalogue standard services still bill normally");
-    // billing a standard service while the jurisdiction is prohibited is still allowed through v2 (only fee lines are gated)
+    // review round 1: while the jurisdiction is prohibited NO invoice can be created for the candidate, whatever the line kinds
     await review("CA-ON", "prohibited");
-    assert.equal((await invoice(c, [line(std.id)])).status, 201);
-    assert.equal((await invoice(c, [line(std.id), line(fee.id)])).body.code, "candidate_fee_prohibited");
+    for (const items of [[line(std.id)], [{ description: "Courier", quantity: 1, unit_price: "5.00" }], [line(std.id), line(fee.id)]]) {
+      const r = await invoice(c, items);
+      assert.deepEqual([r.status, r.body.code], [409, "candidate_fee_prohibited"], JSON.stringify(items));
+    }
     // the gate does not depend on the caller: Admin gets the same answer
     assert.equal((await invoice(c, [line(fee.id)], {}, T.admin)).status, 409);
     // role rules of invoice creation are unchanged
@@ -415,7 +424,8 @@ test("gate: jurisdiction from desired_province; null province uses FIN_DEFAULT_J
   withWorld(async ({ q, candidate, feeService, review, contract, invoice, http, T }) => {
     const svc = await feeService();
     const c = await candidate(null);
-    await contract(c, svc.id, "active");
+    await contract(c, svc.id, "active", { jurisdiction: "CA-ON" });
+    await q("UPDATE fin_service_contracts SET jurisdiction = NULL WHERE candidate_id = $1", [c]); // a contract signed before migration 031
     delete process.env.FIN_DEFAULT_JURISDICTION;
     let r = await invoice(c, [line(svc.id)]);
     assert.deepEqual([r.status, r.body.code], [409, "jurisdiction_unknown"]);
@@ -597,4 +607,140 @@ test("GET /finance/me/contracts: the candidate sees only their own non-draft con
     assert.equal((await q("SELECT status FROM fin_service_contracts WHERE id=$1", [active.id])).rows[0].status, "active");
     // the invoices self-view is unchanged by the new tables
     assert.deepEqual((await http("GET", "/finance/me", tok)).body, { invoices: [], totals: [] });
+  }));
+
+// ------------------------------------------------------------------------------------------------ review round 1
+test("review round 1: a later-recorded back-dated 'prohibited' review is not masked by an older 'approved' one", () =>
+  withWorld(async ({ http, T, one, candidate, feeService, review, contract, invoice }) => {
+    const svc = await feeService();
+    const c = await candidate("ON");
+    await contract(c, svc.id, "active");
+    await http("POST", "/finance/legal-reviews", T.admin, { jurisdiction: "CA-ON", status: "approved", reviewer_name: "Counsel", reviewed_at: "2029-06-01" });
+    assert.equal((await invoice(c, [line(svc.id)])).status, 201);
+    // recorded later, but dated EARLIER than the approval: the newest recorded review decides
+    const p = await http("POST", "/finance/legal-reviews", T.admin, { jurisdiction: "CA-ON", status: "prohibited", reviewer_name: "Counsel", reviewed_at: "2028-01-01" });
+    assert.equal(p.status, 201, p.text);
+    assert.equal((await one("SELECT status FROM fin_legal_reviews_latest WHERE jurisdiction = 'CA-ON'")).status, "prohibited");
+    const r = await invoice(c, [line(svc.id)]);
+    assert.deepEqual([r.status, r.body.code], [409, "candidate_fee_prohibited"]);
+    void review;
+  }));
+
+test("review round 1: a prohibited jurisdiction refuses ALL invoice creation (v2 free text, v2 standard lines, legacy), contract or not", () =>
+  withWorld(async ({ http, T, q, candidate, service, feeService, review, contract, invoice }) => {
+    const fee = await feeService();
+    const std = await service({ name_en: "Translation" });
+    const c = await candidate("QC");
+    await review("CA-QC", "prohibited");
+    const count = async () => (await q("SELECT count(*)::int n FROM invoices WHERE candidate_id=$1", [c])).rows[0].n;
+    for (const items of [[{ description: "Package A (manual)", quantity: 1, unit_price: "250.00" }], [line(std.id)], [line(fee.id)], [line(std.id), { description: "x", quantity: 1, unit_price: "1.00" }]]) {
+      const r = await invoice(c, items);
+      assert.deepEqual([r.status, r.body.code], [409, "candidate_fee_prohibited"], JSON.stringify(items));
+    }
+    const legacy = await http("POST", "/finance/invoices", T.acct, { candidate_id: c, total_amount: "50", currency: "TND" });
+    assert.deepEqual([legacy.status, legacy.body.code], [409, "candidate_fee_prohibited"]);
+    assert.equal(await count(), 0, "nothing was created");
+    // another province is unaffected
+    const on = await candidate("ON");
+    assert.equal((await invoice(on, [line(std.id)])).status, 201);
+    // with an active fee contract free text stays refused for the catalogue reason once the prohibition is lifted
+    await review("CA-QC", "approved");
+    await contract(c, fee.id, "active");
+    assert.equal((await invoice(c, [{ description: "manual", quantity: 1, unit_price: "5.00" }])).body.code, "candidate_fee_use_catalogue");
+  }));
+
+test("review round 1: the jurisdiction comes from the contract (set by staff at signing), not from the candidate's province", () =>
+  withWorld(async ({ http, T, q, one, candidate, service, feeService, review, contract, invoice }) => {
+    const fee = await feeService();
+    const std = await service({ name_en: "Translation" });
+    const c = await candidate("QC");
+    // signing a candidate-fee contract needs a valid jurisdiction
+    const d = await http("POST", "/finance/contracts", T.acct, { candidate_id: c, service_id: fee.id });
+    for (const bad of [{}, { jurisdiction: "" }, { jurisdiction: "Quebec" }, { jurisdiction: "CA-" }, { jurisdiction: 7 }]) {
+      assert.equal((await http("POST", `/finance/contracts/${d.body.id}/sign`, T.acct, { signed_by_name: "A", ...bad })).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await http("GET", `/finance/contracts/${d.body.id}`, T.acct)).body.status, "draft");
+    // a standard service needs no jurisdiction
+    const dStd = await http("POST", "/finance/contracts", T.acct, { candidate_id: c, service_id: std.id });
+    assert.equal((await http("POST", `/finance/contracts/${dStd.body.id}/sign`, T.acct, { signed_by_name: "A" })).status, 200);
+    const ok = await http("POST", `/finance/contracts/${d.body.id}/sign`, T.acct, { signed_by_name: "A", jurisdiction: "ca-qc" });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.body.jurisdiction, "CA-QC");
+
+    await review("CA-ON", "approved");
+    // the province says ON (approved) but the CONTRACT says QC (no review recorded): not billable
+    await q("UPDATE candidates SET desired_province = 'ON' WHERE id = $1", [c]);
+    let r = await invoice(c, [line(fee.id)]);
+    assert.deepEqual([r.status, r.body.code], [409, "legal_review_required"], "an approving review must exist for the CONTRACT jurisdiction");
+    await review("CA-QC", "approved");
+    assert.equal((await invoice(c, [line(fee.id)])).status, 201);
+    // QC becomes prohibited: flipping the province to ON (approved) must not help, in any direction
+    await review("CA-QC", "prohibited");
+    for (const province of ["ON", "QC", null]) {
+      await q("UPDATE candidates SET desired_province = $2 WHERE id = $1", [c, province]);
+      r = await invoice(c, [line(fee.id)]);
+      assert.deepEqual([r.status, r.body.code], [409, "candidate_fee_prohibited"], `province ${province}`);
+      assert.equal((await invoice(c, [line(std.id)])).body.code, "candidate_fee_prohibited");
+    }
+    // the payment gate looks at the same set
+    await review("CA-QC", "approved");
+    await q("UPDATE candidates SET desired_province = 'ON' WHERE id = $1", [c]);
+    const inv = await invoice(c, [line(fee.id)]);
+    assert.equal(inv.status, 201, inv.text);
+    await review("CA-QC", "prohibited");
+    const pay = await http("POST", "/finance/payments/v2", T.acct, { invoice_id: inv.body.id, amount: "10.00", method: "cash" });
+    assert.deepEqual([pay.status, pay.body.code], [409, "candidate_fee_prohibited"]);
+    // billing-status reports it
+    const bs = await http("GET", `/finance/billing-status?candidate_id=${c}`, T.acct);
+    assert.equal(bs.body.candidate_fee_billable, false);
+    assert.ok(bs.body.reasons.includes("candidate_fee_prohibited"));
+    assert.equal(bs.body.jurisdiction, "CA-QC");
+    void one;
+  }));
+
+test("review round 1: a contract that has not started yet is not active; the signing date cannot be in the future and an old one needs the signed paper", () =>
+  withWorld(async ({ http, T, base, candidate, feeService, review, contract, invoice }) => {
+    const fee = await feeService();
+    const c = await candidate("ON");
+    await review("CA-ON", "approved");
+    await contract(c, fee.id, "active", { start_date: "2031-01-01" }); // the gate clock says 2030-06-15
+    const r = await invoice(c, [line(fee.id)]);
+    assert.deepEqual([r.status, r.body.code], [409, "service_contract_required"], "a contract starting in the future is not active yet");
+    const c2 = await candidate("ON");
+    await contract(c2, fee.id, "active", { start_date: "2030-06-15" });
+    assert.equal((await invoice(c2, [line(fee.id)])).status, 201, "starting today is active");
+
+    const c3 = await candidate("ON");
+    const mk = async () => (await http("POST", "/finance/contracts", T.acct, { candidate_id: c3, service_id: fee.id })).body.id;
+    const id = await mk();
+    const sign = (body) => http("POST", `/finance/contracts/${id}/sign`, T.acct, { signed_by_name: "A", jurisdiction: "CA-ON", ...body });
+    assert.equal((await sign({ signed_at: new Date(Date.now() + 3600e3).toISOString() })).status, 400, "future");
+    const old = await sign({ signed_at: "2020-01-01T00:00:00Z" });
+    assert.equal(old.status, 400, old.text);
+    assert.match(old.body.error, /signed document/i);
+    assert.equal((await sign({ signed_at: new Date(Date.now() - 30 * 86400e3).toISOString() })).status, 200, "30 days old: no paper needed");
+    const c4 = await candidate("ON");
+    const id4 = (await http("POST", "/finance/contracts", T.acct, { candidate_id: c4, service_id: fee.id })).body.id;
+    const fd = new FormData();
+    fd.append("signed_by_name", "A");
+    fd.append("jurisdiction", "CA-ON");
+    fd.append("signed_at", "2020-01-01T00:00:00Z");
+    fd.append("file", new Blob([Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.from("old signed agreement")])]), "a.pdf");
+    const withFile = await fetch(`${base}/finance/contracts/${id4}/sign`, { method: "POST", headers: { authorization: `Bearer ${T.acct}` }, body: fd });
+    assert.equal(withFile.status, 200, await withFile.text());
+  }));
+
+test("migration 031: idempotent; contract jurisdiction check; the view orders by recording order", () =>
+  withWorld(async ({ q, one, candidate, feeService }) => {
+    const sql = fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "031_canada_review_fixes.sql"), "utf8");
+    await q(sql);
+    await q(sql);
+    const c = await candidate();
+    const s = await feeService();
+    await assert.rejects(q("INSERT INTO fin_service_contracts (candidate_id, service_id, jurisdiction) VALUES ($1,$2,'ca-on')", [c, s.id]), /jurisdiction_check/);
+    await q("INSERT INTO fin_service_contracts (candidate_id, service_id, jurisdiction) VALUES ($1,$2,'CA-ON')", [c, s.id]);
+    await q("INSERT INTO fin_service_contracts (candidate_id, service_id) VALUES ($1,$2)", [c, s.id]); // old rows: NULL stays valid
+    await q("INSERT INTO fin_legal_reviews (jurisdiction,status,reviewer_name,reviewed_at) VALUES ('TN','approved','R','2030-01-01')");
+    await q("INSERT INTO fin_legal_reviews (jurisdiction,status,reviewer_name,reviewed_at) VALUES ('TN','prohibited','R','2000-01-01')");
+    assert.equal((await one("SELECT status FROM fin_legal_reviews_latest WHERE jurisdiction='TN'")).status, "prohibited");
   }));

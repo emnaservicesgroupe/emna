@@ -496,7 +496,11 @@ test("opt-out reply (matched, authenticated): suppression for the sender, employ
   assert.equal(sup[0].source, "reply_opt_out");
   assert.equal(sup[0].employer_id, w.employerId);
   assert.equal(sup[0].message_id, r.id);
-  assert.equal((await q("SELECT count(*)::int n FROM js_suppressions")).rows[0].n, before + 1);
+  // review round 1: the sender writes from the employer's own domain, so the domain is suppressed as well (and employers sharing it opt out)
+  assert.equal((await q("SELECT count(*)::int n FROM js_suppressions")).rows[0].n, before + 2);
+  const domSup = (await q("SELECT * FROM js_suppressions WHERE kind='domain' AND value=$1", [w.domain])).rows;
+  assert.equal(domSup.length, 1);
+  assert.equal(domSup[0].source, "reply_opt_out");
   // employer status
   assert.equal((await employerRow(w.employerId)).status, "opted_out");
   // staff task (reusing js_tasks), assigned to the responsible staff member
@@ -525,7 +529,9 @@ test("opt-out reply (matched, authenticated): suppression for the sender, employ
   const del = await http("DELETE", `/jobsearch/suppressions/${supId}`, tok(adminId, "Admin"), { reason: "employer confirmed the opt-out was a mistake" });
   assert.equal(del.status, 200, JSON.stringify(del.body));
   assert.equal((await q("SELECT count(*)::int n FROM js_suppressions WHERE id=$1", [supId])).rows[0].n, 0);
-  assert.equal((await employerRow(w.employerId)).status, "replied", "undoing the only opt-out suppression releases the employer status");
+  assert.equal((await employerRow(w.employerId)).status, "opted_out", "the domain opt-out still stands");
+  assert.equal((await http("DELETE", `/jobsearch/suppressions/${domSup[0].id}`, tok(adminId, "Admin"), { reason: "employer confirmed the opt-out was a mistake" })).status, 200);
+  assert.equal((await employerRow(w.employerId)).status, "replied", "undoing the last opt-out suppression releases the employer status");
 });
 
 test("opt-out reply later blocks another application to the same employer: approval is refused, an approved one is stopped by the guard", async () => {
@@ -883,4 +889,52 @@ test("POST/GET/DELETE /jobsearch/suppressions: staff add and list, admin-only de
   assert.equal((await http("GET", "/jobsearch/suppressions")).status, 401);
   const rec = await mkUser("Receptionist");
   assert.equal((await http("DELETE", `/jobsearch/suppressions/${e.body.id}`, tok(rec, "Receptionist"), { reason: "valid reason" })).status, 403);
+});
+
+
+// ---------------------------------------------------------------- review round 1
+
+test("opt-out scope: the employer's own domain opts out every employer row sharing it; a free-mail or other-domain sender stays a single address", async () => {
+  const w = await world();
+  const twin = (await q("INSERT INTO js_employers (name, normalized_name, domain) VALUES ($1,$2,$3) RETURNING id", [`Twin ${w.domain}`, `twin ${w.domain}`, `https://www.${w.domain.toUpperCase()}/careers`])).rows[0].id;
+  const other = (await q("INSERT INTO js_employers (name, normalized_name, domain) VALUES ('Other Co','other co','other-co.example') RETURNING id")).rows[0].id;
+  const r = await inbox.ingest(reply(w, { text: "Please do not reach out again." }));
+  assert.equal(r.matched, true);
+  assert.equal((await employerRow(twin)).status, "opted_out");
+  assert.equal((await employerRow(other)).status, "new");
+  assert.equal((await q("SELECT count(*)::int n FROM js_suppressions WHERE kind='domain' AND value=$1", [w.domain])).rows[0].n, 1);
+  // a public-suffix / free-mail employer domain is never suppressed as a domain
+  const w2 = await world({ domain: "gmail.com" }).catch(() => null);
+  if (w2) assert.equal((await q("SELECT count(*)::int n FROM js_suppressions WHERE kind='domain' AND value='gmail.com'")).rows[0].n, 0);
+});
+
+test("suppression hardening: public suffixes and free-mail domains cannot be suppressed as a domain; per-address suppression stays possible", async () => {
+  const c = await pool.connect();
+  try {
+    for (const d of ["co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "co.nz", "on.ca", "qc.ca", "bc.ca", "gc.ca", "gov.ca", "co.za", "com.tn", "org.tn", "gov.tn", "com.fr", "net.xx", "ab.cd",
+      "bell.net", "rogers.com", "shaw.ca", "telus.net", "sympatico.ca", "videotron.ca", "cogeco.ca", "eastlink.ca", "yahoo.com", "yahoo.ca", "yahoo.fr", "hotmail.com", "hotmail.fr", "live.com", "msn.com", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "mail.com", "zoho.com", "orange.fr", "free.fr", "laposte.net"]) {
+      await assert.rejects(suppression.addSuppression(c, { kind: "domain", value: d, reason: "r", createdBy: adminId }), /free-mail|public suffix/, d);
+    }
+    assert.ok((await suppression.addSuppression(c, { kind: "domain", value: "acme-hardening.example", reason: "r", createdBy: adminId })).created);
+    assert.ok((await suppression.addSuppression(c, { kind: "email", value: "someone@rogers.com", reason: "r", createdBy: adminId })).created, "a single free-mail address can be suppressed");
+    assert.equal(suppression.isPublicSuffix("acme.com"), false);
+    assert.equal(suppression.isPublicSuffix("acme.co.uk"), false);
+  } finally {
+    c.release();
+  }
+});
+
+test("final suppression check: a suppression committed after the intent transaction (right before the provider call) is honoured and nothing is sent", async () => {
+  const w = await world({ stopAt: "queued" });
+  let called = 0;
+  const out = await submitter.handleSubmit(w.queuedItem, {
+    ...DEPS,
+    mailSend: async () => { called += 1; return { providerMessageId: "x" }; },
+    beforeProviderCall: async () => { await q("INSERT INTO js_suppressions (kind, value, source) VALUES ('email',$1,'manual')", [`jobs@${w.domain}`]); },
+  });
+  assert.equal(out.status, "blocked", JSON.stringify(out));
+  assert.equal(out.code, "recipient_suppressed");
+  assert.equal(called, 0);
+  assert.equal((await q("SELECT status FROM js_submissions WHERE id=$1", [w.submissionId])).rows[0].status, "failed");
+  assert.notEqual(await statusOf(w.appId), "sent");
 });

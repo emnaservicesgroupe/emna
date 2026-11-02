@@ -395,36 +395,36 @@ test("staff classification endpoint: evidence rules, notes, permissions, audit, 
   const url = `/jobsearch/jobs/${j.id}/classification`;
 
   // invalid inputs
-  assert.equal((await http("POST", url, tok.agentA, { classification: "nonsense" })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, {})).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated" })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated", evidence: "   " })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated", evidence: "We sponsor visas for everyone" })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated", evidence: 42 })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated", evidence: "x".repeat(501) })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "nonsense" })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, {})).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated" })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: "   " })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: "We sponsor visas for everyone" })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: 42 })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: "x".repeat(501) })).status, 400);
   assert.equal((await jobRow(j.id)).classification, "verified_active", "rejected requests change nothing");
   assert.equal((await auditRows("job.classification")).filter((a) => a.detail.jobId === j.id).length, 0);
 
   // note rules
-  assert.equal((await http("POST", url, tok.agentA, { classification: "prospective_no_vacancy" })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "closed_unsuitable", note: "  " })).status, 400);
-  assert.equal((await http("POST", url, tok.agentA, { classification: "closed_unsuitable", note: "n".repeat(501) })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "prospective_no_vacancy" })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "closed_unsuitable", note: "  " })).status, 400);
+  assert.equal((await http("POST", url, tok.managerA, { classification: "closed_unsuitable", note: "n".repeat(501) })).status, 400);
 
   // permissions: candidate / employer / agency / anonymous denied
   for (const t of [tok.employer, tok.agency, null]) assert.ok([401, 403, 404].includes((await http("POST", url, t, { classification: "eligibility_unclear" })).status));
   const cand = await mkCandidate();
   assert.ok([403, 404].includes((await http("POST", url, cand.token, { classification: "eligibility_unclear" })).status));
-  assert.equal((await http("POST", "/jobsearch/jobs/999999/classification", tok.agentA, { classification: "eligibility_unclear" })).status, 404);
-  assert.equal((await http("POST", "/jobsearch/jobs/abc/classification", tok.agentA, { classification: "eligibility_unclear" })).status, 404);
+  assert.equal((await http("POST", "/jobsearch/jobs/999999/classification", tok.managerA, { classification: "eligibility_unclear" })).status, 404);
+  assert.equal((await http("POST", "/jobsearch/jobs/abc/classification", tok.managerA, { classification: "eligibility_unclear" })).status, 404);
 
   // verbatim (case-insensitive, whitespace-normalised) evidence is accepted and stored
-  const ok = await http("POST", url, tok.agentA, { classification: "foreign_applicants_stated", evidence: "we welcome   international applicants" });
+  const ok = await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: "we welcome   international applicants" });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(ok.body.job.classification, "foreign_applicants_stated");
   assert.equal(ok.body.job.classificationEvidence, "we welcome international applicants");
   assert.match(ok.body.notice, /not proof|informational/i);
   let r = await jobRow(j.id);
-  assert.equal(r.classified_by, ids.agentA);
+  assert.equal(r.classified_by, ids.managerA);
   assert.ok(r.classified_at);
   const au = (await auditRows("job.classification")).filter((a) => a.detail.jobId === j.id);
   assert.equal(au.length, 1);
@@ -438,7 +438,7 @@ test("staff classification endpoint: evidence rules, notes, permissions, audit, 
   r = await jobRow(j.id);
   assert.equal(r.status, "closed");
   assert.equal(r.classification, "foreign_applicants_stated", "staff classification survives even a closed job");
-  assert.equal(r.classified_by, ids.agentA);
+  assert.equal(r.classified_by, ids.managerA);
 
   // the stricter note-only classes
   const j2 = await liveJob();
@@ -800,4 +800,52 @@ test("scoreMatch: 'residents only' ads cap the band at manual_review (reviewable
   const r = scoreMatch(PROFILE, { ...PREFS, residence_country: "Tunisia", needs_work_auth_support: false }, { ...STRONG_JOB, description_text: `${STRONG_JOB.description_text} Canadian residents only.` }, { now: NOW });
   assert.ok(r.vetoes.some((v) => v.code === "applicants_must_be_local" && v.severity === "manual_review"));
   assert.ok(r.band !== "strong" && r.band !== "good", r.band);
+});
+
+// ---------------------------------------------------------------- review round 1
+
+test("review round 1: ads that exclude foreign / non-resident applicants are work_authorization_required, never verified_active", () => {
+  const phrases = [
+    "We do not consider foreign applicants.",
+    "Only candidates currently residing in Canada will be considered.",
+    "Canadian residents only.",
+    "Applicants must currently reside in Canada.",
+  ];
+  for (const p of phrases) {
+    const r = derive(open({ description_text: `${LONG}\n${p}` }));
+    assert.equal(r.classification, "work_authorization_required", p);
+    assert.notEqual(r.classification, "verified_active");
+    assert.ok(r.evidence, `${p} keeps a quoted evidence`);
+  }
+  // an ordinary open ad is still verified_active
+  assert.equal(derive(open()).classification, "verified_active");
+});
+
+test("review round 1: staff classification needs jobsearch:approve for every class; foreign_applicants_stated evidence is a real quote", async () => {
+  const j = await liveJob({ description: `${LONG}\nWe welcome international applicants from every country.` });
+  const url = `/jobsearch/jobs/${j.id}/classification`;
+  for (const body of [{ classification: "eligibility_unclear" }, { classification: "closed_unsuitable", note: "closed" }, { classification: null }]) {
+    assert.equal((await http("POST", url, tok.agentA, body)).status, 403, JSON.stringify(body));
+  }
+  assert.equal((await jobRow(j.id)).classified_by, null, "an Agent changed nothing");
+  await assert.rejects(classification.setStaffClassification({ jobId: j.id, user: { id: ids.agentA, role: "Receptionist" }, classification: "eligibility_unclear" }), /jobsearch:approve/);
+  // too short / too few words, even though verbatim
+  for (const ev of ["international", "welcome international", "We welcome international"]) {
+    assert.equal((await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: ev })).status, 400, ev);
+  }
+  const ok = await http("POST", url, tok.managerA, { classification: "foreign_applicants_stated", evidence: "We welcome international applicants from every country" });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+});
+
+test("review round 1: (re)classifying a job re-scores its matches without touching decisions", async () => {
+  const cand = await mkCandidate();
+  const j = await liveJob();
+  const m = (await q("INSERT INTO js_matches (candidate_id, job_id, score, band, decision, decision_by, decided_at) VALUES ($1,$2,5,'strong',$3,$4,now()) RETURNING *", [cand.candidateId, j.id, "accepted", ids.managerA])).rows[0];
+  const r = await http("POST", `/jobsearch/jobs/${j.id}/classification`, tok.managerA, { classification: "closed_unsuitable", note: "closed by employer" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const after = (await q("SELECT * FROM js_matches WHERE id=$1", [m.id])).rows[0];
+  assert.equal(after.decision, "accepted", "decision untouched");
+  assert.equal(after.decision_by, ids.managerA);
+  assert.notEqual(after.score, 5, "score refreshed");
+  assert.notEqual(after.band, "strong", "band refreshed");
 });

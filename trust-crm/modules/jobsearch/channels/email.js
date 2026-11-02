@@ -15,6 +15,7 @@ const MAX_REASON = 200;
 const STORAGE_KEY_RE = /^[0-9]+-[a-f0-9]{64}\.(pdf|docx|png|jpg)$/;
 // Nothing left our side / permanently rejected for this recipient or policy.
 const PERMANENT_SMTP = new Set([550, 551, 552, 553, 554]);
+const CANONICAL_NAME_RE = /^CAN-[0-9]{4}-[0-9]{4,}-CV-V[0-9]{1,4}(?:-FR)?\.(?:pdf|docx)$/;
 const EXT_MIME = { pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", png: "image/png", jpg: "image/jpeg" };
 
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
@@ -74,7 +75,9 @@ async function loadAttachments(refs, ctx = {}) {
     }
     const ext = keyMatch[1];
     const base = r.kind === "cv" ? `CV-${safeName(ctx.candidateName)}-v${Number(r.version) || 1}` : `${safeName(r.docType || "document")}-${i}`;
-    attachments.push({ filename: `${base}.${ext}`, content: buf, contentType: EXT_MIME[ext] || "application/octet-stream", sha256: got, size: buf.length, ref: { cvFileId: r.cvFileId || null, documentId: r.documentId || null, version: r.version, sha256: r.sha256 } });
+    // Only a well-formed canonical name is ever used as the file name (same pattern the download route enforces).
+    const canonical = r.kind === "cv" && typeof r.canonicalName === "string" && CANONICAL_NAME_RE.test(r.canonicalName) && r.canonicalName.endsWith(`.${ext}`) ? r.canonicalName : null;
+    attachments.push({ filename: canonical || `${base}.${ext}`, content: buf, contentType: EXT_MIME[ext] || "application/octet-stream", sha256: got, size: buf.length, ref: { cvFileId: r.cvFileId || null, documentId: r.documentId || null, version: r.version, sha256: r.sha256 } });
   }
   return { attachments, problems };
 }

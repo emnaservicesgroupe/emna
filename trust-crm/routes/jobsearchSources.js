@@ -4,7 +4,7 @@
 //   POST /search/run                   {candidateId?, sourceKey?}   (write; no candidateId => admin)
 //   GET  /jobs                         ?country&source&status&q&page&pageSize (staff/admin; Candidate 403)
 //   GET  /jobs/:id                     one vacancy with its classification      (staff)
-//   POST /jobs/:id/classification      {classification|null, evidence?, note?} staff override, audited (jobsearch:write)
+//   POST /jobs/:id/classification      {classification|null, evidence?, note?} staff override, audited (jobsearch:approve)
 //   POST /jobs/manual                  staff-entered vacancy                   (jobsearch:write)
 const express = require("express");
 const { verifyToken } = require("../middleware/auth");
@@ -142,7 +142,7 @@ router.get("/jobs/:id", verifyToken, asyncHandler(async (req, res) => {
 
 router.post("/jobs/:id/classification", verifyToken, asyncHandler(async (req, res) => {
   if (req.user.role === "Candidate") throw new HttpError(403, "Staff access required");
-  need(req.user, "jobsearch:write");
+  need(req.user, "jobsearch:approve");
   const b = body(req);
   const row = await classification.setStaffClassification({ jobId: req.params.id, user: req.user, classification: b.classification, evidence: b.evidence, note: b.note });
   const full = (await db().query("SELECT j.*, to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date_s FROM js_jobs j WHERE j.id = $1", [row.id])).rows[0];

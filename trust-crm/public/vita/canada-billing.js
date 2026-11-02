@@ -54,19 +54,21 @@
 
   function openSign(k, after) {
     var name = h("input", { id: "cx-sg-name", type: "text", attrs: { maxlength: "200", autocomplete: "off" } });
+    var jur = h("input", { id: "cx-sg-jur", type: "text", value: k.jurisdiction || "", attrs: { maxlength: "6", autocomplete: "off", dir: "ltr", placeholder: "CA-ON" } });
     var err = h("p", { class: "form-error", attrs: { role: "alert" } });
     var go = h("button", { type: "submit", class: "btn", text: t("canada.contract.sign") });
     var cancel = h("button", { type: "button", class: "btn secondary", text: t("common.cancel") });
     var dlg = C.modal(t("canada.contract.signTitle"), [
       h("p", { class: "small", text: t("canada.contract.signIntro") }),
-      C.field("cx-sg-name", t("canada.contract.signedBy"), name, t("canada.contract.signedByHint")), err, h("div", { class: "btn-row" }, go, cancel)]);
+      C.field("cx-sg-name", t("canada.contract.signedBy"), name, t("canada.contract.signedByHint")),
+      C.field("cx-sg-jur", t("canada.legal.jurisdiction"), jur, t("canada.legal.jurisdictionHint")), err, h("div", { class: "btn-row" }, go, cancel)]);
     var state = { sending: false };
     cancel.addEventListener("click", dlg.close);
     dlg.form.addEventListener("submit", function (e) {
       e.preventDefault();
       err.textContent = "";
-      var built = U.contractSignPayload({ signed_by_name: name.value });
-      if (!built.ok) return C.flag(name, err, C.errText("signed_by_name"));
+      var built = U.contractSignPayload({ signed_by_name: name.value, jurisdiction: jur.value });
+      if (!built.ok) return C.flag(built.error === "jurisdiction" ? jur : name, err, C.errText(built.error));
       C.submit(go, state, function () {
         return V.api("POST", "/finance/contracts/" + k.id + "/sign", { body: built.payload }).then(function () {
           dlg.close();

@@ -276,12 +276,12 @@ test("extras: candidate reads own, edits only city/whatsapp/relocation_ready/des
     assert.equal(me.body.reference, a.reference);
     assert.equal(me.body.work_authorization_status, "study_permit");
     assert.equal(me.body.service_start_date, "2026-09-01");
-    assert.deepEqual(me.body.editable_fields, ["city", "whatsapp", "relocation_ready", "desired_province"]);
+    assert.deepEqual(me.body.editable_fields, ["city", "whatsapp", "relocation_ready"], "the province is staff-only: it decides the legal jurisdiction");
     assert.equal(me.text.includes(b.reference), false);
-    const edit = await w.http("PATCH", "/jobsearch/me/extras", a.token, { city: "Calgary", whatsapp: "+1 403 555 0101", relocation_ready: false, desired_province: "AB" });
+    const edit = await w.http("PATCH", "/jobsearch/me/extras", a.token, { city: "Calgary", whatsapp: "+1 403 555 0101", relocation_ready: false });
     assert.equal(edit.status, 200, edit.text);
-    assert.deepEqual([edit.body.city, edit.body.whatsapp, edit.body.relocation_ready, edit.body.desired_province], ["Calgary", "+14035550101", false, "AB"]);
-    for (const body of [{ work_authorization_status: "citizen" }, { service_start_date: "2027-01-01" }, { city: "Ok", work_authorization_status: "pr" }]) {
+    assert.deepEqual([edit.body.city, edit.body.whatsapp, edit.body.relocation_ready, edit.body.desired_province], ["Calgary", "+14035550101", false, null]);
+    for (const body of [{ work_authorization_status: "citizen" }, { service_start_date: "2027-01-01" }, { city: "Ok", work_authorization_status: "pr" }, { desired_province: "AB" }, { desired_province: null }, { city: "Ok", desired_province: "ON" }]) {
       const r = await w.http("PATCH", "/jobsearch/me/extras", a.token, body);
       assert.equal(r.status, 403, JSON.stringify(body));
     }

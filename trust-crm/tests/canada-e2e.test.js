@@ -33,6 +33,7 @@ process.env.MAIL_FROM = "applications@vita.test.invalid";
 process.env.INBOUND_MAIL_SECRET = "canada-e2e-inbound-secret";
 process.env.JOBSEARCH_EXPORT_RATE_PER_HOUR = "1000";
 process.env.JOBSEARCH_REPORT_RATE_PER_HOUR = "1000";
+process.env.JOBSEARCH_REPORT_CANDIDATE_RATE_PER_HOUR = "1000";
 process.env.JS_UPLOADS_PER_HOUR = "1000";
 process.env.REPORT_TIMEZONE = "Africa/Tunis";
 process.env.ALLOW_UNSCANNED_ATTACHMENTS = "true"; // the uploaded original is never scanned in tests (no ClamAV); generated CVs are recorded 'clean'
@@ -179,8 +180,11 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   const B = await E.createCandidate(w, "B", "mgr2");
   assert.notEqual((await w.one("SELECT reference FROM candidates WHERE id = $1", [B.id])).reference, refA);
   const C = await E.createCandidate(w, "C", "agent");
-  const edit = await w.http("PATCH", `/jobsearch/me/extras`, A.token, { city: "Sfax", desired_province: "ON" });
+  const edit = await w.http("PATCH", `/jobsearch/me/extras`, A.token, { city: "Sfax" });
   assert.equal(edit.status, 200, JSON.stringify(edit.body));
+  // review round 1: the province decides the legal jurisdiction, so a candidate cannot edit it (staff set it later)
+  assert.equal((await w.http("PATCH", `/jobsearch/me/extras`, A.token, { desired_province: "ON" })).status, 403);
+  assert.deepEqual((await w.http("GET", "/jobsearch/me/extras", A.token)).body.editable_fields.sort(), ["city", "relocation_ready", "whatsapp"]);
   // personal facts that exist on the candidate row but are NOT in the confirmed profile
   await w.q("UPDATE candidates SET date_of_birth = $2, nationality = $3 WHERE id = $1", [A.id, SENT.dob, SENT.nationality]);
 
@@ -272,9 +276,10 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   assert.notEqual(J1.classification, "foreign_applicants_stated", "an ad is not classified from wording the staff have not confirmed");
   // classification: a quote that is NOT in the ad is refused; the verbatim quote is accepted; both are audited
   const clsUrl = `/jobsearch/jobs/${J1.id}/classification`;
-  const bad = await w.http("POST", clsUrl, T.agent, { classification: "foreign_applicants_stated", evidence: "We sponsor visas for everyone" });
+  assert.equal((await w.http("POST", clsUrl, T.agent, { classification: "foreign_applicants_stated", evidence: "international applicants are welcome" })).status, 403, "an Agent cannot classify (review round 1)");
+  const bad = await w.http("POST", clsUrl, T.mgr, { classification: "foreign_applicants_stated", evidence: "We sponsor visas for everyone" });
   assert.equal(bad.status, 400, JSON.stringify(bad.body));
-  assert.equal((await w.http("POST", clsUrl, T.agent, { classification: "foreign_applicants_stated" })).status, 400, "no quote, no classification");
+  assert.equal((await w.http("POST", clsUrl, T.mgr, { classification: "foreign_applicants_stated" })).status, 400, "no quote, no classification");
   assert.equal((await w.one("SELECT classification FROM js_jobs WHERE id = $1", [J1.id])).classification, J1.classification, "refused requests change nothing");
   const okc = await w.http("POST", clsUrl, T.mgr, { classification: "foreign_applicants_stated", evidence: "international applicants are welcome" });
   assert.equal(okc.status, 200, JSON.stringify(okc.body));
@@ -353,9 +358,8 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   const mailA = mails.find((m) => m.message_id === subA.provider_message_id);
   assert.ok(mailA, "the sandbox mail matches the stored provider id");
   assert.deepEqual(mailA.attachments.map((a) => a.sha256), [sha(dlPdf.buf)], "the exact authorised Canadian CV (V1 PDF) is the only attachment");
-  // Known limit (CHECKLIST): the e-mail channel names the attachment CV-<Name>-v<version>.pdf, not the canonical <reference>-CV-V<n>.pdf
-  // that staff and the candidate see; the bytes (hash above) and the version are the authorised ones.
-  assert.match(mailA.attachments[0].filename, /^CV-[A-Za-z-]+-v1\.pdf$/);
+  // Review round 1: the e-mail attachment carries the canonical name staff and the candidate see (<reference>-CV-V<n>.pdf)
+  assert.equal(mailA.attachments[0].filename, `${refA}-CV-V1.pdf`);
   assert.deepEqual(subA.evidence.docs.map((d) => [d.kind, d.cvFileId, d.version, d.sha256]), [["cv", canadianPdf.id, 1, sha(dlPdf.buf)]]);
   assert.equal(subB.status, "sent");
   assert.deepEqual(mails.find((m) => m.message_id === subB.provider_message_id).attachments.map((a) => a.sha256), [Bc.cvSha]);
@@ -496,7 +500,7 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   assert.equal((await raw(w, `/jobsearch/candidates/${A.id}/activity-report?format=pdf`, T.mgr2)).status, 404);
   assert.equal((await raw(w, `/jobsearch/candidates/${A.id}/activity-report?format=pdf`, T.acct)).status, 403);
   assert.equal((await raw(w, `/jobsearch/reports/export?format=pdf&from=${from}&to=${to}`, A.token)).status, 403, "a candidate cannot pull the company report");
-  assert.ok(await w.count("SELECT count(*) AS n FROM js_report_snapshots WHERE generated_by IS NOT NULL") >= 6, "every generation left an immutable snapshot");
+  assert.ok(await w.count("SELECT count(*) AS n FROM js_report_snapshots WHERE generated_by IS NOT NULL") >= 3, "generations left immutable snapshots (identical repeats within 10 minutes reuse one)");
 
   // ---- 16. accounting gate for the candidate_fee service
   const prov = await w.http("PATCH", `/jobsearch/candidates/${A.id}/extras`, T.admin, { desired_province: "ON" });
@@ -512,7 +516,7 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   const ctr = await w.http("POST", "/finance/contracts", T.acct, { candidate_id: A.id, service_id: svc.id, refund_terms: "Refund terms for candidate A" });
   assert.equal(ctr.status, 201, JSON.stringify(ctr.body));
   assert.equal(ctr.body.status, "draft");
-  const signed = await w.http("POST", `/finance/contracts/${ctr.body.id}/sign`, T.acct, { signed_by_name: "Candidate A" });
+  const signed = await w.http("POST", `/finance/contracts/${ctr.body.id}/sign`, T.acct, { signed_by_name: "Candidate A", jurisdiction: "CA-ON" });
   assert.equal(signed.status, 200, JSON.stringify(signed.body));
   assert.equal(signed.body.status, "active");
   const noReview = await inv();
@@ -552,7 +556,7 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   assert.equal(refund.status, 201, "refunds stay possible: " + JSON.stringify(refund.body));
   // the candidate sees own contracts only (no staff data); another candidate's contract stays invisible
   const ctrB = await w.http("POST", "/finance/contracts", T.acct, { candidate_id: B.id, service_id: svc.id, refund_terms: "SECRET-TERMS-OF-B" });
-  assert.equal((await w.http("POST", `/finance/contracts/${ctrB.body.id}/sign`, T.acct, { signed_by_name: "Candidate B" })).status, 200);
+  assert.equal((await w.http("POST", `/finance/contracts/${ctrB.body.id}/sign`, T.acct, { signed_by_name: "Candidate B", jurisdiction: "CA-ON" })).status, 200);
   const mine = await w.http("GET", "/finance/me/contracts", A.token);
   assert.equal(mine.status, 200, JSON.stringify(mine.body));
   assert.deepEqual(mine.body.contracts.map((c) => String(c.id)), [String(ctr.body.id)]);
@@ -589,7 +593,7 @@ test("C1 Canada service journey: reference -> confirmed profile -> Canadian CV -
   for (const [m, u, b] of staffRoutes) assert.equal((await w.http(m, u, null, b)).status, 401, `anonymous ${m} ${u}`);
   // nothing the denied calls attempted took effect
   assert.equal((await w.http("GET", "/jobsearch/match-settings", T.admin)).body.require_match_acceptance, true);
-  assert.equal(await w.count("SELECT count(*) AS n FROM js_suppressions"), 1);
+  assert.equal(await w.count("SELECT count(*) AS n FROM js_suppressions"), 2); // the opted-out address and (review round 1) the employer's own domain
   assert.equal(await w.count("SELECT count(*) AS n FROM fin_legal_reviews"), 3);
 });
 

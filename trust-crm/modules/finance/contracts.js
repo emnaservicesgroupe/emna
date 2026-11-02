@@ -5,6 +5,7 @@
 //   myContracts: role Candidate, own non-draft contracts only (no created_by, no stored document key, no staff data).
 const { logAudit } = require("../../utils/audit");
 const c = require("./common");
+const gate = require("./billingGate");
 const candidateView = require("./candidateView");
 
 const { HttpError } = c;
@@ -19,7 +20,7 @@ const STATUSES = ["draft", "active", "ended", "cancelled"];
 const STAFF_SELECT = `SELECT k.id, k.candidate_id, cd.full_name AS candidate_name, k.service_id, s.code AS service_code, s.kind AS service_kind,
        COALESCE(s.name_en, s.name_fr, s.name_ar) AS service_name, k.status, k.agreement_signed_at, k.signed_by_name,
        (k.signed_document_key IS NOT NULL) AS has_signed_document, to_char(k.start_date,'YYYY-MM-DD') AS start_date,
-       to_char(k.end_date,'YYYY-MM-DD') AS end_date, k.refund_terms, k.created_by, k.created_at, k.updated_at
+       to_char(k.end_date,'YYYY-MM-DD') AS end_date, k.refund_terms, k.jurisdiction, k.created_by, k.created_at, k.updated_at
   FROM fin_service_contracts k JOIN fin_services s ON s.id = k.service_id JOIN candidates cd ON cd.id = k.candidate_id`;
 
 const notFound = () => new HttpError(404, "Contract not found");
@@ -68,12 +69,19 @@ function storageError(err) {
 
 /**
  * Records the signed agreement (finance:write): draft -> active. `file` is an optional {buffer} stored as a private file (content
- * sniffed, never trusted by name). Body: {signed_by_name, signed_at?}; signed_at defaults to now and cannot be in the future.
+ * sniffed, never trusted by name). Body: {signed_by_name, signed_at?, jurisdiction?}; signed_at defaults to now and cannot be in the future;
+ * when it is older than 60 days a signed document upload is required. `jurisdiction` (CA-ON, CA-QC, TN...) is REQUIRED for a
+ * candidate_fee service: staff record which legal review covers this contract (the candidate cannot choose it).
  */
 async function sign(user, rawId, input, file = null) {
   c.requirePerm(user, "finance:write");
   const id = contractId(rawId);
-  bodyOnly(input, ["signed_by_name", "signed_at"]);
+  bodyOnly(input, ["signed_by_name", "signed_at", "jurisdiction"]);
+  let jurisdiction = null;
+  if (input.jurisdiction !== undefined && input.jurisdiction !== null && input.jurisdiction !== "") {
+    jurisdiction = typeof input.jurisdiction === "string" ? input.jurisdiction.trim().toUpperCase() : "";
+    if (!gate.JURISDICTION_RE.test(jurisdiction)) throw new HttpError(400, "jurisdiction must look like CA-ON, CA-QC or TN");
+  }
   const signedBy = c.requiredText(input.signed_by_name, "signed_by_name", NAME_MAX);
   let signedAt = null;
   if (input.signed_at !== undefined && input.signed_at !== null && input.signed_at !== "") {
@@ -85,7 +93,7 @@ async function sign(user, rawId, input, file = null) {
     return await c.inTransaction(async (client) => {
       const cur = (
         await client.query(
-          `SELECT k.id, k.candidate_id, k.service_id, k.status, s.active AS service_active
+          `SELECT k.id, k.candidate_id, k.service_id, k.status, s.active AS service_active, s.kind AS service_kind
              FROM fin_service_contracts k JOIN fin_services s ON s.id = k.service_id JOIN candidates cd ON cd.id = k.candidate_id AND cd.is_deleted = false
             WHERE k.id = $1 FOR UPDATE OF k`,
           [id]
@@ -95,9 +103,12 @@ async function sign(user, rawId, input, file = null) {
       if (cur.status !== "draft") throw new HttpError(409, `Contract is ${cur.status}; only a draft can be signed`);
       if (!cur.service_active) throw new HttpError(409, "The service is inactive");
       if (signedAt) {
-        const ok = (await client.query("SELECT $1::timestamptz <= now() + interval '5 minutes' AND $1::timestamptz >= timestamptz '2000-01-01' AS ok", [signedAt])).rows[0].ok;
-        if (!ok) throw new HttpError(400, "signed_at cannot be in the future");
+        const chk = (await client.query("SELECT $1::timestamptz <= now() AS ok, $1::timestamptz >= timestamptz '2000-01-01' AS sane, $1::timestamptz < now() - interval '60 days' AS old", [signedAt])).rows[0];
+        if (!chk.ok || !chk.sane) throw new HttpError(400, "signed_at cannot be in the future");
+        // An agreement dated long ago is only believable with the signed paper behind it.
+        if (chk.old && !(file && file.buffer)) throw new HttpError(400, "A signed document upload is required when the agreement is dated more than 60 days ago");
       }
+      if (cur.service_kind === "candidate_fee" && !jurisdiction) throw new HttpError(400, "jurisdiction is required to sign a candidate-fee contract (for example CA-ON, CA-QC or TN)");
       let key = null;
       if (file && file.buffer) {
         try {
@@ -108,11 +119,11 @@ async function sign(user, rawId, input, file = null) {
       }
       await client.query(
         `UPDATE fin_service_contracts SET status = 'active', agreement_signed_at = COALESCE($2::timestamptz, now()), signed_by_name = $3,
-                signed_document_key = COALESCE($4, signed_document_key), updated_at = now() WHERE id = $1`,
-        [id, signedAt, signedBy, key]
+                signed_document_key = COALESCE($4, signed_document_key), jurisdiction = COALESCE($5, jurisdiction), updated_at = now() WHERE id = $1`,
+        [id, signedAt, signedBy, key, jurisdiction]
       );
       const row = await load(client, id);
-      await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "fin_service_contracts", recordId: id, oldData: { status: "draft" }, newData: { status: "active", event: "sign", agreement_signed_at: row.agreement_signed_at, signed_by_name: signedBy, has_signed_document: row.has_signed_document } });
+      await logAudit({ client, userId: user.id, action: "UPDATE", tableName: "fin_service_contracts", recordId: id, oldData: { status: "draft" }, newData: { status: "active", event: "sign", agreement_signed_at: row.agreement_signed_at, signed_by_name: signedBy, has_signed_document: row.has_signed_document, jurisdiction: row.jurisdiction } });
       return row;
     });
   } catch (err) {

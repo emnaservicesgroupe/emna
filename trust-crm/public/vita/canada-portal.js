@@ -62,17 +62,16 @@
       var city = h("input", { id: p + "city", type: "text", value: x.city || "", attrs: { maxlength: "120", autocomplete: "address-level2" } });
       var wa = h("input", { id: p + "wa", type: "tel", value: x.whatsapp || "", attrs: { maxlength: "30", autocomplete: "tel", dir: "ltr", placeholder: "+1 416 555 0100" } });
       var rel = select(p + "rel", [["", t("canada.relocation.unknown")], ["true", t("canada.relocation.true")], ["false", t("canada.relocation.false")]], x.relocation_ready === true ? "true" : x.relocation_ready === false ? "false" : "");
-      var prov = select(p + "prov", items("canada.province.", U.PROVINCES, t("canada.notSet")), x.desired_province || "");
       var err = h("p", { class: "form-error", attrs: { role: "alert" } });
       var save = h("button", { type: "submit", class: "btn", text: t("common.save") });
       var form = h("form", { attrs: { novalidate: "" } },
-        h("div", { class: "inline-fields" }, field(p + "city", t("canada.profile.city"), city), field(p + "wa", t("canada.profile.whatsapp"), wa), field(p + "rel", t("canada.profile.relocation"), rel), field(p + "prov", t("canada.profile.province"), prov, t("canada.portal.profile.provinceHint"))),
+        h("div", { class: "inline-fields" }, field(p + "city", t("canada.profile.city"), city), field(p + "wa", t("canada.profile.whatsapp"), wa), field(p + "rel", t("canada.profile.relocation"), rel)),
         err, save);
-      [city, wa, rel, prov].forEach(function (el, i) { el.disabled = ed.indexOf(["city", "whatsapp", "relocation_ready", "desired_province"][i]) < 0; });
+      [city, wa, rel].forEach(function (el, i) { el.disabled = ed.indexOf(["city", "whatsapp", "relocation_ready"][i]) < 0; });
       form.addEventListener("submit", function (e) {
         e.preventDefault();
         err.textContent = "";
-        var built = U.profilePatch({ city: city.value, whatsapp: wa.value, relocation_ready: rel.value, desired_province: prov.value }, x, { candidate: true });
+        var built = U.profilePatch({ city: city.value, whatsapp: wa.value, relocation_ready: rel.value }, x, { candidate: true });
         if (!built.ok) {
           if (built.error === "nothing") return V.toast(t("canada.err.nothing"), "bad");
           err.textContent = t("canada.err." + built.error);

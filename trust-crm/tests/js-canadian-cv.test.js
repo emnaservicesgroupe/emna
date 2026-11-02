@@ -121,8 +121,8 @@ test("model: confirmed facts only, fixed-template summary, reverse-chronological
   assert.deepEqual(m.contact, { city: "Sfax", country: "Tunisia", email: "karim.benali@example.com", phone: "+216 22 345 678" });
   const byId = Object.fromEntries(m.sections.map((s) => [s.id, s]));
   assert.deepEqual(m.sections.map((s) => s.id), ["summary", "experience", "skills", "education", "certifications", "languages"]);
-  // 2015-01 .. 2026-10 = 11 whole years
-  assert.equal(byId.summary.text, "Electrical Technician with 11 years of verified experience in Electrical installation, PLC programming, Industrial maintenance.");
+  // 2015 (conservative: Dec 2015) .. 2026-10 = 10 whole years
+  assert.equal(byId.summary.text, "Electrical Technician with 10 years of verified experience in Electrical installation, PLC programming, Industrial maintenance.");
   assert.deepEqual(byId.experience.items.map((e) => e.title), ["Senior Electrician", "Electrician"], "present first, then by end date descending");
   assert.deepEqual(byId.languages.items, [{ lang: "Arabic", level: "Native" }, { lang: "French", level: "Fluent" }, { lang: "English", level: "B2" }], "proficiency exactly as confirmed");
   assert.deepEqual(m.missing, []);
@@ -147,7 +147,12 @@ test("model: summary only from verified facts (profession AND years AND a skill)
     assert.ok(m.missing.includes("professional_summary"), label);
   }
   // overlapping / adjacent spans are not double counted; whole years only (floored)
-  assert.equal(gen.verifiedYears([{ start: "2015", end: "2019" }, { start: "2018", end: "2020" }], NOW), 6);
+  // year-only dates take the CONSERVATIVE bound (start = December of the start year, end = January of the end year): Dec 2015 .. Jan 2020
+  assert.equal(gen.verifiedYears([{ start: "2015", end: "2019" }, { start: "2018", end: "2020" }], NOW), 4);
+  assert.equal(gen.verifiedYears([{ start: "2018", end: "2019" }], NOW), 0, "a Jan start and Dec end of adjacent years verifies no full year");
+  assert.equal(gen.verifiedYears([{ start: "2019", end: "2018" }], NOW), 0, "a negative span counts as 0");
+  assert.equal(gen.verifiedYears([{ start: "2018", end: "2018" }], NOW), 0);
+  assert.equal(gen.verifiedYears([{ start: "01/2018", end: "12/2018" }], NOW), 1, "month-precise dates keep their precision");
   assert.equal(gen.verifiedYears([{ start: "03/2020", end: "Jan 2022" }], NOW), 1);
   assert.equal(gen.verifiedYears([{ start: "2020", end: "garbage" }], NOW), null);
 });
@@ -180,7 +185,7 @@ test("model: French mode translates headings and the summary template only, neve
   assert.deepEqual(fr.sections.map((s) => s.items), en.sections.map((s) => s.items), "facts identical");
   assert.equal(fr.name, en.name);
   assert.deepEqual(fr.contact, en.contact);
-  assert.equal(fr.sections[0].text, "Electrical Technician avec 11 ans d'expérience vérifiée en Electrical installation, PLC programming, Industrial maintenance.");
+  assert.equal(fr.sections[0].text, "Electrical Technician avec 10 ans d'expérience vérifiée en Electrical installation, PLC programming, Industrial maintenance.");
   assert.equal(gen.buildCvModel(PROFILE, {}, { lang: "de", now: NOW }).lang, "en", "unknown language falls back to English headings");
 });
 
@@ -193,6 +198,69 @@ test("model: sensitive-looking list items are dropped and reported, never emitte
   const json = JSON.stringify(m);
   for (const n of ["Marital", "1990", "Passport", "Nationality", "Tunisian"]) assert.ok(!json.includes(n), n);
   for (const k of ["excluded_sensitive:skills", "excluded_sensitive:education", "excluded_sensitive:certifications", "excluded_sensitive:languages"]) assert.ok(m.missing.includes(k), k);
+});
+
+test("review round 1: the sensitive-item filter covers French, English and Arabic; a job title such as 'Photo Editor' is kept", () => {
+  const dropped = [
+    "Né le 12/03/1990", "Née le 12/03/1990", "Marié, 2 enfants", "Mariée", "Age 34", "Age: 34", "Âge : 34", "34 years old", "Citoyen tunisien", "Citoyenne canadienne", "Tunisian citizen",
+    "Date de naissance: 12/03/1990", "Date of birth: 1990-03-12", "DOB 12/03/1990", "Single", "Célibataire", "État civil : marié", "Marital status: single", "Nationalité : tunisienne", "Nationality: Tunisian",
+    "Passeport n° P123456", "Passport P123456", "2 children", "Enfants : 2", "Gender: male", "Sexe : masculin", "Religion: Muslim", "Photo: attached", "Photograph attached", "Photo jointe", "Ressortissant tunisien",
+    "تاريخ الميلاد 1990/03/12", "متزوج وله طفلان", "أعزب", "الجنسية: تونسية", "جواز السفر رقم 123", "أطفال: 2", "العمر 34", "الحالة الاجتماعية: متزوج",
+  ];
+  const kept = ["Photo Editor", "Photographer", "Single-phase wiring", "Stage coordination", "Management", "Marie Curie Institute training", "Waste management", "Divorce law", "5 ans d'expérience en soudure", "Child care certificate"];
+  for (const item of dropped) {
+    const m = gen.buildCvModel({ name: "N", skills: ["Welding", item], experience: [{ title: "Welder", employer: "ACME", start: "2015", end: "2020" }] }, {}, { now: NOW });
+    assert.deepEqual(m.sections.find((x) => x.id === "skills").items, ["Welding"], `kept: ${item}`);
+    assert.ok(m.missing.includes("excluded_sensitive:skills"), item);
+  }
+  for (const item of kept) {
+    const m = gen.buildCvModel({ name: "N", skills: ["Welding", item] }, {}, { now: NOW });
+    assert.deepEqual(m.sections.find((x) => x.id === "skills").items, ["Welding", item], `dropped: ${item}`);
+  }
+  // titles, employers, languages and the profession go through the same filter, and the summary only uses skills that passed
+  const m = gen.buildCvModel(
+    { name: "N", profession: "Marié", skills: ["Né le 12/03/1990", "Welding"], experience: [{ title: "Photo Editor", employer: "Citoyen Corp", start: "2010", end: "2020" }, { title: "Welder", employer: "ACME", start: "2010", end: "2020" }], languages: [{ lang: "Arabic", level: "متزوج" }] },
+    {},
+    { now: NOW }
+  );
+  assert.deepEqual(m.sections.find((x) => x.id === "experience").items.map((e) => e.title), ["Welder"]);
+  assert.ok(!m.sections.some((x) => x.id === "summary"), "a profession that states a civil status is not used");
+  const m2 = gen.buildCvModel({ name: "N", profession: "Welder", skills: ["Né le 12/03/1990", "Welding"], experience: [{ title: "Welder", employer: "ACME", start: "2010", end: "2020" }] }, {}, { now: NOW });
+  assert.deepEqual(m2.sections.find((x) => x.id === "summary").facts.skills, ["Welding"]);
+});
+
+test("review round 1: verified years use the conservative bound for year-only dates and speak correct singular grammar", () => {
+  const base = { name: "N", profession: "Welder", skills: ["Welding"] };
+  const text = (exp, lang = "en") => (gen.buildCvModel({ ...base, experience: exp }, {}, { now: NOW, lang }).sections.find((x) => x.id === "summary") || {}).text;
+  assert.equal(text([{ title: "A", employer: "B", start: "2018", end: "2019" }]), undefined, "Jan 2018 .. Dec 2019 is NOT two years: Dec 2018 .. Jan 2019 verifies none");
+  assert.equal(text([{ title: "A", employer: "B", start: "2017", end: "2019" }]), "Welder with 1 year of verified experience in Welding.");
+  assert.equal(text([{ title: "A", employer: "B", start: "2017", end: "2019" }], "fr"), "Welder avec 1 an d'expérience vérifiée en Welding.");
+  assert.equal(text([{ title: "A", employer: "B", start: "2016", end: "2019" }]), "Welder with 2 years of verified experience in Welding.");
+  assert.equal(text([{ title: "A", employer: "B", start: "2016", end: "2019" }], "fr"), "Welder avec 2 ans d'expérience vérifiée en Welding.");
+  assert.equal(text([{ title: "A", employer: "B", start: "2019", end: "2018" }]), undefined, "a negative span counts as zero");
+  assert.equal(text([{ title: "A", employer: "B", start: "2018", end: "2018" }]), undefined);
+});
+
+test("review round 1: control characters are stripped and text is NFC before rendering (PDF and DOCX)", async () => {
+  const m = gen.buildCvModel(
+    { name: "Jos\u0001e\u0008 Cafe\u0301", profession: "Electrician", skills: ["Wiring\u0000", "Cable\u0007s", "Re\u0301sume\u0301"], experience: [{ title: "Tech\u0001nician", employer: "Cafe\u0301 Inc", start: "2015", end: "2020" }], education: ["E\u0301cole\u009f"] },
+    { city: "Montre\u0301al" },
+    { now: NOW }
+  );
+  assert.equal(m.name, "Jose Café");
+  const all = JSON.stringify(m);
+  assert.ok(!/\\u00(0[0-8b-f]|1[0-9a-f]|7f|[89][0-9a-f])/i.test(all), "no control character survives");
+  assert.deepEqual(m.sections.find((x) => x.id === "skills").items, ["Wiring", "Cables", "Résumé"], "NFC: composed letters");
+  assert.deepEqual(m.missing.filter((k) => k.startsWith("latin_spelling_needed")), [], "decomposed accents are drawable once composed");
+  assert.equal(m.contact.city, "Montréal");
+  const pdf = await gen.renderPdf(m);
+  assert.ok((await pdfText(pdf)).includes("Café"));
+  const docx = await gen.renderDocx(m);
+  const xml = docxXml(docx);
+  assert.ok(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(xml), "DOCX XML has no control character");
+  assert.ok(docxText(docx).includes("Technician"));
+  // tab and new line are kept
+  assert.equal(gen.buildCvModel({ name: "N\tM", skills: ["a\nb"] }, {}, { now: NOW }).name, "N\tM");
 });
 
 test("model property: every string is copied from the profile / extras or is a static label (random profiles, en + fr)", () => {
@@ -231,7 +299,8 @@ test("model property: every string is copied from the profile / extras or is a s
         check(sec.facts.profession);
         sec.facts.skills.forEach(check);
         assert.equal(typeof sec.facts.years, "number");
-        const want = lang === "en" ? `${sec.facts.profession} with ${sec.facts.years} years of verified experience in ${sec.facts.skills.join(", ")}.` : `${sec.facts.profession} avec ${sec.facts.years} ans d'expérience vérifiée en ${sec.facts.skills.join(", ")}.`;
+        const one = sec.facts.years === 1;
+        const want = lang === "en" ? `${sec.facts.profession} with ${sec.facts.years} ${one ? "year" : "years"} of verified experience in ${sec.facts.skills.join(", ")}.` : `${sec.facts.profession} avec ${sec.facts.years} ${one ? "an" : "ans"} d'expérience vérifiée en ${sec.facts.skills.join(", ")}.`;
         assert.equal(sec.text, want);
       } else {
         strings(sec.items).forEach(check);
@@ -278,7 +347,7 @@ test("PDF: A4, selectable text with the confirmed facts, no forbidden fields", a
   assert.equal(storage.sniffMime(pdf), "application/pdf");
   assert.match(pdf.toString("latin1"), /\/MediaBox \[0 0 595\.28 841\.89\]/, "A4");
   const t = await pdfText(pdf);
-  for (const s of ["Karim Benali", "Sfax, Tunisia", "karim.benali@example.com", "+216 22 345 678", "Professional Summary", "Professional Experience", "Senior Electrician", "Gulf Build LLC", "2019 – Present", "Sfax Industries", "2015 – 2019", "Skills", "Education and Training", "Higher Diploma in Electrical Engineering, University of Sfax, 2014", "Certifications and Licences", "Electrical Safety Certificate", "Languages", "Arabic (Native)", "French (Fluent)", "English (B2)", "Electrical Technician with 11 years of verified experience"]) {
+  for (const s of ["Karim Benali", "Sfax, Tunisia", "karim.benali@example.com", "+216 22 345 678", "Professional Summary", "Professional Experience", "Senior Electrician", "Gulf Build LLC", "2019 – Present", "Sfax Industries", "2015 – 2019", "Skills", "Education and Training", "Higher Diploma in Electrical Engineering, University of Sfax, 2014", "Certifications and Licences", "Electrical Safety Certificate", "Languages", "Arabic (Native)", "French (Fluent)", "English (B2)", "Electrical Technician with 10 years of verified experience"]) {
     assert.ok(t.includes(s), `PDF text lacks "${s}"`);
   }
   assert.ok(t.indexOf("Senior Electrician") < t.indexOf("Sfax Industries"), "reverse chronological order");
@@ -323,7 +392,7 @@ test("DOCX: headings, bullet lists, confirmed facts only, no forbidden fields", 
   assert.ok(/<w:numPr>/.test(xml), "bullet lists");
   assert.ok(!/<w:drawing|<pic:pic/.test(xml), "no image");
   const t = docxText(docx);
-  for (const s of ["Karim Benali", "Sfax, Tunisia  |  karim.benali@example.com  |  +216 22 345 678", "Professional Summary", "Professional Experience", "Senior Electrician", "Gulf Build LLC  |  2019 – Present", "Skills", "PLC programming", "Education and Training", "Certifications and Licences", "Languages", "Arabic (Native)", "Electrical Technician with 11 years of verified experience"]) {
+  for (const s of ["Karim Benali", "Sfax, Tunisia  |  karim.benali@example.com  |  +216 22 345 678", "Professional Summary", "Professional Experience", "Senior Electrician", "Gulf Build LLC  |  2019 – Present", "Skills", "PLC programming", "Education and Training", "Certifications and Licences", "Languages", "Arabic (Native)", "Electrical Technician with 10 years of verified experience"]) {
     assert.ok(t.includes(s), `DOCX text lacks "${s}"`);
   }
   assert.ok(t.indexOf("Senior Electrician") < t.indexOf("Electrician\nSfax Industries"));
@@ -412,15 +481,19 @@ async function withApp(fn) {
       const matchId = (await pool.query("INSERT INTO js_matches (candidate_id, job_id, score, employer_support, overseas_accepted) VALUES ($1,$2,80,'unknown',NULL) RETURNING id", [c.id, jobId])).rows[0].id;
       return { jobId, matchId };
     };
-    const prepared = async (c, body = {}, jobOpts) => {
+    const preparedRaw = async (c, body = {}, jobOpts) => {
       const j = await newJob(c, jobOpts);
       const a = await call("POST", "/jobsearch/applications", { token: c.token, body: { matchId: j.matchId } });
       assert.equal(a.status, 201, a.text);
       const p = await call("POST", `/jobsearch/applications/${a.body.application.id}/prepare`, { token: tok.agentA, body });
-      assert.equal(p.status, 200, p.text);
-      return { appId: a.body.application.id, prep: p.body };
+      return { appId: a.body.application.id, res: p };
     };
-    await fn({ pool, call, u, tok, sign, newCandidate, generate, list, staffApprove, authorise, withdraw, readyCv, uploadCv, newJob, prepared });
+    const prepared = async (c, body = {}, jobOpts) => {
+      const x = await preparedRaw(c, body, jobOpts);
+      assert.equal(x.res.status, 200, x.res.text);
+      return { appId: x.appId, prep: x.res.body };
+    };
+    await fn({ pool, call, u, tok, sign, newCandidate, generate, list, staffApprove, authorise, withdraw, readyCv, uploadCv, newJob, prepared, preparedRaw });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await cleanup();
@@ -780,14 +853,22 @@ test("applications: with Canadian CVs only a staff-approved AND candidate-author
     assert.deepEqual(base.notes, []);
 
     await t.generate(c); // V1 draft
-    let r = await used(await t.prepared(c));
-    assert.equal(r.cv_file_id, orig, "a draft is never attached");
-    assert.ok(r.notes.some((n) => n.startsWith("canadian_cv_not_eligible")), "the fallback is noted");
+    // review round 1: once Canadian versions exist but none is eligible, preparation is BLOCKED - the uploaded original is no fallback
+    const notEligible = async (label) => {
+      const x = await t.preparedRaw(c);
+      assert.equal(x.res.status, 409, `${label}: ${x.res.text}`);
+      assert.equal(x.res.body.code, "canadian_cv_not_eligible", label);
+      assert.equal((await t.pool.query("SELECT status FROM js_applications WHERE id=$1", [x.appId])).rows[0].status, "matched", `${label}: nothing prepared`);
+      assert.equal((await t.pool.query("SELECT count(*)::int n FROM js_application_documents WHERE application_id=$1", [x.appId])).rows[0].n, 0);
+    };
+    await notEligible("a draft is never attached");
     assert.equal((await t.staffApprove(c, 1)).status, 200);
-    r = await used(await t.prepared(c));
-    assert.equal(r.cv_file_id, orig, "staff-approved but not authorised: still not attached");
+    await notEligible("staff-approved but not authorised");
+    // an explicitly requested uploaded original is refused as well
+    const explicitOrig = await t.prepared(c, { documents: [{ cvFileId: orig }] });
+    assert.ok(explicitOrig.prep.package.blocked.some((b) => b.reason === "canadian_cv_not_eligible"), JSON.stringify(explicitOrig.prep.package.blocked));
     assert.equal((await t.authorise(c, 1)).status, 200);
-    r = await used(await t.prepared(c));
+    let r = await used(await t.prepared(c));
     assert.equal(r.kind, "canadian");
     assert.equal(r.format, "pdf", "PDF preferred");
     assert.equal(r.version, 1);
@@ -837,15 +918,16 @@ test("applications: with Canadian CVs only a staff-approved AND candidate-author
 
     // the profile changes after authorisation: the generated CV no longer matches the confirmed facts -> not attached
     await t.pool.query("UPDATE js_profiles SET confirmed = jsonb_set(confirmed, '{profession}', '\"Plumber\"') WHERE candidate_id=$1", [d.id]);
-    r = await used(await t.prepared(d));
-    assert.equal(r.kind, "upload");
-    assert.ok(r.notes.some((n) => n.startsWith("canadian_cv_not_eligible")));
+    const stale = await t.preparedRaw(d);
+    assert.equal(stale.res.status, 409, stale.res.text);
+    assert.equal(stale.res.body.code, "canadian_cv_not_eligible");
 
-    // a candidate with Canadian CVs but no eligible one and no uploaded CV: blocked, nothing attached
+    // a candidate with Canadian CVs but no eligible one and no uploaded CV: blocked as well
     const e = await t.newCandidate();
     await t.generate(e);
-    const x = await t.prepared(e);
-    assert.ok(x.prep.package.blocked.some((b) => b.reason === "no_approved_cv"));
+    const x = await t.preparedRaw(e);
+    assert.equal(x.res.status, 409);
+    assert.equal(x.res.body.code, "canadian_cv_not_eligible");
   });
 });
 
@@ -898,10 +980,9 @@ test("withdrawing authorisation blocks use at once and cancels queued applicatio
     const blocked = await t.call("POST", `/jobsearch/applications/${review}/approve`, { token: t.tok.admin, body: { reason: "ok" } });
     assert.equal(blocked.status, 409);
     assert.match(blocked.body.error, /canadian_cv_not_authorised/);
-    const after = await t.prepared(c);
-    assert.equal(after.prep.package.included.find((d) => d.kind === "cv").docType, "cv");
-    assert.equal((await t.pool.query("SELECT kind FROM js_cv_files WHERE id=$1", [after.prep.package.included.find((d) => d.kind === "cv").cvFileId])).rows[0].kind, "upload");
-    assert.ok(after.prep.package.notes.some((n) => n.startsWith("canadian_cv_not_eligible")));
+    const after = await t.preparedRaw(c);
+    assert.equal(after.res.status, 409, "withdrawn: new preparation is blocked, the uploaded CV is not used instead");
+    assert.equal(after.res.body.code, "canadian_cv_not_eligible");
     // idempotent withdrawal; the candidate may authorise the same version again
     assert.equal((await t.withdraw(c, 1)).body.changed, false);
     assert.equal((await t.list(c)).body.versions[0].status, "withdrawn");

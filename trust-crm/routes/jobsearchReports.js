@@ -8,6 +8,7 @@
 //   GET /reports/export?format=pdf|xlsx&period&from&to&groupBy        company numbers as PDF / Excel (staff, same scope as /reports); snapshot kind 'custom'
 //   GET /candidates/:id/activity-report?format&from&to&lang           Canada Job Search Activity Report (staff in scope, or the candidate's own record)
 //   GET /me/activity-report?format&from&to&lang                       the same for the signed-in candidate (own record only)
+//   DELETE /candidates/:id/report-snapshots {reason}                  erase the candidate's snapshots and files (users:write: Admin, SuperAdmin)
 //   GET /reports/snapshots?kind&candidateId&limit                     immutable snapshots the caller may see (staff)
 //   GET /reports/snapshots/:id/download?format=pdf|xlsx               a stored snapshot file (staff, visibility re-checked)
 //   GET /reports/settings, PUT /reports/settings                      report_timezone / report_schedule_enabled (read: staff; write: Admin / SuperAdmin)
@@ -117,6 +118,11 @@ router.get("/me/activity-report", verifyToken, asyncHandler(withRetryAfter(async
   const format = formatOf(q);
   sendReport(res, await reportExport.exportCandidateActivity(req.user, undefined, q), format);
 })));
+
+router.delete("/candidates/:id/report-snapshots", verifyToken, asyncHandler(async (req, res) => {
+  const b = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+  noStore(res).json(await reportExport.eraseCandidateSnapshots(req.user, req.params.id, { reason: b.reason }));
+}));
 
 router.get("/reports/snapshots", verifyToken, asyncHandler(async (req, res) => {
   noStore(res).json(await reportExport.listSnapshots(req.user, plainQuery(req)));

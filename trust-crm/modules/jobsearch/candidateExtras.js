@@ -5,8 +5,8 @@
 // Authorization:
 //   staff     jobsearch:read to read, jobsearch:write AND candidates:write to edit; candidateScopeSql applies (Admin all,
 //             Manager / Receptionist / Agent only candidates assigned to them). HR / Accountant hold no jobsearch permission -> 404.
-//   candidate own record only (js_candidate_accounts). Candidates may edit ONLY city, whatsapp, relocation_ready and
-//             desired_province; work_authorization_status and service_start_date are staff-recorded facts (403 for a candidate).
+//   candidate own record only (js_candidate_accounts). Candidates may edit ONLY city, whatsapp and relocation_ready;
+//             desired_province, work_authorization_status and service_start_date are staff-recorded facts (403 for a candidate).
 // A foreign or unknown candidate answers 404 (never reveals existence). Every update is one transaction with an audit row.
 const { HttpError } = require("./httpError");
 const { assertCandidateAccess } = require("./scope");
@@ -19,7 +19,9 @@ const db = () => require("../../db");
 const PROVINCES = ["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"];
 const WORK_AUTHORIZATION_STATUSES = ["none", "study_permit", "work_permit_open", "work_permit_employer_specific", "pr", "citizen", "unknown"];
 const FIELDS = ["city", "whatsapp", "work_authorization_status", "relocation_ready", "desired_province", "service_start_date"];
-const CANDIDATE_EDITABLE = ["city", "whatsapp", "relocation_ready", "desired_province"];
+// desired_province is staff-only (review round 1): the province feeds the legal jurisdiction of candidate-fee billing, so a candidate must
+// not be able to pick it. The jurisdiction itself is recorded on the contract by staff.
+const CANDIDATE_EDITABLE = ["city", "whatsapp", "relocation_ready"];
 const CITY_MAX = 120;
 const WHATSAPP_RE = /^\+?[0-9 ()-]{6,24}$/;
 

@@ -755,6 +755,12 @@ async function stepReportSnapshots(ctx) {
   for (const e of out.errors) ctx.summary.errors.push({ step: "report_snapshots", message: `report_snapshot_failed:${e.kind}:${e.code}` });
 }
 
+/** Retention purge of old report snapshots (REPORT_SNAPSHOT_RETENTION_DAYS; 0 = keep forever, the default). Idempotent; uses the tick clock. */
+async function stepSnapshotRetention(ctx) {
+  const out = await require("./reportExport").purgeExpiredSnapshots({ now: ctx.now });
+  if (out.enabled) ctx.summary.snapshotsPurged = out.snapshots;
+}
+
 async function step(ctx, name, fn) {
   try {
     // Observability / test hook: deps.onStep(name) runs before each step; returning 'skip' skips it.
@@ -813,6 +819,7 @@ async function tick(now = new Date(), { deps = {} } = {}) {
     await step(ctx, "stale", async (c) => { await queue.reclaimStale({ now: c.now }); });
     await step(ctx, "sweep_drafts", stepSweepDrafts);
     await step(ctx, "report_snapshots", stepReportSnapshots);
+    await step(ctx, "snapshot_retention", stepSnapshotRetention);
     await step(ctx, "prune_state", stepPruneState);
     await recordTick(summary);
     return summary;

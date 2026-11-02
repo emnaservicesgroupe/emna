@@ -5,7 +5,7 @@
 //   GET  /files/:key?u=&exp=&sig=         signed download, re-authorized on every request
 //   GET  /candidates/:id/extras           staff only (scope): reference + Canada profile fields
 //   PATCH /candidates/:id/extras          staff only (jobsearch:write + candidates:write), audited
-//   GET  /me/extras, PATCH /me/extras     candidate, own record; may edit only city, whatsapp, relocation_ready, desired_province
+//   GET  /me/extras, PATCH /me/extras     candidate, own record; may edit only city, whatsapp, relocation_ready
 const express = require("express");
 const multer = require("multer");
 const { verifyToken } = require("../middleware/auth");

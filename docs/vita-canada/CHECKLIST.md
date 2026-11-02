@@ -30,8 +30,7 @@ Legend: **[x]** completed and tested · **[~]** built, with a stated limit · **
 - [~] **Arabic / non-Latin PDF.** The PDF uses a standard Latin font. A name or entry the font cannot draw makes PDF generation refuse with `latin_spelling_needed` (the candidate must supply a
       Latin spelling); the DOCX handles any script. In **reports** the PDF shows `[?]` for such characters and says so; the Excel version keeps the original text. Report disclaimers exist in English,
       French and Arabic in Excel; the **Arabic PDF falls back to English** and says so. — `tests/js-canadian-cv.test.js`, `tests/js-report-export.test.js`.
-- [~] **Mail attachment name.** The e-mail channel names the attachment `CV-<Name>-v<version>.pdf`, not the canonical `<reference>-CV-V<n>.pdf` that staff and candidates see in the console. The bytes and the
-      version are the authorised ones (checked by hash in `tests/canada-e2e.test.js`); only the name differs.
+- [x] **Mail attachment name.** A Canadian CV is e-mailed under its canonical name `<reference>-CV-V<n>[-FR].pdf` (review round 1; uploaded CVs keep `CV-<Name>-v<n>`). — `tests/canada-e2e.test.js`.
 
 ## 3. Reports and exports (migration 027)
 
@@ -48,9 +47,9 @@ Legend: **[x]** completed and tested · **[~]** built, with a stated limit · **
 - [~] **Time zones.** Reports are cut in the report timezone (`REPORT_TIMEZONE`, else `HR_TIMEZONE`, else Africa/Tunis; exact IANA name) and say so in the header; the database keeps UTC. The older CSV exports
       (`/jobsearch/export.csv`) still carry ISO UTC timestamps and name the file with the server's UTC date; they are **not** converted to the report timezone, so a day boundary differs by the UTC offset between
       a CSV export and a report of the same date. Dates in e-mails were not part of this work and were not checked.
-- [~] **Erased candidates.** A deleted candidate is a soft delete: they disappear from lists and scoped downloads, but uploaded CVs, generated Canadian CVs, report files and the insert-only snapshot rows
-      (payload and hash) **remain in storage and in the database**, (the snapshot rows are insert-only by design; generated CV rows are immutable in their identity and content columns). There is **no erasure path** for them yet. A real erasure request (privacy law) needs an audited,
-      Administrator-only procedure that removes the files and anonymises the snapshot payloads while keeping the hashes' audit trail. **Needed before real candidate data is stored.**
+- [~] **Erased candidates.** A deleted candidate is a soft delete. Since review round 1 an Administrator (users:write) can erase the candidate-scoped report snapshots with `DELETE /jobsearch/candidates/:id/report-snapshots {reason}`:
+      rows **and** stored PDF/XLSX files are removed, the audit row keeps the count and the reason, never content (the insert-only trigger accepts a DELETE only inside that service transaction, `vita.snapshot_erasure`).
+      `REPORT_SNAPSHOT_RETENTION_DAYS` (0 = keep forever, default) adds a scheduled retention purge. **Still open:** generated Canadian CV files and uploaded CVs have no erasure path yet. — `tests/js-report-export.test.js`.
 
 ## 4. Employers, contact history, do-not-contact list (migration 028)
 
@@ -97,7 +96,7 @@ Legend: **[x]** completed and tested · **[~]** built, with a stated limit · **
 
 - [x] One end-to-end journey over HTTP on a fresh schema with the sandbox mailbox and the fixture job source, no network (a fence fails the run on any outside request): `tests/canada-e2e.test.js`.
 - [x] Employer, Agency and Candidate tokens and anonymous callers are refused on the new staff routes (spot check in `tests/canada-e2e.test.js`); the all-routes sweep classifies every route and passes (`tests/orgs-route-sweep.test.js`, run from `tests/canada-e2e.test.js`).
-- [x] Migrations 025-030 are additive and idempotent; re-run keeps rows. — `tests/js-candidate-ref.test.js`, `tests/js-canadian-cv.test.js`, `tests/js-report-export.test.js`, `tests/js-employers-suppression.test.js`, `tests/js-classification.test.js`, `tests/fin-contracts-gate.test.js`, `tests/verify-migrations.test.js`.
+- [x] Migrations 025-031 are additive and idempotent; re-run keeps rows. — `tests/js-candidate-ref.test.js`, `tests/js-canadian-cv.test.js`, `tests/js-report-export.test.js`, `tests/js-employers-suppression.test.js`, `tests/js-classification.test.js`, `tests/fin-contracts-gate.test.js`, `tests/verify-migrations.test.js`.
 
 ## 9. Not built, and why
 
@@ -111,5 +110,16 @@ Legend: **[x]** completed and tested · **[~]** built, with a stated limit · **
 | Legal opinions (candidate fees, licensing, immigration advice) | the owner's | The gate records reviews; it decides nothing. |
 | Tokenised candidate link | not built | Candidates sign in with an e-mail code. |
 | Deployment | not done | Nothing of stage 8 (or the earlier stages) runs on a real server. The Hostinger kit is documented in `docs/vita-job-search/SETUP-HOSTINGER*.md` with its own honest status. |
-| Erasure of generated files and snapshots | not built | See section 3. |
+| Erasure of generated CV files / uploaded CVs | not built | Snapshot erasure and retention exist (section 3); CV files do not yet. |
 | Report timezone for the CSV exports | not built | See section 3. |
+
+## 10. Review round 1 (independent stage-8 review)
+
+Fixed, each with a test: (1) classification and match decision are re-checked at approval, queueing, send time (retries included) and by a final check on a fresh connection right before the provider call; staff classifying into a blocked class or rejecting a match cancel the job's / candidate's approved and queued applications (never sent ones). (2) The newest **recorded** legal review decides (view ordered by id; `reviewed_at` is informational). (3) A `prohibited` review in any effective jurisdiction refuses all invoice creation for the candidate (v2 free text, standard lines, legacy) and new payments on candidate-fee invoices. (4) The jurisdiction is recorded on the contract by staff at signing (required for candidate-fee services); candidates can no longer edit `desired_province`; the gate checks the contract jurisdiction, the province and the default. (5) CV sensitive-item filter in English, French and Arabic. (6) Verified years use the conservative bound for year-only dates; singular grammar. (7) Bounce status read only from delivery-status fields; 5.2.2, 5.3.4, 5.4.x, 5.7.x and 4.x.x are not permanent. (8) More opt-out wordings; "do not email us your CV" and "apply through our portal" are not opt-outs; a high-confidence opt-out from the employer's own domain suppresses the domain and opts out every employer row sharing it. (9) Control characters stripped and NFC applied before rendering. (10) Ads excluding foreign applicants classify as work_authorization_required; staff classification needs `jobsearch:approve`, evidence of at least 20 characters and 4 words; matches are re-scored after (re)classification. (11) Snapshot erasure, retention purge, 10/hour per-candidate generation limit, 10-minute dedupe. (12) A contract starting in the future is not active; a signing date cannot be in the future and one older than 60 days needs the signed document. (13) Public suffixes and more free-mail providers cannot be suppressed as a domain; final suppression check right before the provider call. (14) A candidate with Canadian CV versions but none eligible is blocked (409 `canadian_cv_not_eligible`), never given the uploaded original.
+
+Remaining limits:
+- An employer-specific work permit counts as authorised for **every** employer (no per-employer check).
+- Snapshot catch-up for missed schedules is not implemented (a skipped day is not generated later).
+- The public-suffix list for domain suppression is static and short; the structural rule (second-level generic labels, two-letter codes under a two-letter ccTLD) is a best effort.
+- Hard-bounce policy: only 5.x.x outside 5.2.2, 5.3.4, 5.4.x and 5.7.x suppresses an address; those excluded codes only open a staff task.
+- The snapshot dedupe compares the numbers without their generation timestamps (not the stored `payload_sha256`, which includes them).

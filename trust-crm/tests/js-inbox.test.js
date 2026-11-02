@@ -2099,3 +2099,43 @@ test("Task 20: follow-up drafts send through the sandbox with MAIL_FROM unset ou
   assert.ok(out.length >= 1);
   assert.match(out[out.length - 1].headers["Message-ID"], /@test\.invalid>$/);
 });
+
+// ---------------------------------------------------------------- review round 1: bounce parsing and opt-out wording
+
+test("review round 1: bounceStatus reads only delivery-status fields; 5.2.2 / 5.3.4 / 5.4.x / 5.7.x and 4.x.x are never permanent", () => {
+  const m = require("../modules/jobsearch/replyMatcher");
+  const hard = [
+    ["Status: 5.1.1\nDiagnostic-Code: smtp; 550 5.1.1 user unknown", "5.1.1"],
+    ["Reporting-MTA: dns; mx.example\nFinal-Recipient: rfc822; a@b.example\nAction: failed\nStatus: 5.1.2", "5.1.2"],
+    ["Diagnostic-Code: smtp; 550-5.1.1 The email account does not exist\n 550 5.1.1 more", "5.1.1"],
+    ["550 5.1.1 user unknown", "5.1.1"],
+    ["Action: failed", "action_failed"],
+  ];
+  for (const [t, code] of hard) assert.deepEqual(m.bounceStatus(t), { hard: true, code }, t);
+  const soft = [
+    "Status: 5.2.2 mailbox full", "Status: 5.3.4 message too large", "Status: 5.4.4 unable to route", "Status: 5.7.1 rejected as spam", "Action: failed\nStatus: 5.7.1 policy",
+    "Status: 4.4.1 deferred", "Diagnostic-Code: smtp; 452 4.2.2 over quota",
+    // false positives from free text: IP addresses, dates, versions, prices
+    "Delivered via 10.5.1.1 at 5.8.2024. Server version 5.2.3 build 5.1.1x", "Your IP 5.9.1.7 was blocked on 5.12.2025", "Invoice 5.1.1 total", "Please call 5.3.200 before 5.5.5",
+  ];
+  for (const t of soft) assert.equal(m.bounceStatus(t).hard, false, t);
+  assert.equal(m.bounceStatus("Delivered via 10.5.1.1 at 5.8.2024").code, null);
+});
+
+test("review round 1: opt-out misses are caught; 'do not email us your CV' and 'apply through our portal' are not opt-outs", () => {
+  const m = require("../modules/jobsearch/replyMatcher");
+  for (const t of ["Don't send me any more emails.", "Please do not reach out again.", "Kindly remove my email from your list.", "No further emails please.", "Ne m'écrivez plus.",
+    "Je ne souhaite plus être contacté.", "Please stop contacting us.", "لا ترسلوا لي", "أوقفوا المراسلة", "Nous ne souhaitons plus être sollicités."]) {
+    assert.equal(m.classifyReply(t).category, "opt_out", t);
+  }
+  for (const t of ["Please do not email us your CV. Apply through our portal.", "Do not email us your resume or application documents; apply via our website.", "Please don't email us your applications, apply through our careers page.",
+    "Do not send us your documents by email.", "Please apply via our portal.", "Thank you. No further action is required.", "No further communication is needed."]) {
+    assert.notEqual(m.classifyReply(t).category, "opt_out", t);
+  }
+  // bounded: hostile input finishes quickly
+  const t0 = Date.now();
+  m.classifyReply(`${"do not ".repeat(3000)}reach`);
+  m.classifyReply(`${"لا ".repeat(5000)}`);
+  m.bounceStatus(`Diagnostic-Code:${" 5.1".repeat(20000)}`);
+  assert.ok(Date.now() - t0 < 2000);
+});

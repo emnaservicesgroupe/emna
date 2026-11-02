@@ -451,13 +451,20 @@ async function approveApplication({ id, actor, reason }) {
       await audit(client, actor, "application.approve_refused", locked.candidate_id, locked.id, { blockers: outreachBlockers });
       return { blockedBy: outreachBlockers.map((b) => b.code) };
     }
+    // Review round 1: the classification and the match decision are checked again at approval (staff may have changed them since preparation).
+    const reviewBlockers = await require("./guard").reviewBlockers(client, locked.id);
+    if (reviewBlockers.length) {
+      for (const b of reviewBlockers) await timeline(client, locked.id, actor, "approval_blocked", { code: b.code, stage: "approve" });
+      await audit(client, actor, "application.approve_refused", locked.candidate_id, locked.id, { blockers: reviewBlockers });
+      return { blockedBy: reviewBlockers.map((b) => b.code) };
+    }
     const row = await transition(locked.id, "approved", actor, { client, reason: why, detail: { approvedBy: actor.id } });
     await client.query("UPDATE js_application_documents SET approved_by = $2, approved_at = now() WHERE application_id = $1 AND removed_at IS NULL", [locked.id, actor.id]);
     await audit(client, actor, "application.approve", locked.candidate_id, locked.id, { reason: why });
     await event(client, locked.candidate_id, "application.approved", { applicationId: locked.id });
     return row;
   });
-  if (app.blockedBy) throw new HttpError(409, `Cannot approve: ${app.blockedBy.join(", ")} (the employer or recipient is on the do-not-contact list, or the outreach basis is not permitted)`);
+  if (app.blockedBy) throw new HttpError(409, `Cannot approve: ${app.blockedBy.join(", ")} (do-not-contact list, outreach basis, vacancy classification or match decision)`);
   await logAfter(actor, "jobsearch.application.approve", app.id, { reason: why });
   return { application: present(app) };
 }
@@ -710,6 +717,7 @@ async function autoApproveEligibility(application, opts = {}) {
   // Do-not-contact list, employer opt-out and outreach basis (stage 8 task 4): checked here so auto-approval never happens,
   // and again by the guard at send time with its own codes.
   reasons.push(...(await require("./guard").outreachBlockers(c, app.id)).map((b) => b.code));
+  reasons.push(...(await require("./guard").reviewBlockers(c, app.id)).map((b) => b.code));
   const uniq = [...new Set(reasons)];
   return { allowed: uniq.length === 0, reasons: uniq };
 }

@@ -182,6 +182,15 @@ async function relabelJobs(client, jobIds, opts = {}) {
   if (!jobIds.length) return 0;
   // The job classification depends on the same confirmations as the labels: recompute it for every affected job, matched or not.
   await classification.recomputeMany(client, jobIds, { now: opts.now });
+  return rescoreMatches(client, jobIds, opts);
+}
+
+/**
+ * Re-scores the EXISTING matches on the given jobs (score, band, labels, reasons) without touching decisions or creating / deleting
+ * rows. relabelJobs = recompute classification + this; the staff classification path calls it on its own after a (re)classification.
+ */
+async function rescoreMatches(client, jobIds, opts = {}) {
+  if (!jobIds.length) return 0;
   const locked = opts.candidateIds || (await lockForRelabel(client, jobIds));
   if (!locked.length) return 0;
   const rows = (await client.query(
@@ -213,4 +222,9 @@ async function relabelJobs(client, jobIds, opts = {}) {
   return rows.length;
 }
 
-module.exports = { matchCandidate, relabelJobs, lockForRelabel, minScore };
+/** rescoreMatches in its own transaction. */
+async function rescoreMatchesStandalone(jobIds, opts = {}) {
+  return inTx((client) => rescoreMatches(client, jobIds, opts));
+}
+
+module.exports = { rescoreMatchesStandalone, matchCandidate, relabelJobs, rescoreMatches, lockForRelabel, minScore };

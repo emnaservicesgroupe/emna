@@ -34,20 +34,53 @@ const HEADINGS = {
   },
 };
 const SUMMARY_TEMPLATE = {
-  en: ({ profession, years, skills }) => `${profession} with ${years} years of verified experience in ${skills}.`,
-  fr: ({ profession, years, skills }) => `${profession} avec ${years} ans d'expérience vérifiée en ${skills}.`,
+  en: ({ profession, years, skills }) => `${profession} with ${years} ${years === 1 ? "year" : "years"} of verified experience in ${skills}.`,
+  fr: ({ profession, years, skills }) => `${profession} avec ${years} ${years === 1 ? "an" : "ans"} d'expérience vérifiée en ${skills}.`,
 };
 const SUMMARY_SKILLS_MAX = 3;
 /** Section order of the document. */
 const SECTION_IDS = ["summary", "experience", "skills", "education", "certifications", "languages"];
 
-// A list item that itself states one of the never-emitted facts is dropped.
-const SENSITIVE_ITEM_RE = /\b(?:date of birth|birth ?date|d\.?o\.?b|place of birth|born (?:on|in)|marital status|nationality|nationalit[eé]|passport|passeport|national id|identity card|salary|salaire|photo)\b/i;
+// A list item that itself states one of the never-emitted facts is dropped (English, French and Arabic; review round 1). The patterns
+// run on NFC, lower-cased text with Arabic alef variants / diacritics folded. They look for the fact being STATED (a label, a number, a
+// civil-status word), not for words that merely occur in a trade: 'Photo Editor' and 'Single-phase wiring' are kept.
+const L = "(?<![a-zà-ÿ0-9])"; // word start / end that also work next to accented letters (JS \b does not)
+const R = "(?![a-zà-ÿ0-9])";
+const SENSITIVE_ITEM_PATTERNS = [
+  // date / place of birth, age
+  new RegExp(`${L}(?:date of birth|birth ?date|d\\.?o\\.?b|place of birth|born|date de naissance|lieu de naissance|naissance)${R}|${L}n[ée]{1,2}\\s*\\(?e?\\)?\\s+(?:le|a|à|en)\\s+\\S`),
+  new RegExp(`${L}ages?\\s*[:=-]?\\s*(?:de\\s+)?\\d{1,3}${R}|${L}aged\\s+\\d|^\\s*age\\s*$|${L}[âa]ge\\s*:|${L}\\d{1,3}\\s*(?:years?|yrs?)\\s*(?:old|of age)${R}|${L}\\d{1,3}\\s*y\\/o|${L}\\d{1,3}\\s*ans\\s*$`),
+  // civil status
+  new RegExp(`${L}(?:marital|[ée]tat civil|situation familiale|married|unmarried|divorced|divorcée?|widowed|widow|veuf|veuve|c[ée]libataire|separated|mari(?:é|ée|és|ées|é\\(e\\)))${R}|(?:^|[,;:/|(]\\s*)(?:single|spouse|epoux|[ée]pouse)\\s*(?:$|[,;:/|)])`),
+  // nationality / citizenship / passport / identity documents
+  new RegExp(`${L}(?:nationality|nationalit[ée]|citizen|citizens|citizenship|citoyen|citoyens|citoyenne|citoyennet[ée]|ressortissante?|passport|passeport|national id|identity card|carte d'identit[ée]|carte nationale)${R}`),
+  // children, gender, religion
+  new RegExp(`${L}\\d+\\s*(?:children|kids|enfants?)${R}|${L}(?:children|kids|enfants|child|enfant|nombre d'enfants)\\s*[:=]|${L}(?:has|have|with|avec|p[eè]re de|m[eè]re de|parent of|father of|mother of)\\s+(?:\\d+\\s+)?(?:children|kids|enfants?)${R}|${L}(?:no|aucun|sans)\\s+(?:children|enfants?)${R}`),
+  new RegExp(`${L}(?:gender|sexe)${R}|${L}sex\\s*[:=]|^\\s*(?:male|female|homme|femme)\\s*$`),
+  new RegExp(`${L}(?:religion|religious|religieux|religieuse)${R}`),
+  // salary
+  new RegExp(`${L}(?:salary|salaire)${R}`),
+  // photo: only as a label / attachment mention ('Photo:', 'photograph attached', 'photo jointe'); a job title such as 'Photo Editor' stays
+  new RegExp(`${L}photo(?:graph)?s?\\s*[:=]|${L}photo(?:graph)?s?\\s+(?:attached|enclosed|included|jointe|ci-jointe|d'identit[ée]|d'identite)${R}|${L}(?:attached|enclosed|ci-joint)\\s+(?:photo|photograph)${R}`),
+  // Arabic (alef variants folded to ا): date / place of birth, married / single, nationality, passport, children, age, civil status, religion, gender, photo, identity card
+  /تاريخ (?:ال)?ميلاد|مكان (?:ال)?ميلاد|مولود|متزوج|اعزب|عزباء|مطلق|ارمل|الجنسي[هة]|جواز (?:ال)?سفر|اطفال|الاطفال|العمر|الحال[هة] الاجتماعي[هة]|الديان[هة]|الجنس\s*[:：]|صور[هة] شخصي[هة]|بطاق[هة] (?:ال)?هوي[هة]/,
+];
+const foldForSensitive = (s) =>
+  String(s)
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[أإآ]/g, "ا")
+    .replace(/[ً-ْـ]/g, "");
+/** True when the text states one of the never-emitted personal facts (see above). */
+const SENSITIVE_ITEM_RE = { test: (text) => { const f = foldForSensitive(text); return SENSITIVE_ITEM_PATTERNS.some((re) => re.test(f)); } };
 
 const MONTHS = [["jan", 1], ["janv", 1], ["feb", 2], ["fev", 2], ["mar", 3], ["apr", 4], ["avr", 4], ["may", 5], ["mai", 5], ["juin", 6], ["jun", 6], ["juil", 7], ["jul", 7], ["aug", 8], ["aou", 8], ["sep", 9], ["oct", 10], ["nov", 11], ["dec", 12]];
 const PRESENT_RE = /^(?:present|current|now|ongoing|aujourd'hui|aujourd’hui|pr[eé]sent|en cours)$/i;
 
-const str = (v) => (typeof v === "string" ? v.trim() : "");
+// Control characters (C0 except tab / new line, DEL, C1) are removed and text is normalised to NFC: a stray \u0001 would break the DOCX XML
+// and a decomposed 'e' + U+0301 would be refused by the PDF font check although the composed letter is drawable.
+const CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+const str = (v) => (typeof v === "string" ? v.normalize("NFC").replace(CONTROL_RE, "").trim() : "");
 const list = (v) => (Array.isArray(v) ? v : []);
 
 /** Parses a confirmed date string. @returns {{y:number, m:number|null}|{present:true}|null} */
@@ -67,10 +100,13 @@ function parseDate(raw) {
   return null;
 }
 
-/** Month index (y*12 + m-1). `edge` picks the month when only the year is known: start -> January, end -> December. */
+/**
+ * Month index (y*12 + m-1). `edge` picks the month when only the year is known - always the CONSERVATIVE bound, so a year-only range
+ * never overstates the experience: start -> December of the start year, end -> January of the end year.
+ */
 function monthIndex(d, edge, nowIdx) {
   if (d.present) return nowIdx;
-  const mm = d.m || (edge === "start" ? 1 : 12);
+  const mm = d.m || (edge === "start" ? 12 : 1);
   return Math.min(d.y * 12 + (mm - 1), nowIdx);
 }
 
@@ -85,9 +121,10 @@ function verifiedYears(entries, now) {
     if (!s || s.present || !t) return null;
     const a = monthIndex(s, "start", nowIdx);
     const b = monthIndex(t, "end", nowIdx);
-    if (b < a) return null;
+    if (b < a) continue; // a negative span verifies nothing: it counts as 0
     spans.push([a, b + 1]);
   }
+  if (!spans.length) return 0;
   spans.sort((x, y) => x[0] - y[0]);
   let total = 0;
   let [cs, ce] = spans[0];

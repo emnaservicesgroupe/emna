@@ -33,6 +33,25 @@ const TOKEN_RE = new RegExp(`(?<![^${DELIM}])[^${DELIM}]{1,64}@[^${DELIM}]{1,255
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TLD_RE = /^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
 
+// Public suffixes under which unrelated organisations register (a suppression of "co.uk" would silence every UK company). A small static
+// list: it cannot know every registry (documented limit); the structural rule in isPublicSuffix() catches the usual second-level shapes.
+const PUBLIC_SUFFIXES = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "org.nz", "net.nz", "govt.nz",
+  "on.ca", "qc.ca", "bc.ca", "ab.ca", "mb.ca", "nb.ca", "nl.ca", "ns.ca", "nt.ca", "nu.ca", "pe.ca", "sk.ca", "yk.ca", "gc.ca", "gov.ca",
+  "co.za", "org.za", "gov.za", "ac.za", "com.tn", "org.tn", "gov.tn", "net.tn", "edu.tn", "com.fr", "asso.fr", "gouv.fr", "co.in", "org.in", "gov.in", "ac.in", "com.br", "gov.br",
+  "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "com.cn", "org.cn", "gov.cn", "edu.cn", "co.kr", "or.kr", "com.sg", "com.hk", "com.mx", "com.ar", "com.co", "com.eg", "com.sa", "com.ng",
+  "co.ke", "co.il", "co.id", "com.my", "com.ph", "com.pk", "com.tr", "com.ua", "com.ru", "com.pl", "com.dz", "com.ma", "co.ma", "gov.ma", "gov.dz",
+]);
+const GENERIC_SECOND_LEVEL = new Set(["com", "net", "org", "gov", "edu", "co", "ac"]);
+/** True for a public suffix (co.uk, on.ca, com.tn ...): a static list plus the shapes <com|net|org|gov|edu|co|ac>.<tld> and <xx>.<xx> (two-letter code under a two-letter ccTLD). */
+function isPublicSuffix(domain) {
+  const d = String(domain || "").toLowerCase().replace(/\.+$/, "");
+  if (PUBLIC_SUFFIXES.has(d)) return true;
+  const labels = d.split(".");
+  if (labels.length !== 2) return false;
+  return GENERIC_SECOND_LEVEL.has(labels[0]) || (labels[0].length === 2 && labels[1].length === 2);
+}
+
 const db = () => require("../../db");
 const guard = () => require("./guard");
 const posInt = (v) => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : typeof v === "string" && /^\d{1,9}$/.test(v) && Number(v) > 0 ? Number(v) : null);
@@ -145,6 +164,7 @@ function cleanValue(kind, value) {
   const d = cleanHost(s);
   if (!d) throw new HttpError(400, "value is not a valid domain name with at least two labels (such as employer.com)");
   if (guard().isFreeMail(d)) throw new HttpError(400, "a free-mail provider cannot be suppressed as a domain (suppress the single address instead)");
+  if (isPublicSuffix(d)) throw new HttpError(400, "a public suffix (such as co.uk or on.ca) cannot be suppressed as a domain; suppress the organisation's own domain or the single address");
   return d;
 }
 
@@ -223,4 +243,4 @@ async function removeSuppression(client, { id, actor, reason } = {}) {
   return { removed: true, id: sid, employerReleased };
 }
 
-module.exports = { KINDS, SOURCES, extractAddresses, normaliseAddress, domainChain, findSuppression, isSuppressed, addSuppression, removeSuppression, cleanReason };
+module.exports = { isPublicSuffix, PUBLIC_SUFFIXES, KINDS, SOURCES, extractAddresses, normaliseAddress, domainChain, findSuppression, isSuppressed, addSuppression, removeSuppression, cleanReason };

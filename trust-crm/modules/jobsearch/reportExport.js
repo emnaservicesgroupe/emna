@@ -45,12 +45,19 @@ const ratePerHour = () => {
   return Number.isInteger(n) && n > 0 ? n : 30;
 };
 
-const hits = new Map(); // userId -> timestamps
-function rateLimit(userId) {
+// Per-candidate generation limit (review round 1): each activity report is a permanent snapshot row, so one candidate's report can be
+// generated at most this many times per hour by anyone (default 10).
+const candidateRatePerHour = () => {
+  const n = Number(process.env.JOBSEARCH_REPORT_CANDIDATE_RATE_PER_HOUR);
+  return Number.isInteger(n) && n > 0 ? n : 10;
+};
+
+const hits = new Map(); // userId | 'c<candidateId>' -> timestamps
+function rateLimit(userId, limit = ratePerHour()) {
   const now = Date.now();
   const hour = 3600 * 1000;
   const list = (hits.get(userId) || []).filter((t) => now - t < hour);
-  if (list.length >= ratePerHour()) {
+  if (list.length >= limit) {
     hits.set(userId, list);
     const e = new HttpError(429, "Report generation rate limit reached; try again later");
     e.retryAfter = Math.max(1, Math.ceil((hour - (now - list[0])) / 1000));
@@ -464,11 +471,46 @@ async function exportCompanyReport(user, query = {}, { now = new Date() } = {}) 
   return { ...out, filename: (format) => companyFileName(model, format) };
 }
 
+const DEDUPE_MINUTES = 10;
+const volatile = (m) => {
+  const { generatedAt, generatedAtLocal, ...rest } = m || {};
+  return rest;
+};
+
+/**
+ * An identical request within 10 minutes reuses the existing snapshot instead of storing another permanent row: same candidate, same
+ * period, same language and the same numbers (the hash of the payload without its generation timestamps).
+ */
+async function findRecentDuplicate(candidateId, model, now) {
+  const rows = (await db().query(
+    `SELECT * FROM js_report_snapshots WHERE kind = 'candidate_activity' AND scope_candidate_id = $1 AND period_start = $2 AND period_end = $3
+        AND generated_at > $4::timestamptz - make_interval(mins => $5) ORDER BY id DESC LIMIT 20`,
+    [candidateId, model.period.fromInstant, model.period.toInstant, now, DEDUPE_MINUTES]
+  )).rows;
+  const want = payloadHash(volatile(model));
+  for (const r of rows) {
+    const p = r.payload || {};
+    if (p.lang !== model.lang || payloadHash(volatile(p)) !== want) continue;
+    try {
+      return { created: false, deduped: true, id: Number(r.id), kind: r.kind, model: p, pdf: await storage.get(r.pdf_key), xlsx: await storage.get(r.xlsx_key) };
+    } catch {
+      return null; // the stored files are gone: generate afresh
+    }
+  }
+  return null;
+}
+
 /** Activity report of one candidate (staff in scope, or the candidate's own record). One snapshot row, kind 'candidate_activity'. */
 async function exportCandidateActivity(user, candidateId, query = {}, { now = new Date() } = {}) {
   const id = await candidateIdOf(user, candidateId); // 404 before any work
   rateLimit(user.id);
   const model = await buildCandidateActivityReport(user, id, { from: query.from, to: query.to, lang: query.lang, now });
+  const dup = await findRecentDuplicate(id, model, now);
+  if (dup) {
+    await auditJs({ userId: user.id, action: "report.reuse", entity: "js_report_snapshots", entityId: dup.id, candidateId: id, detail: { snapshotId: dup.id, role: user.role } });
+    return { ...dup, filename: (format) => activityFileName(model, format) };
+  }
+  rateLimit(`c${id}`, candidateRatePerHour());
   const out = await persistSnapshot({
     kind: "candidate_activity",
     model,
@@ -478,6 +520,78 @@ async function exportCandidateActivity(user, candidateId, query = {}, { now = ne
     auditExtra: { lang: model.lang, audience: model.audience, role: user.role },
   });
   return { ...out, filename: (format) => activityFileName(model, format) };
+}
+
+// ---------------------------------------------------------------- erasure and retention (review round 1)
+
+const MIN_REASON = 3;
+const MAX_REASON = 500;
+
+/** Removes the stored files of erased snapshot rows unless a remaining row still points at the same key. */
+async function removeFiles(keys) {
+  let removed = 0;
+  let failed = 0;
+  for (const key of [...new Set(keys.filter(Boolean))]) {
+    const still = (await db().query("SELECT 1 FROM js_report_snapshots WHERE pdf_key = $1 OR xlsx_key = $1 LIMIT 1", [key])).rowCount;
+    if (still) continue;
+    try {
+      await storage.delete(key);
+      removed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { removed, failed };
+}
+
+/** DELETE inside a transaction that sets vita.snapshot_erasure (the only way past the insert-only trigger). Files go after the commit. */
+async function eraseWhere(whereSql, params, audit) {
+  const client = await db().connect();
+  let rows;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('vita.snapshot_erasure', 'on', true)");
+    rows = (await client.query(`DELETE FROM js_report_snapshots WHERE ${whereSql} RETURNING id, pdf_key, xlsx_key`, params)).rows;
+    await auditJs({ client, userId: audit.userId, actor: audit.actor, action: audit.action, entity: "js_report_snapshots", entityId: null, candidateId: audit.candidateId || null, detail: { ...audit.detail, snapshots: rows.length } });
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  const files = await removeFiles(rows.flatMap((r) => [r.pdf_key, r.xlsx_key]));
+  return { snapshots: rows.length, files };
+}
+
+/**
+ * DELETE /jobsearch/candidates/:id/report-snapshots {reason}: administrators only (users:write). Deletes the candidate-scoped snapshot rows
+ * and their stored PDF / XLSX files; the audit row carries the count and the reason, never report content. Company-wide snapshots hold
+ * only aggregate numbers and are not touched.
+ */
+async function eraseCandidateSnapshots(user, candidateId, { reason } = {}) {
+  if (!user || !reports.hasPerm(user, "users:write")) throw new HttpError(403, "Access denied");
+  const id = reports.optInt({ id: candidateId }, "id");
+  if (!id) throw new HttpError(404, "Not found");
+  if (typeof reason !== "string" || reason.replace(/\s+/g, " ").trim().length < MIN_REASON) throw new HttpError(400, `reason is required (at least ${MIN_REASON} characters)`);
+  const why = reason.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (why.length > MAX_REASON) throw new HttpError(400, `reason must be at most ${MAX_REASON} characters`);
+  return eraseWhere("scope_candidate_id = $1", [id], { userId: user.id, action: "report.erase_candidate", candidateId: id, detail: { reason: why, scope: "candidate" } });
+}
+
+const retentionDays = () => {
+  const n = Number(process.env.REPORT_SNAPSHOT_RETENTION_DAYS);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+};
+
+/**
+ * Retention purge (scheduler): with REPORT_SNAPSHOT_RETENTION_DAYS > 0, snapshots generated more than that many days before `now` are
+ * deleted with their files. 0 (default) keeps everything forever. Idempotent; `now` is injectable.
+ */
+async function purgeExpiredSnapshots({ now = new Date(), days = retentionDays() } = {}) {
+  if (!(days > 0)) return { enabled: false, snapshots: 0, files: { removed: 0, failed: 0 } };
+  const out = await eraseWhere("generated_at < $1::timestamptz - make_interval(days => $2)", [now, days], { userId: null, actor: SYSTEM_ACTOR, action: "report.retention_purge", detail: { retentionDays: days } });
+  return { enabled: true, ...out };
 }
 
 // ---------------------------------------------------------------- file names (never from request values)
@@ -677,6 +791,8 @@ module.exports = {
   listSnapshots,
   openSnapshot,
   ensureScheduledSnapshots,
+  eraseCandidateSnapshots,
+  purgeExpiredSnapshots,
   previousPeriods,
   getSettings,
   updateSettings,

@@ -11,7 +11,7 @@
 const { HttpError } = require("./httpError");
 const { PERMISSIONS } = require("../../middleware/role");
 const { logAudit } = require("../../utils/audit");
-const { detectEmployerSupport, normalizeAd } = require("./matching/employerSupport");
+const { detectEmployerSupport, detectOverseas, normalizeAd } = require("./matching/employerSupport");
 
 const db = () => require("../../db");
 
@@ -19,6 +19,8 @@ const CLASSES = Object.freeze(["verified_active", "foreign_applicants_stated", "
 const MAX_EVIDENCE = 500;
 const MAX_NOTE = 500;
 const MIN_EVIDENCE = 8; // a fragment shorter than this is not a quote
+const MIN_STAFF_EVIDENCE = 20; // staff evidence for foreign_applicants_stated: at least this many characters ...
+const MIN_STAFF_EVIDENCE_WORDS = 4; // ... and this many words, verbatim in the advertisement
 const MIN_DESCRIPTION = 60; // an ad shorter than this is not treated as a real, verifiable vacancy
 const VERIFIED_WINDOW_DAYS = 14; // a live source must have returned the vacancy within this window
 const UNIT_CAP = 800; // characters of one sentence examined (bounds the regex work)
@@ -126,6 +128,11 @@ function deriveClassification(job, signals) {
   }
   const wa = detectWorkAuthRequired(text);
   if (wa) return { classification: "work_authorization_required", evidence: cap(wa.quote), reason: "ad_requires_authorization" };
+
+  // 2b. The ad excludes applicants from abroad ("we do not consider foreign applicants", "Canadian residents only", "only candidates
+  // currently residing in Canada"): the vacancy needs someone already in Canada with the right to work, never verified_active.
+  const ov = detectOverseas(text);
+  if (ov && ov.accepted === false) return { classification: "work_authorization_required", evidence: ov.evidence ? cap(clean(ov.evidence)) : null, reason: "ad_excludes_foreign_applicants" };
 
   // 3. foreign applicants stated: only with a quote. 'stated_in_ad' must be verifiable in the ad; 'confirmed' carries the staff note.
   const ev = typeof support.evidence === "string" ? clean(support.evidence) : "";
@@ -237,7 +244,8 @@ function optionalText(v, field, max) {
  */
 async function setStaffClassification({ jobId, user, classification, evidence, note }) {
   const perms = (user && PERMISSIONS[user.role]) || [];
-  if (!user || user.role === "Candidate" || !(perms.includes("*") || perms.includes("jobsearch:write"))) throw new HttpError(403, "Permission denied: jobsearch:write");
+  // Review round 1: a classification decides which applications may be sent, so setting or clearing one needs the approval permission.
+  if (!user || user.role === "Candidate" || !(perms.includes("*") || perms.includes("jobsearch:approve"))) throw new HttpError(403, "Permission denied: jobsearch:approve");
   const id = posInt(jobId);
   if (!id) throw new HttpError(404, "Not found");
   if (classification === undefined) throw new HttpError(400, "classification is required (a class, or null to clear)");
@@ -245,6 +253,9 @@ async function setStaffClassification({ jobId, user, classification, evidence, n
   const ev = optionalText(evidence, "evidence", MAX_EVIDENCE);
   const nt = optionalText(note, "note", MAX_NOTE);
   if (classification === "foreign_applicants_stated" && !ev) throw new HttpError(400, "foreign_applicants_stated requires an evidence quote from the advertisement");
+  if (classification === "foreign_applicants_stated" && (ev.length < MIN_STAFF_EVIDENCE || ev.split(" ").filter(Boolean).length < MIN_STAFF_EVIDENCE_WORDS)) {
+    throw new HttpError(400, `foreign_applicants_stated evidence must be a quote of at least ${MIN_STAFF_EVIDENCE} characters and ${MIN_STAFF_EVIDENCE_WORDS} words`);
+  }
   if ((classification === "prospective_no_vacancy" || classification === "closed_unsuitable") && !nt) throw new HttpError(400, `${classification} requires a note`);
   if (classification === null && ev) throw new HttpError(400, "evidence cannot be given when clearing");
 
@@ -277,7 +288,51 @@ async function setStaffClassification({ jobId, user, classification, evidence, n
     client.release();
   }
   await logAudit({ userId: user.id, action: "jobsearch.job.classification", tableName: "js_jobs", recordId: id, newData: { classification: after.classification || null, previous: before.classification || null } });
-  return after;
+  // The job lock is released above on purpose (the guard's job re-check writes this row on its own connection while it holds a
+  // candidate lock; taking candidate locks here while holding the job lock could deadlock with it). The follow-ups run afterwards:
+  // matches of the job are re-scored (decisions untouched) and approved / queued applications the new class forbids are pulled back.
+  await require("./matchService").rescoreMatchesStandalone([id]);
+  const cancelled = await cancelBlockedApplications(id, user, after.classification || null);
+  return cancelled ? { ...after, cancelledApplications: cancelled } : after;
+}
+
+const BLOCKING_WA = Object.freeze(["prospective_no_vacancy", "closed_unsuitable", "work_authorization_required"]);
+
+/**
+ * Approved / queued (never sent) applications of the job that the class `cls` forbids are cancelled through the consent mechanism
+ * (cancelQueuedForCandidate with onlyApplicationIds), one candidate transaction each, with a timeline row per application and an audit
+ * event with the count. work_authorization_required spares candidates whose recorded status shows a permit / PR / citizenship.
+ * @returns {Promise<number>} cancelled applications
+ */
+async function cancelBlockedApplications(jobId, user, cls) {
+  if (!BLOCKING_WA.includes(cls)) return 0;
+  const rows = (await db().query(
+    `SELECT a.id, a.candidate_id FROM js_applications a JOIN candidates c ON c.id = a.candidate_id
+      WHERE a.job_id = $1 AND a.status IN ('approved','queued')
+        AND ($2 <> 'work_authorization_required' OR COALESCE(c.work_authorization_status,'') <> ALL($3::text[]))
+      ORDER BY a.candidate_id, a.id`,
+    [jobId, cls, ["work_permit_open", "work_permit_employer_specific", "pr", "citizen"]]
+  )).rows;
+  const byCandidate = new Map();
+  for (const r of rows) byCandidate.set(r.candidate_id, [...(byCandidate.get(r.candidate_id) || []), r.id]);
+  const consentService = require("./consentService");
+  let total = 0;
+  for (const [cid, ids] of byCandidate) {
+    const client = await db().connect();
+    try {
+      await client.query("BEGIN");
+      const n = await consentService.cancelQueuedForCandidate(cid, `job_classified_${cls}`, client, { includeReady: false, actor: `staff:${user.id}`, onlyApplicationIds: ids });
+      if (n) await client.query("INSERT INTO js_audit_events (actor, action, candidate_id, detail) VALUES ($1,'job.classification_cancel_applications',$2,$3::jsonb)", [`user:${user.id}`, cid, JSON.stringify({ jobId, classification: cls, cancelled: n })]);
+      await client.query("COMMIT");
+      total += n;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+  return total;
 }
 
 module.exports = {

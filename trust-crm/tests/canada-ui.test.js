@@ -415,7 +415,7 @@ test("profile patch: only changed values, normalised, candidate limited to four 
   const base = { city: "Tunis", whatsapp: "+21620111222", work_authorization_status: "none", relocation_ready: null, desired_province: null, service_start_date: null };
   const form = { city: " Sfax  City ", whatsapp: "+216 20 111 222", relocation_ready: "true", desired_province: "on", work_authorization_status: "study_permit", service_start_date: "2026-11-15" };
   assert.deepEqual(U.profilePatch(form, base), { ok: true, patch: { city: "Sfax City", relocation_ready: true, desired_province: "ON", work_authorization_status: "study_permit", service_start_date: "2026-11-15" } });
-  assert.deepEqual(U.profilePatch(form, base, { candidate: true }), { ok: true, patch: { city: "Sfax City", relocation_ready: true, desired_province: "ON" } }, "a candidate never sends work authorization or the start date");
+  assert.deepEqual(U.profilePatch(form, base, { candidate: true }), { ok: true, patch: { city: "Sfax City", relocation_ready: true } }, "a candidate never sends the province, work authorization or the start date");
   assert.deepEqual(U.profilePatch({ city: "Tunis", whatsapp: "+216 20 111 222", relocation_ready: "", desired_province: "", work_authorization_status: "none", service_start_date: "" }, base), { ok: false, error: "nothing" });
   assert.deepEqual(U.profilePatch({ ...form, city: "x".repeat(121) }, base), { ok: false, error: "city" });
   assert.deepEqual(U.profilePatch({ ...form, whatsapp: "call me" }, base), { ok: false, error: "whatsapp" });
@@ -546,6 +546,8 @@ test("legal review + contract payloads: required fields, dates, no future review
   assert.deepEqual(U.contractCreatePayload({ candidate_id: 5, service_id: 2, start_date: "2026-11-01", end_date: "2026-10-01" }), { ok: false, error: "date_order" });
   assert.deepEqual(U.contractSignPayload({ signed_by_name: "  " }), { ok: false, error: "signed_by_name" });
   assert.deepEqual(U.contractSignPayload({ signed_by_name: "Karim Benali" }), { ok: true, payload: { signed_by_name: "Karim Benali" } });
+  assert.deepEqual(U.contractSignPayload({ signed_by_name: "Karim Benali", jurisdiction: " ca-qc " }), { ok: true, payload: { signed_by_name: "Karim Benali", jurisdiction: "CA-QC" } });
+  assert.deepEqual(U.contractSignPayload({ signed_by_name: "Karim Benali", jurisdiction: "Quebec" }), { ok: false, error: "jurisdiction" });
 });
 
 test("outreach blockers: only the three stage-8 codes are picked out of a package or auto-approval list", () => {

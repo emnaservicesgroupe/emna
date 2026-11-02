@@ -23,6 +23,7 @@ const submitter = require("./submitter");
 const matcher = require("./replyMatcher");
 const draftService = require("./draftService");
 const suppression = require("./suppression");
+const guard = require("./guard");
 const S = require("./inboxShared");
 
 const { httpErr, oneLine } = S;
@@ -245,10 +246,27 @@ async function handleOptOut(client, { app, row, res, responsible, cls }) {
     out.created = added.created;
   }
   if (employerId) {
-    const emp = (await client.query("SELECT status FROM js_employers WHERE id = $1 FOR UPDATE", [employerId])).rows[0];
+    const emp = (await client.query("SELECT status, domain FROM js_employers WHERE id = $1 FOR UPDATE", [employerId])).rows[0];
     if (emp && !["opted_out", "blocked"].includes(emp.status)) {
       await client.query("UPDATE js_employers SET status = 'opted_out' WHERE id = $1", [employerId]);
       await S.auditEvent(client, SYSTEM_ACTOR, "employer.opt_out", app.candidate_id, app.id, { employerId, from: emp.status, messageId: row.id, suppressionId: out.suppressionId });
+    }
+    // Scope (review round 1): when the sender writes from the employer's own verified domain (not a free-mail or public-suffix domain), the
+    // whole domain opts out - a domain suppression, and every employer row that shares the domain becomes opted_out. A reply from any other
+    // domain (or an address-only match) stays a single-address opt-out.
+    const empDomain = emp && emp.domain ? guard.normalizeDomain(emp.domain) : null;
+    if (norm && empDomain && empDomain === norm.domain && !guard.isFreeMail(empDomain) && !suppression.isPublicSuffix(empDomain)) {
+      const dom = await suppression.addSuppression(client, {
+        kind: "domain", value: empDomain, reason: `Opt-out request received by e-mail from the employer's domain (message #${row.id})`, source: "reply_opt_out",
+        employerId, messageId: row.id, actorLabel: SYSTEM_ACTOR, candidateId: app.candidate_id, applicationId: app.id,
+      });
+      out.domainSuppressionId = dom.row.id;
+      const sharing = (await client.query("SELECT id, status, domain FROM js_employers WHERE domain IS NOT NULL AND lower(domain) LIKE $1 ORDER BY id FOR UPDATE", [`%${empDomain}%`])).rows
+        .filter((e) => guard.normalizeDomain(e.domain) === empDomain && !["opted_out", "blocked"].includes(e.status));
+      for (const e of sharing) {
+        await client.query("UPDATE js_employers SET status = 'opted_out' WHERE id = $1", [e.id]);
+        await S.auditEvent(client, SYSTEM_ACTOR, "employer.opt_out", app.candidate_id, app.id, { employerId: e.id, from: e.status, messageId: row.id, domain: empDomain, scope: "domain" });
+      }
     }
   }
   const task = (await client.query(
@@ -292,7 +310,7 @@ async function ingestBounce(client, m, cls, auth) {
   await S.auditEvent(client, SYSTEM_ACTOR, "submission.bounce_reported", app.candidate_id, app.id, { submissionId: sub.id, messageId: row.id, code: st.code, submissionStatus: sub.status, taskId });
   // A permanent failure (5.x.x / Action: failed) of the address we sent to: never send to it again until an administrator lifts it.
   // Soft bounces (4.x.x) never suppress. The employer status is NOT changed (a dead mailbox is not an opt-out).
-  if (sub.recipient && /^(?:5\.\d{1,3}\.\d{1,3}|action_failed)$/.test(st.code || "")) {
+  if (sub.recipient && st.hard) {
     const norm = suppression.normaliseAddress(sub.recipient);
     if (norm) {
       const employerId = (await client.query("SELECT employer_id FROM js_jobs WHERE id = (SELECT job_id FROM js_applications WHERE id = $1)", [app.id])).rows[0]?.employer_id || null;

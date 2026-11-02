@@ -223,8 +223,8 @@
 
   // ---------------------------------------------------------------- Canada profile (candidate extras)
   /**
-   * Form values -> PATCH body containing only what changed against `base` (the GET extras). Candidates may change only city, whatsapp,
-   * relocation_ready and desired_province (opts.candidate); staff may also change work authorization and the service start date.
+   * Form values -> PATCH body containing only what changed against `base` (the GET extras). Candidates may change only city, whatsapp and
+   * relocation_ready (opts.candidate); staff may also change the province, work authorization and the service start date.
    */
   function profilePatch(form, base, opts) {
     var f = form || {};
@@ -251,11 +251,11 @@
     var relBase = b.relocation_ready === true || b.relocation_ready === false ? b.relocation_ready : null;
     if (relNew !== relBase) patch.relocation_ready = relNew;
 
-    var prov = trimmed(f.desired_province).toUpperCase();
-    if (prov && !inList(PROVINCES, prov)) return { ok: false, error: "desired_province" };
-    if ((prov || null) !== (b.desired_province || null)) patch.desired_province = prov || null;
-
     if (!candidateOnly) {
+      // The province decides the legal jurisdiction of candidate-fee billing: staff only (the API refuses it from a candidate).
+      var prov = trimmed(f.desired_province).toUpperCase();
+      if (prov && !inList(PROVINCES, prov)) return { ok: false, error: "desired_province" };
+      if ((prov || null) !== (b.desired_province || null)) patch.desired_province = prov || null;
       var wk = trimmed(f.work_authorization_status);
       if (wk && !inList(WORK_AUTH, wk)) return { ok: false, error: "work_authorization_status" };
       if ((wk || null) !== (b.work_authorization_status || null)) patch.work_authorization_status = wk || null;
@@ -470,7 +470,14 @@
   function contractSignPayload(f) {
     var name = trimmed(f && f.signed_by_name);
     if (!name || name.length > 200) return { ok: false, error: "signed_by_name" };
-    return { ok: true, payload: { signed_by_name: name } };
+    var payload = { signed_by_name: name };
+    // The jurisdiction (CA-ON, CA-QC, TN) whose legal review covers this contract: recorded by staff, required for candidate-fee services.
+    var jur = trimmed(f && f.jurisdiction).toUpperCase();
+    if (jur) {
+      if (!JURISDICTION_RE.test(jur)) return { ok: false, error: "jurisdiction" };
+      payload.jurisdiction = jur;
+    }
+    return { ok: true, payload: payload };
   }
 
   /** Report settings dialog (administrator): timezone name or null, schedule flag. */

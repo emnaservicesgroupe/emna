@@ -17,6 +17,7 @@ process.env.MAIL_PROVIDER = "sandbox";
 process.env.MAIL_FROM = "applications@vita.test.invalid";
 process.env.JOBSEARCH_EXPORT_RATE_PER_HOUR = "1000";
 process.env.JOBSEARCH_REPORT_RATE_PER_HOUR = "100000";
+process.env.JOBSEARCH_REPORT_CANDIDATE_RATE_PER_HOUR = "100000";
 for (const k of ["CLAMAV_HOST", "MAIL_REAL_SEND", "HR_TIMEZONE", "REPORT_TIMEZONE", "REPORT_SCHEDULE_ENABLED", "FIN_COMPANY_NAME", "FIN_COMPANY_ADDRESS", "SITE_NAME", "SITE_EMAIL", "SITE_PHONE", "JOBSEARCH_REPORT_MAX_ROWS"]) delete process.env[k];
 
 const reportExport = require("../modules/jobsearch/reportExport");
@@ -24,6 +25,7 @@ const scheduler = require("../modules/jobsearch/scheduler");
 const storage = require("../modules/jobsearch/storage");
 const { stableStringify } = require("../modules/jobsearch/cvGenerator");
 const { METRIC_LABELS } = require("../modules/jobsearch/reportRender");
+const SQL031 = fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "031_canada_review_fixes.sql"), "utf8");
 const SQL027 = fs.readFileSync(path.join(__dirname, "..", "sql", "migrations", "027_report_exports.sql"), "utf8");
 
 let pool;
@@ -255,6 +257,7 @@ async function extraFixtures() {
 test("migration 027: idempotent, insert-only, constrained", async () => {
   await q(SQL027);
   await q(SQL027);
+  await q(SQL031); // the real migration order: 031 re-creates the erasure-aware trigger that 027 installs
   const ins = (kind, scope, extra = "") =>
     q(`INSERT INTO js_report_snapshots (kind, scope_candidate_id, period_start, period_end, timezone, payload, payload_sha256) VALUES ($1,$2,'2030-01-01','2030-01-02','UTC','{}'::jsonb,$3) ${extra}`, [kind, scope, "a".repeat(64)]);
   await assert.rejects(() => ins("weekly2", null), /js_report_snapshots_kind_check/);
@@ -944,4 +947,98 @@ test("scheduler: a failure is recorded by kind and code only, other kinds still 
   } finally {
     await setSettings(tk.admin, { report_schedule_enabled: false });
   }
+});
+
+// ---------------------------------------------------------------- review round 1: dedupe, per-candidate limit, erasure, retention
+
+const fsx = require("fs");
+const keyExists = async (key) => storage.get(key).then(() => true, () => false);
+
+test("review round 1: an identical candidate report within 10 minutes reuses the snapshot; a different language or period makes a new one; the per-candidate limit is 10/hour", async () => {
+  const before = Number((await one("SELECT count(*)::int n FROM js_report_snapshots WHERE scope_candidate_id=$1", [s.cand.A])).n);
+  const a = await activity(tk.X, s.cand.A, { format: "xlsx", from: "2026-02-01", to: "2026-02-28" });
+  const b = await activity(tk.X, s.cand.A, { format: "xlsx", from: "2026-02-01", to: "2026-02-28" });
+  assert.equal(a.status, 200);
+  assert.equal(b.headers.get("x-report-snapshot"), a.headers.get("x-report-snapshot"), "the existing snapshot is returned");
+  assert.deepEqual(b.buf, a.buf);
+  assert.equal(Number((await one("SELECT count(*)::int n FROM js_report_snapshots WHERE scope_candidate_id=$1", [s.cand.A])).n), before + 1);
+  const fr = await activity(tk.X, s.cand.A, { format: "xlsx", from: "2026-02-01", to: "2026-02-28", lang: "fr" });
+  assert.notEqual(fr.headers.get("x-report-snapshot"), a.headers.get("x-report-snapshot"));
+  const other = await activity(tk.X, s.cand.A, { format: "xlsx", from: "2026-01-01", to: "2026-01-31" });
+  assert.notEqual(other.headers.get("x-report-snapshot"), a.headers.get("x-report-snapshot"));
+  // older than 10 minutes: a new snapshot
+  const direct = await reportExport.exportCandidateActivity({ id: s.users.X, role: "Manager" }, s.cand.A, { from: "2026-02-01", to: "2026-02-28" }, { now: new Date(Date.now() + 11 * 60 * 1000) });
+  assert.notEqual(direct.id, Number(a.headers.get("x-report-snapshot")));
+
+  // per-candidate limit (default 10 per hour, whoever asks)
+  process.env.JOBSEARCH_REPORT_CANDIDATE_RATE_PER_HOUR = "3";
+  reportExport._resetRateLimit();
+  try {
+    const days = ["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"];
+    const codes = [];
+    for (const d of days) codes.push((await activity(tk.admin, s.cand.A, { format: "xlsx", from: d, to: d })).status);
+    assert.deepEqual(codes, [200, 200, 200, 429]);
+  } finally {
+    process.env.JOBSEARCH_REPORT_CANDIDATE_RATE_PER_HOUR = "100000";
+    reportExport._resetRateLimit();
+  }
+});
+
+test("review round 1: erasure deletes the candidate's snapshot rows AND files, admin only, audited with a count and no content; others untouched", async () => {
+  const a = await activity(tk.admin, s.cand.A, { format: "pdf", from: "2025-06-01", to: "2025-06-30" });
+  const b = await activity(tk.admin, s.cand.B, { format: "pdf", from: "2025-06-01", to: "2025-06-30" });
+  const company = await exportCompany(tk.admin, { format: "xlsx", from: "2025-06-01", to: "2025-06-30" });
+  const rowsA = (await q("SELECT id, pdf_key, xlsx_key FROM js_report_snapshots WHERE scope_candidate_id=$1", [s.cand.A])).rows;
+  assert.ok(rowsA.length >= 1);
+  for (const r of rowsA) assert.ok((await keyExists(r.pdf_key)) && (await keyExists(r.xlsx_key)));
+  const url = `/jobsearch/candidates/${s.cand.A}/report-snapshots`;
+  for (const t of [tk.X, tk.Y, tk.accountant, tk.hr, tk.receptionist, tk.candA, null]) assert.ok([401, 403].includes((await raw(url, t, { method: "DELETE", body: { reason: "erasure request" } })).status));
+  assert.equal((await raw(url, tk.admin, { method: "DELETE", body: {} })).status, 400, "reason required");
+  assert.equal((await raw(url, tk.admin, { method: "DELETE", body: { reason: "x" } })).status, 400);
+  assert.equal(Number((await one("SELECT count(*)::int n FROM js_report_snapshots WHERE scope_candidate_id=$1", [s.cand.A])).n), rowsA.length, "refused calls delete nothing");
+  const del = await raw(url, tk.admin, { method: "DELETE", body: { reason: "candidate asked for erasure (GDPR request 42)" } });
+  assert.equal(del.status, 200, JSON.stringify(del.json));
+  assert.equal(del.json.snapshots, rowsA.length);
+  assert.equal((await q("SELECT 1 FROM js_report_snapshots WHERE scope_candidate_id=$1", [s.cand.A])).rowCount, 0);
+  for (const r of rowsA) assert.ok(!(await keyExists(r.pdf_key)) && !(await keyExists(r.xlsx_key)), "files are gone");
+  assert.ok(await one("SELECT id FROM js_report_snapshots WHERE id=$1", [b.headers.get("x-report-snapshot")]), "another candidate's snapshot stays");
+  assert.ok(await one("SELECT id FROM js_report_snapshots WHERE id=$1", [company.headers.get("x-report-snapshot")]), "company snapshots stay");
+  const au = (await q("SELECT detail FROM js_audit_events WHERE action='report.erase_candidate' AND candidate_id=$1", [s.cand.A])).rows;
+  assert.equal(au.length, 1);
+  assert.equal(au[0].detail.snapshots, rowsA.length);
+  assert.ok(!JSON.stringify(au[0].detail).includes("payload") && !/applicationsSent/.test(JSON.stringify(au[0].detail)));
+  // the trigger still protects every other path: no UPDATE, and DELETE only with the erasure setting
+  await assert.rejects(q("DELETE FROM js_report_snapshots WHERE id=$1", [b.headers.get("x-report-snapshot")]), /insert-only/);
+  await assert.rejects(q("UPDATE js_report_snapshots SET kind='custom' WHERE id=$1", [b.headers.get("x-report-snapshot")]), /insert-only/);
+  void a;
+});
+
+test("review round 1: the retention purge is off by default, deletes only expired snapshots and files, and is idempotent with an injectable clock", async () => {
+  const id = (await one("INSERT INTO js_report_snapshots (kind, scope_candidate_id, period_start, period_end, timezone, generated_at, payload, payload_sha256) VALUES ('candidate_activity',$1,'2020-01-01','2020-01-31','UTC','2020-02-01T00:00:00Z','{}'::jsonb,$2) RETURNING id", [s.cand.A, "0".repeat(64)])).id;
+  const fresh = await activity(tk.admin, s.cand.B, { format: "xlsx", from: "2025-07-01", to: "2025-07-31" });
+  const freshId = fresh.headers.get("x-report-snapshot");
+  delete process.env.REPORT_SNAPSHOT_RETENTION_DAYS;
+  assert.equal((await reportExport.purgeExpiredSnapshots({ now: new Date() })).enabled, false);
+  assert.ok(await one("SELECT id FROM js_report_snapshots WHERE id=$1", [id]), "0 = keep forever");
+  process.env.REPORT_SNAPSHOT_RETENTION_DAYS = "365";
+  try {
+    const out = await reportExport.purgeExpiredSnapshots({ now: new Date("2026-11-01T00:00:00Z") });
+    assert.equal(out.enabled, true);
+    assert.ok(out.snapshots >= 1);
+    assert.equal((await q("SELECT 1 FROM js_report_snapshots WHERE id=$1", [id])).rowCount, 0);
+    assert.ok(await one("SELECT id FROM js_report_snapshots WHERE id=$1", [freshId]), "recent snapshots stay");
+    assert.equal((await reportExport.purgeExpiredSnapshots({ now: new Date("2026-11-01T00:00:00Z") })).snapshots, 0, "idempotent");
+    // the scheduler runs it with the tick clock
+    await q("INSERT INTO js_report_snapshots (kind, scope_candidate_id, period_start, period_end, timezone, generated_at, payload, payload_sha256) VALUES ('candidate_activity',$1,'2019-01-01','2019-01-31','UTC','2019-02-01T00:00:00Z','{}'::jsonb,$2)", [s.cand.A, "1".repeat(64)]);
+    const tick = await scheduler.tick(new Date("2026-11-01T00:00:00Z"));
+    assert.equal(tick.snapshotsPurged, 1, JSON.stringify(tick));
+  } finally {
+    delete process.env.REPORT_SNAPSHOT_RETENTION_DAYS;
+  }
+});
+
+test("migration 031: the snapshot trigger is idempotent to re-create", async () => {
+  const sql = fsx.readFileSync(path.join(__dirname, "..", "sql", "migrations", "031_canada_review_fixes.sql"), "utf8");
+  await q(sql);
+  await q(sql);
 });

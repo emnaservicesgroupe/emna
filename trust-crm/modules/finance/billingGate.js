@@ -1,13 +1,20 @@
 // The billing gate for candidate fees: ONE place that decides whether a candidate may be invoiced for (or pay against) a service of
 // kind 'candidate_fee'. Used by createInvoice (v2), the legacy POST /finance/invoices, the payment path and GET /finance/billing-status.
 //
+// Jurisdictions (review round 1). The legal jurisdiction is NOT chosen by the candidate: staff record it on the contract when it is signed
+// (fin_service_contracts.jurisdiction). The gate looks at EVERY effective jurisdiction of the candidate = { the jurisdiction of each ACTIVE
+// candidate-fee contract, 'CA-' + desired_province, FIN_DEFAULT_JURISDICTION when the province is empty }. The latest review (recording
+// order: the review recorded last decides, whatever date it carries) of ANY of them being 'prohibited' => 409 candidate_fee_prohibited
+// for ALL invoice creation for that candidate (any line kind, legacy route too) and for new payments on candidate-fee invoices.
+//
 // A candidate_fee line is billable only when ALL hold:
-//   (a) legal review: the candidate's jurisdiction ('CA-' + desired_province, else FIN_DEFAULT_JURISDICTION) has a latest review for
-//       service_kind 'candidate_fee' whose status is 'approved' and whose valid_until is empty or today (UTC) or later;
-//       'prohibited' => 409 candidate_fee_prohibited; none / pending / expired => 409 legal_review_required;
+//   (a) legal review: the CONTRACT's jurisdiction (an old contract without one falls back to 'CA-' + desired_province, else
+//       FIN_DEFAULT_JURISDICTION) has a latest review for service_kind 'candidate_fee' whose status is 'approved' and whose valid_until is
+//       empty or today (UTC) or later; 'prohibited' => 409 candidate_fee_prohibited; none / pending / expired => 409 legal_review_required;
 //       no jurisdiction at all => 409 jurisdiction_unknown;
-//   (b) contract: the candidate has an ACTIVE contract for that very service with agreement_signed_at set (not draft / ended /
-//       cancelled; an end_date in the past also ends it) => otherwise 409 service_contract_required.
+//   (b) contract: the candidate has an ACTIVE contract for that very service with agreement_signed_at set, already started (start_date
+//       today or earlier) and not ended (not draft / ended / cancelled; an end_date in the past also ends it) => otherwise
+//       409 service_contract_required.
 // The platform RECORDS legal reviews; messages here state the missing record only and are not legal advice. Employer-funded
 // arrangements and services of kind 'standard' are never touched.
 const { HttpError } = require("../jobsearch/httpError");
@@ -38,7 +45,7 @@ async function jurisdictionFor(client, candidateId) {
   return defaultJurisdiction();
 }
 
-/** The latest review (reviewed_at, then id) for a jurisdiction and kind; null when none was ever recorded. */
+/** The latest RECORDED review (highest id) for a jurisdiction and kind; null when none was ever recorded. reviewed_at is informational. */
 async function latestFor(jurisdiction, kind = KIND, client = null) {
   const q = "SELECT id, jurisdiction, service_kind, status, reviewer_name, reviewer_role, to_char(reviewed_at,'YYYY-MM-DD') AS reviewed_at, to_char(valid_until,'YYYY-MM-DD') AS valid_until, note, evidence_key, recorded_by, created_at FROM fin_legal_reviews_latest WHERE jurisdiction = $1 AND service_kind = $2";
   const r = client ? await client.query(q, [jurisdiction, kind]) : await require("../../db").query(q, [jurisdiction, kind]);
@@ -65,12 +72,13 @@ function fail(code) {
   return new HttpError(409, MESSAGES[code], code);
 }
 
-/** Active, signed, not-yet-ended contracts of the candidate for candidate_fee services (rows locked FOR SHARE when `lock`). */
+/** Active, signed, started, not-yet-ended contracts of the candidate for candidate_fee services (rows locked FOR SHARE when `lock`). */
 async function activeFeeContracts(client, candidateId, today, { lock = false, serviceId = null } = {}) {
   const r = await client.query(
-    `SELECT k.id, k.service_id, k.status, k.agreement_signed_at, to_char(k.start_date,'YYYY-MM-DD') AS start_date, to_char(k.end_date,'YYYY-MM-DD') AS end_date
+    `SELECT k.id, k.service_id, k.status, k.agreement_signed_at, k.jurisdiction, to_char(k.start_date,'YYYY-MM-DD') AS start_date, to_char(k.end_date,'YYYY-MM-DD') AS end_date
        FROM fin_service_contracts k JOIN fin_services s ON s.id = k.service_id
       WHERE k.candidate_id = $1 AND s.kind = '${KIND}' AND k.status = 'active' AND k.agreement_signed_at IS NOT NULL
+        AND (k.start_date IS NULL OR k.start_date <= $2::date)
         AND (k.end_date IS NULL OR k.end_date >= $2::date) AND ($3::bigint IS NULL OR k.service_id = $3)
       ORDER BY k.id${lock ? " FOR SHARE OF k" : ""}`,
     [candidateId, today, serviceId]
@@ -79,8 +87,30 @@ async function activeFeeContracts(client, candidateId, today, { lock = false, se
 }
 
 /**
- * Throws a 409 (with a stable `code`) when the invoice items would bill a candidate_fee service without a passing gate.
- * Call it inside the invoice transaction, after the candidate row is locked. `items` are {serviceId|service_id|null}.
+ * Every jurisdiction that can decide this candidate's candidate-fee billing: the jurisdiction of each active candidate-fee contract,
+ * 'CA-' + desired_province, and FIN_DEFAULT_JURISDICTION when the province is empty. Sorted, de-duplicated.
+ */
+async function effectiveJurisdictions(client, candidateId, today) {
+  const out = new Set();
+  const own = await jurisdictionFor(client, candidateId);
+  if (own) out.add(own);
+  for (const k of await activeFeeContracts(client, candidateId, today)) if (k.jurisdiction) out.add(k.jurisdiction);
+  return [...out].sort();
+}
+
+/** Throws candidate_fee_prohibited when the latest review of ANY effective jurisdiction of the candidate is 'prohibited'. */
+async function assertNotProhibited(client, candidateId, today) {
+  for (const j of await effectiveJurisdictions(client, candidateId, today)) {
+    const review = await latestFor(j, KIND, client);
+    if (review && review.status === "prohibited") throw fail("candidate_fee_prohibited");
+  }
+}
+
+/**
+ * Throws a 409 (with a stable `code`) when the invoice would be created against the rules above. A 'prohibited' review in any effective
+ * jurisdiction refuses EVERY invoice of the candidate (free-text and standard lines included); candidate_fee lines additionally need
+ * the contract and an approved review of the contract's jurisdiction. Call it inside the invoice transaction, after the candidate row
+ * is locked. `items` are {serviceId|service_id|null}.
  * @returns {{checked: boolean}} checked=false when no candidate_fee service is involved
  */
 async function assertBillable(client, { candidateId, serviceIds, items }, opts = {}) {
@@ -97,6 +127,8 @@ async function assertBillable(client, { candidateId, serviceIds, items }, opts =
     ? (await client.query(`SELECT id FROM fin_services WHERE id = ANY($1::bigint[]) AND kind = '${KIND}'`, [[...ids]])).rows.map((r) => String(r.id))
     : [];
 
+  await assertNotProhibited(client, candidateId, today);
+
   if (!feeServices.length) {
     // A free-text line cannot be told apart from a package fee. For a candidate that holds an active candidate-fee contract it is
     // refused: such billing must go through the catalogue, where the gate applies.
@@ -104,52 +136,49 @@ async function assertBillable(client, { candidateId, serviceIds, items }, opts =
     return { checked: false };
   }
 
-  const jurisdiction = await jurisdictionFor(client, candidateId);
-  if (!jurisdiction) throw fail("jurisdiction_unknown");
-  const problem = reviewProblem(await latestFor(jurisdiction, KIND, client), today);
-  if (problem) throw fail(problem);
-
   for (const sid of feeServices) {
     const rows = await activeFeeContracts(client, candidateId, today, { lock: true, serviceId: sid });
-    if (!rows.length) throw fail("service_contract_required");
+    const contract = rows[0] || null;
+    // The jurisdiction recorded on the CONTRACT decides; only a contract signed before migration 031 falls back to the province.
+    const jurisdiction = (contract && contract.jurisdiction) || (await jurisdictionFor(client, candidateId));
+    if (!jurisdiction) throw fail("jurisdiction_unknown");
+    const problem = reviewProblem(await latestFor(jurisdiction, KIND, client), today);
+    if (problem) throw fail(problem);
+    if (!contract) throw fail("service_contract_required");
   }
   return { checked: true };
 }
 
 /**
  * Legacy POST /finance/invoices has no items: it creates a plain invoice. It is refused when the candidate has an ACTIVE
- * candidate-fee contract (bill through the catalogue) or when their jurisdiction's latest review is 'prohibited'. Otherwise it behaves as before.
+ * candidate-fee contract (bill through the catalogue) or when any effective jurisdiction's latest review is 'prohibited'. Otherwise it behaves as before.
  */
 async function assertLegacyInvoiceAllowed(client, { candidateId }, opts = {}) {
   const today = todayUtc(opts.now);
   if ((await activeFeeContracts(client, candidateId, today)).length) throw fail("candidate_fee_use_catalogue");
-  const jurisdiction = await jurisdictionFor(client, candidateId);
-  if (jurisdiction) {
-    const review = await latestFor(jurisdiction, KIND, client);
-    if (review && review.status === "prohibited") throw fail("candidate_fee_prohibited");
-  }
+  await assertNotProhibited(client, candidateId, today);
 }
 
 /**
- * A NEW payment on an invoice that bills a candidate_fee service is refused once the candidate's jurisdiction review is 'prohibited'.
+ * A NEW payment on an invoice that bills a candidate_fee service is refused once any effective jurisdiction of the candidate
+ * (the contract's, the province's or the default) has a 'prohibited' latest review.
  * Refunds and voids never call this. Payments on other invoices are unaffected.
  */
-async function assertPaymentAllowed(client, inv) {
+async function assertPaymentAllowed(client, inv, opts = {}) {
   const fee = (
     await client.query(`SELECT 1 FROM invoice_items it JOIN fin_services s ON s.id = it.service_id WHERE it.invoice_id = $1 AND s.kind = '${KIND}' LIMIT 1`, [inv.id])
   ).rowCount;
   if (!fee) return;
-  const jurisdiction = await jurisdictionFor(client, inv.candidate_id);
-  if (!jurisdiction) return;
-  const review = await latestFor(jurisdiction, KIND, client);
-  if (review && review.status === "prohibited") throw fail("candidate_fee_prohibited");
+  await assertNotProhibited(client, inv.candidate_id, todayUtc(opts.now));
 }
 
 /** Staff overview for one candidate: {candidate_fee_billable, reasons, jurisdiction, review, contract}. */
 async function billingStatus(client, candidateId, opts = {}) {
   const today = todayUtc(opts.now);
   const reasons = [];
-  const jurisdiction = await jurisdictionFor(client, candidateId);
+  const active = await activeFeeContracts(client, candidateId, today);
+  let contract = active[0] || null;
+  const jurisdiction = (contract && contract.jurisdiction) || (await jurisdictionFor(client, candidateId));
   let review = null;
   if (!jurisdiction) reasons.push("jurisdiction_unknown");
   else {
@@ -157,14 +186,16 @@ async function billingStatus(client, candidateId, opts = {}) {
     const p = reviewProblem(review, today);
     if (p) reasons.push(p);
   }
-  const active = await activeFeeContracts(client, candidateId, today);
-  let contract = active[0] || null;
+  for (const j of await effectiveJurisdictions(client, candidateId, today)) {
+    const r = await latestFor(j, KIND, client);
+    if (r && r.status === "prohibited" && !reasons.includes("candidate_fee_prohibited")) reasons.push("candidate_fee_prohibited");
+  }
   if (!contract) {
     reasons.push("service_contract_required");
     contract =
       (
         await client.query(
-          `SELECT k.id, k.service_id, k.status, k.agreement_signed_at, to_char(k.start_date,'YYYY-MM-DD') AS start_date, to_char(k.end_date,'YYYY-MM-DD') AS end_date
+          `SELECT k.id, k.service_id, k.status, k.agreement_signed_at, k.jurisdiction, to_char(k.start_date,'YYYY-MM-DD') AS start_date, to_char(k.end_date,'YYYY-MM-DD') AS end_date
              FROM fin_service_contracts k JOIN fin_services s ON s.id = k.service_id WHERE k.candidate_id = $1 AND s.kind = '${KIND}' ORDER BY k.id DESC LIMIT 1`,
           [candidateId]
         )
@@ -179,4 +210,4 @@ async function billingStatus(client, candidateId, opts = {}) {
   };
 }
 
-module.exports = { assertBillable, assertLegacyInvoiceAllowed, assertPaymentAllowed, billingStatus, latestFor, jurisdictionFor, setClock, todayUtc, KIND, JURISDICTION_RE, MESSAGES };
+module.exports = { effectiveJurisdictions, assertBillable, assertLegacyInvoiceAllowed, assertPaymentAllowed, billingStatus, latestFor, jurisdictionFor, setClock, todayUtc, KIND, JURISDICTION_RE, MESSAGES };
