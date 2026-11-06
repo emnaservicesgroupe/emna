@@ -145,6 +145,41 @@ async function pauseModule(paused, user) {
   return { paused };
 }
 
+// ---- module-wide match settings (js_module_state key 'match_settings') ----
+const MATCH_SETTINGS_KEY = "match_settings";
+const MATCH_SETTINGS_DEFAULTS = Object.freeze({ require_match_acceptance: false });
+
+/** @returns {Promise<{require_match_acceptance: boolean}>} defaults to false (current behaviour). `client` joins the caller's transaction. */
+async function getMatchSettings(client) {
+  const r = await (client || db()).query("SELECT value FROM js_module_state WHERE key = $1", [MATCH_SETTINGS_KEY]);
+  const v = r.rows[0] && r.rows[0].value && typeof r.rows[0].value === "object" ? r.rows[0].value : {};
+  return { require_match_acceptance: v.require_match_acceptance === true };
+}
+
+/** Administrator-only. Patch: {require_match_acceptance: boolean}. */
+async function updateMatchSettings(patch, user) {
+  if (!user || !hasPerm(user, "jobsearch:admin")) throw new HttpError(403, "Administrator access required"); // before validation
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new HttpError(400, "patch must be an object");
+  const keys = Object.keys(patch);
+  if (keys.length === 0) throw new HttpError(400, "No settings to update");
+  for (const k of keys) if (!(k in MATCH_SETTINGS_DEFAULTS)) throw new HttpError(400, `Unknown setting: ${k}`);
+  if (typeof patch.require_match_acceptance !== "boolean") throw new HttpError(400, "require_match_acceptance must be true or false");
+  const before = await getMatchSettings();
+  await tx(async (client) => {
+    await client.query(
+      `INSERT INTO js_module_state (key, value) VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [MATCH_SETTINGS_KEY, JSON.stringify({ require_match_acceptance: patch.require_match_acceptance, by: user.id, at: new Date().toISOString() })]
+    );
+    await client.query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'settings.match_acceptance',$2::jsonb)", [
+      `user:${user.id}`,
+      JSON.stringify({ require_match_acceptance: patch.require_match_acceptance, previous: before.require_match_acceptance }),
+    ]);
+  });
+  await logAudit({ userId: user.id, action: "jobsearch.settings.match_acceptance", tableName: "js_module_state", newData: { require_match_acceptance: patch.require_match_acceptance } });
+  return getMatchSettings();
+}
+
 /** Candidate (own) or staff/admin in scope edits preferences; same validation as profile confirmation. */
 async function updatePreferences({ user, candidateId, preferences }) {
   const id = await authorize(user, candidateId, "write");
@@ -167,4 +202,4 @@ async function updatePreferences({ user, candidateId, preferences }) {
   return getSettings({ user, candidateId: id });
 }
 
-module.exports = { getSettings, updateSettings, pauseCandidate, pauseModule, updatePreferences };
+module.exports = { getSettings, updateSettings, pauseCandidate, pauseModule, updatePreferences, getMatchSettings, updateMatchSettings };

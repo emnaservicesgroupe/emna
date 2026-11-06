@@ -136,6 +136,9 @@ function checkEnv(env, deps = {}) {
   if (isSet(env.CLAMAV_PORT) && !(/^\d{1,5}$/.test(String(env.CLAMAV_PORT).trim()) && Number(env.CLAMAV_PORT) >= 1 && Number(env.CLAMAV_PORT) <= 65535)) problems.push("CLAMAV_PORT must be a port number (1-65535)");
 
   // Reverse proxy
+  if (lower(env.MCP_ENABLED) === "true" && !isSet(env.TRUST_PROXY)) {
+    warnings.push("MCP_ENABLED=true but TRUST_PROXY is not set: behind Caddy every client looks like the proxy, so the per-IP limits on /mcp (MCP_AUTH_FAIL_PER_MIN) would lock out everybody after a few failed attempts - set TRUST_PROXY=1");
+  }
   if (!isSet(env.TRUST_PROXY)) {
     warnings.push("TRUST_PROXY is not set: behind Caddy/another HTTPS proxy set TRUST_PROXY=1 so rate limits see the client address");
   } else {

@@ -12,6 +12,9 @@
   <script src="vita.js" defer></script>
   <script src="orgs-util.js" defer></script>
   <script src="orgs-common.js" defer></script>
+  <script src="chat-util.js" defer></script>
+  <script src="chat-panel.js" defer></script>
+  <script src="chat-portal.js" defer></script>
   <script src="agency.js" defer></script>
 </head>
 <body data-page="agency" data-title-key="agency.title">
@@ -89,6 +92,7 @@
       <div class="tabs" role="tablist" id="tabs" data-i18n-aria-label="agency.sections">
         <button type="button" role="tab" id="tab-register" aria-controls="panel-register" data-tab="register" data-i18n="agency.tab.register">Register a candidate</button>
         <button type="button" role="tab" id="tab-candidates" aria-controls="panel-candidates" data-tab="candidates" data-i18n="agency.tab.candidates">My candidates</button>
+        <button type="button" role="tab" id="tab-chat" aria-controls="panel-chat" data-tab="chat"><span data-i18n="tab.chat">Messages</span><span class="tab-badge" id="chat-tab-badge" hidden></span></button>
       </div>
 
       <!-- ---------------------------------------------------------- register -->
@@ -135,6 +139,15 @@
         <div class="card" id="cand-card" hidden tabindex="-1">
           <div class="card-head"><h2 id="cand-card-title" tabindex="-1"></h2><span class="spacer"></span><button type="button" class="btn secondary small" id="cand-close" data-i18n="common.close">Close</button></div>
           <div id="cand-body"></div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------------- messages -->
+      <section id="panel-chat" role="tabpanel" aria-labelledby="tab-chat" tabindex="-1" hidden>
+        <div class="card">
+          <h2 data-i18n="chat.portal.title">Messages with VITA</h2>
+          <p class="small muted" data-i18n="chat.portal.org">Write to the VITA team here. Only people at VITA and your own organisation can read this conversation.</p>
+          <div id="chat-root"></div>
         </div>
       </section>
     </div>

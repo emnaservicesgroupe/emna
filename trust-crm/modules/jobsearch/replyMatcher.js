@@ -256,14 +256,36 @@ function isPlausibleBounce(m) {
   return report || /^(?:mailer-daemon|postmaster)$/i.test(from.address.split("@")[0]);
 }
 
-/** {hard, code} from a DSN body: a 5.x.x enhanced status (or 'Action: failed') is hard. */
-function bounceStatus(text) {
+// Enhanced status codes that are NOT a dead address even though they start with 5: mailbox full (5.2.2), message too large (5.3.4),
+// routing / network problems (5.4.x) and policy / spam / authentication refusals (5.7.x). They never suppress an address.
+const NOT_PERMANENT_5 = /^5\.(?:2\.2|3\.4|4\.\d{1,3}|7\.\d{1,3})$/;
+const CODE_SRC = String.raw`([245]\.\d{1,3}\.\d{1,3})(?!\d)(?!\.\d)`;
+const NO_NUM_BEFORE = String.raw`(?<![\d.])`;
+
+/** Enhanced status codes found ONLY in delivery-status fields: 'Status:', 'Diagnostic-Code:' (with its folded continuation lines) and a leading SMTP reply ('550 5.1.1'). Free-text numbers (IPs, dates, versions) are ignored. */
+function dsnCodes(text) {
   const t = String(text || "").slice(0, 60000);
-  const five = /\b(5\.\d{1,3}\.\d{1,3})\b/.exec(t);
-  if (five) return { hard: true, code: five[1] };
-  if (/\baction\s*:\s*failed\b/i.test(t)) return { hard: true, code: "action_failed" };
-  const four = /\b(4\.\d{1,3}\.\d{1,3})\b/.exec(t);
-  return { hard: false, code: four ? four[1] : null };
+  const out = [];
+  const add = (re, group = 1) => { for (const m of t.matchAll(re)) out.push(m[group]); };
+  add(new RegExp(String.raw`(?:^|[\s;,])status\s*:\s*${NO_NUM_BEFORE}${CODE_SRC}`, "gim"));
+  for (const m of t.matchAll(/diagnostic-code\s*:([^\n]{0,400}(?:\n[ \t][^\n]{0,400}){0,3})/gi)) {
+    const c = new RegExp(`${NO_NUM_BEFORE}${CODE_SRC}`).exec(m[1]);
+    if (c) out.push(c[1]);
+  }
+  add(new RegExp(String.raw`(?:^|[\s;])[245]\d\d[ -]${NO_NUM_BEFORE}${CODE_SRC}`, "gm"));
+  return out;
+}
+
+/**
+ * {hard, code} from a DSN: hard (permanent) only for a 5.x.x status read from the delivery-status fields, excluding mailbox full (5.2.2),
+ * message too large (5.3.4), routing (5.4.x) and policy / spam (5.7.x); 4.x.x is never hard. With no status code at all, 'Action: failed' is hard.
+ */
+function bounceStatus(text) {
+  const codes = dsnCodes(text);
+  const perm = codes.find((c) => c.startsWith("5.") && !NOT_PERMANENT_5.test(c));
+  if (perm) return { hard: true, code: perm };
+  if (!codes.length && /\baction\s*:\s*failed\b/i.test(String(text || "").slice(0, 60000))) return { hard: true, code: "action_failed" };
+  return { hard: false, code: codes[0] || null };
 }
 
 /** Our own addresses / domain (loop protection). */
@@ -376,7 +398,50 @@ async function match(mail, opts = {}) {
 
 // ---------------------------------------------------------------- classification (proposal only)
 
+// Opt-out / unsubscribe requests (stage 8 task 4). Checked FIRST: a message that both rejects and asks not to be contacted is an
+// opt-out, and an opt-out is NEVER an acknowledgement (its category makes the acknowledgement path veto itself).
+// Asymmetric safety, the opposite way round from the acknowledgement: a false POSITIVE only adds a sender to the do-not-contact list
+// (staff review the task and an administrator can undo it; nothing is deleted or cancelled), a false NEGATIVE could mean mailing
+// someone who asked us to stop - so these lean towards detecting. Still imperative / first-person forms only: a bare "unsubscribe" link in
+// an automated acknowledgement footer ("To unsubscribe click here") is NOT a request. Patterns run on foldText() output (lower-case, accents and
+// Arabic hamza/diacritics stripped, whitespace collapsed); every one is a bounded alternation (no nested open-ended quantifiers).
+const OPT_OUT = [
+  // English
+  /\bunsubscribe (?:me|us|my|our|this)\b/, /\b(?:please|kindly|pls) unsubscribe\b/, /\b(?:want|wish|would like|need|ask|request|like) (?:you )?to unsubscribe\b/,
+  /^\s*(?:please )?(?:unsubscribe|opt[- ]?out|stop|remove me|remove us)[ .!]*$/,
+  /\b(?:remove|delete|take|strike) (?:me|us|my (?:name|e-?mail(?: address)?|address)|our (?:name|e-?mail(?: address)?|address|company|details)) (?:off|from)\b/,
+  /\btake (?:me|us|this address|our address) off\b/,
+  /\b(?:do not|don't|never|no longer) (?:contact|e-?mail|write to|message|call|solicit) (?:us|me)\b/,
+  /\bdo not (?:send|forward) (?:us|me) (?:any )?(?:more|further|other)\b/,
+  /\b(?:stop|cease|quit) (?:e-?mailing|contacting|sending|writing to|messaging|spamming|calling|soliciting)\b/,
+  /\bcease (?:and desist|all (?:contact|communications?|correspondence|e-?mails?|outreach)|(?:any|further) (?:contact|communications?|correspondence))\b/,
+  /\b(?:i|we) (?:want|wish|would like) to opt[- ]?out\b/,
+  // review round 1 additions (bounded alternations only)
+  /\b(?:do not|don't|dont) (?:send|forward) (?:us|me) (?:any )?(?:more|further|other)\b/,
+  /\b(?:do not|don't|dont|never|no longer) (?:reach|get) (?:out|in touch)\b/,
+  /\b(?:kindly|please|pls) (?:remove|delete) (?:me|us|my (?:e-?mail(?: address)?|name|address)|our (?:e-?mail(?: address)?|name|address))\b/,
+  /\bno (?:further|more|additional) (?:e-?mails?|messages?|contact|correspondence|communications?|calls?)\b(?! (?:is |are )?(?:required|needed|necessary))/,
+  /\b(?:please |kindly )?stop (?:contacting|e-?mailing|messaging|writing)\b/,
+  // French (accents already folded away)
+  /\bne plus (?:me |nous |m'|n')(?:contacter|ecrire|envoyer|relancer|solliciter|joindre|telephoner|appeler|faire parvenir)/,
+  /\bne (?:me|nous) (?:contactez|ecrivez|envoyez|relancez|sollicitez|telephonez|appelez) plus\b/, /\bne contactez plus\b/,
+  /\bne (?:m'|n')(?:ecrivez|contactez|envoyez|relancez|sollicitez|telephonez|appelez) plus\b/, /\b(?:je|nous) ne (?:souhaite|souhaitons|veux|voulons|desire|desirons) plus (?:etre )?(?:contacte|sollicite|relance|derange)/,
+  /\b(?:me|nous) desabonner\b/, /\bdesabonn(?:ez|e)[- ](?:moi|nous)\b/, /\bje (?:souhaite|voudrais|veux|desire) (?:me )?desabonner\b/, /\b(?:merci de|veuillez|svp) (?:bien )?(?:nous |me )?desabonner\b/,
+  /^\s*(?:desabonnement|desinscription|stop)[ .!]*$/,
+  /\bretir(?:er|ez|e)\b (?:[a-z']+ ){0,3}de (?:votre|vos|la) (?:liste|listes|base|fichier|diffusion|mailing)/,
+  /\bsupprim(?:er|ez) (?:[a-z']+ ){0,3}de (?:votre|vos|la) (?:liste|listes|base|fichier|diffusion|mailing)/,
+  /\bne plus recevoir (?:vos|de) (?:courriels?|e-?mails?|messages?|mails?|offres?|sollicitations?|communications?)\b/,
+  /\bcessez (?:de )?(?:nous |me )?(?:contacter|ecrire|envoyer)\b/,
+  // Arabic (folded: hamza forms and diacritics removed; unicode-aware word edges because \b is ASCII-only)
+  /لا تراسل(?:ونا|نا|ني|وني)/u, /عدم مراسل(?:تنا|تي)/u, /توقف(?:وا)? عن مراسل(?:تنا|تي)/u,
+  /لا ترسل(?:وا|ي)? (?:لي|الي|لنا|الينا)(?![\p{L}\p{N}])/u, /(?:اوقف|توقف|كف)(?:وا)? (?:عن )?(?:ال)?مراسل[ةه]/u,
+  /(?<![\p{L}\p{N}])(?:ازالة|ازيلوا|ازل)(?![\p{L}\p{N}])/u, /الغاء (?:الاشتراك|اشتراكنا|اشتراكي)/u, /لا تتصل(?:وا)? ب(?:نا|ي)(?![\p{L}\p{N}])/u,
+];
+
+const APPLY_INSTRUCTION = /\b(?:do not|don't|dont|please do not|kindly do not|no) (?:e-?mail|send|write to|contact|forward|submit)(?: (?:us|me))? (?:your |any |all |the |a |an |applications? |cv'?s? |resumes? )*(?:cvs?|resumes?|applications?|documents?|CVs|curriculum vitae|cover letters?|files?|attachments?)\b|\bapply (?:only )?(?:via|through|using|on|at|by visiting|directly (?:on|at|through|via)) (?:our|the|this) (?:[a-z-]+ ){0,2}(?:portal|website|web site|site|page|careers page|platform|link)\b/g;
+
 const RULES = [
+  ["opt_out", OPT_OUT],
   ["rejection", [
     /\bregret to inform\b/, /\bunfortunately\b/, /\b(?:decided|chosen) to (?:move forward|proceed|continue) with other\b/, /\bnot (?:be )?(?:moving|progressing|proceeding) (?:forward )?with your\b/,
     /\b(?:have|has) not been successful\b/, /\bposition has (?:now )?been filled\b/, /\bnous (?:sommes au )?regret(?:tons|s)\b/, /\bmalheureusement\b/,
@@ -715,9 +780,11 @@ function classifyReply(text) {
   const sq = splitQuoted(raw.slice(0, 20000));
   const t = foldText(sq.ineligible ? raw : sq.content);
   const evidence = [];
+  // "please do not email us your CV" / "apply through our portal" tell applicants HOW to apply; they are not a request to stop contacting.
+  const tOpt = t.replace(APPLY_INSTRUCTION, " ");
   for (const [category, patterns] of RULES) {
     for (const rx of patterns) {
-      const hit = rx.exec(t);
+      const hit = rx.exec(category === "opt_out" ? tOpt : t);
       if (hit) evidence.push({ category, phrase: hit[0].trim().slice(0, 80) });
     }
   }

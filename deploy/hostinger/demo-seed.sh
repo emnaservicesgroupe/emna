@@ -12,17 +12,14 @@
 # Because a DEMO SuperAdmin then exists, ./create-admin.sh (bootstrap) is disabled. Before real use, WIPE
 # the demo data - this deletes the database and uploaded files of this install:
 #
-#   docker compose down -v && docker compose up -d && ./create-admin.sh
+#   ./wipe-data.sh && ./setup.sh && ./create-admin.sh      (add --behind-nginx in nginx mode)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# shellcheck source=lib.sh
+. ./lib.sh
+vita_init
 
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-
-command -v docker > /dev/null 2>&1 || die "docker is not installed (see SETUP-HOSTINGER.md)"
-DOCKER=(docker)
-docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
-compose() { "${DOCKER[@]}" compose "$@"; }
 
 [ -n "$(compose ps -q app 2> /dev/null || true)" ] || die "the app is not running: ./setup.sh (or docker compose up -d)"
 
@@ -30,7 +27,7 @@ cat <<'TXT'
 ==================================================================
   DEMO DATA - NOT FOR REAL USE
   Only on a fresh install, before the real admin exists.
-  Remove it later with: docker compose down -v   (deletes ALL data)
+  Remove it later with: ./wipe-data.sh   (deletes ALL data of this install)
 ==================================================================
 TXT
 if [ -t 0 ]; then

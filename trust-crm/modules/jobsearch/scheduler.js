@@ -24,6 +24,7 @@ const searchRunner = require("./searchRunner");
 const matchService = require("./matchService");
 const consentService = require("./consentService");
 const applicationService = require("./applicationService");
+const settingsService = require("./settingsService");
 const submitter = require("./submitter");
 const jobStore = require("./jobStore");
 
@@ -591,12 +592,16 @@ async function stepOrchestrate(ctx) {
       }
       if (blockers.length) continue; // paused / suspended / deleted: quietly skipped
       await resolveCandidateTask(cid, "prepare_consent_missing");
+      // Never auto-proposed: a not_recommended band (score under 50 or an essential veto) and a staff-rejected match; with
+      // require_match_acceptance on, only accepted matches. MATCH_AUTO_PREPARE_MIN stays a floor on top of this.
+      const needAccepted = (await settingsService.getMatchSettings()).require_match_acceptance;
       const matches = (await db().query(
         `SELECT m.id FROM js_matches m JOIN js_jobs j ON j.id = m.job_id
           WHERE m.candidate_id = $1 AND m.score >= $2 AND j.status = 'open'
+            AND m.band IS DISTINCT FROM 'not_recommended' AND m.decision <> 'rejected' AND ($4::boolean = false OR m.decision = 'accepted')
             AND NOT EXISTS (SELECT 1 FROM js_applications a WHERE a.candidate_id = m.candidate_id AND a.job_id = m.job_id)
           ORDER BY m.score DESC, m.id LIMIT $3`,
-        [cid, ctx.L.minScore, ctx.L.applicationsPerTick]
+        [cid, ctx.L.minScore, ctx.L.applicationsPerTick, needAccepted]
       )).rows;
       for (const m of matches) {
         try {
@@ -738,6 +743,24 @@ async function stepSweepDrafts(ctx) {
   ctx.summary.draftsSwept = (ctx.summary.draftsSwept || 0) + out.swept;
 }
 
+/**
+ * Company-level report snapshots (daily / weekly / monthly) for the previous full period of the report timezone, when
+ * report_schedule_enabled (off by default). Idempotent per (kind, period_start); uses the tick clock. Only kinds and error codes are
+ * recorded on failure - never report data.
+ */
+async function stepReportSnapshots(ctx) {
+  const out = await require("./reportExport").ensureScheduledSnapshots({ now: ctx.now });
+  if (!out.enabled) return;
+  ctx.summary.reportSnapshots = { created: out.created.length, existing: out.existing.length };
+  for (const e of out.errors) ctx.summary.errors.push({ step: "report_snapshots", message: `report_snapshot_failed:${e.kind}:${e.code}` });
+}
+
+/** Retention purge of old report snapshots (REPORT_SNAPSHOT_RETENTION_DAYS; 0 = keep forever, the default). Idempotent; uses the tick clock. */
+async function stepSnapshotRetention(ctx) {
+  const out = await require("./reportExport").purgeExpiredSnapshots({ now: ctx.now });
+  if (out.enabled) ctx.summary.snapshotsPurged = out.snapshots;
+}
+
 async function step(ctx, name, fn) {
   try {
     // Observability / test hook: deps.onStep(name) runs before each step; returning 'skip' skips it.
@@ -795,6 +818,8 @@ async function tick(now = new Date(), { deps = {} } = {}) {
     await step(ctx, "expiry", stepExpiry);
     await step(ctx, "stale", async (c) => { await queue.reclaimStale({ now: c.now }); });
     await step(ctx, "sweep_drafts", stepSweepDrafts);
+    await step(ctx, "report_snapshots", stepReportSnapshots);
+    await step(ctx, "snapshot_retention", stepSnapshotRetention);
     await step(ctx, "prune_state", stepPruneState);
     await recordTick(summary);
     return summary;

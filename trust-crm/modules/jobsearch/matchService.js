@@ -1,7 +1,8 @@
 // Computes and stores explainable matches. Reads only: confirmed profile, preferences, settings and
 // OPEN jobs. Never creates or changes applications. A match is a review aid, not an eligibility claim.
 const consentService = require("./consentService");
-const { scoreMatch, country, neutralize } = require("./matching");
+const { scoreMatch, country, neutralize, BAND_LABELS } = require("./matching");
+const classification = require("./classification");
 const { normalize } = require("./jobStore");
 
 const db = () => require("../../db");
@@ -33,6 +34,9 @@ function present(row, extra) {
     candidate_id: row.candidate_id,
     job_id: row.job_id,
     score: row.score,
+    band: row.band,
+    bandLabel: row.band ? BAND_LABELS[row.band] : null,
+    decision: row.decision,
     reasons: row.reasons,
     missing: row.missing,
     uncertain: row.uncertain,
@@ -61,10 +65,12 @@ async function loadConfirmations(client) {
   return (job) => byJob.get(job.id) || (job.employer_id ? byEmployer.get(job.employer_id) : null) || null;
 }
 
-const UPSERT = `INSERT INTO js_matches (candidate_id, job_id, score, reasons, missing, uncertain, employer_support, employer_support_evidence, employer_support_conflict, overseas_accepted, overseas_applicants_evidence)
-  VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11)
+// The decision columns (decision, decision_by, decided_at, decision_note) are deliberately NOT in the update list: a re-match never resets
+// a staff accept/reject.
+const UPSERT = `INSERT INTO js_matches (candidate_id, job_id, score, reasons, missing, uncertain, employer_support, employer_support_evidence, employer_support_conflict, overseas_accepted, overseas_applicants_evidence, band)
+  VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12)
   ON CONFLICT (candidate_id, job_id) DO UPDATE SET
-    score = EXCLUDED.score, reasons = EXCLUDED.reasons, missing = EXCLUDED.missing, uncertain = EXCLUDED.uncertain,
+    score = EXCLUDED.score, band = EXCLUDED.band, reasons = EXCLUDED.reasons, missing = EXCLUDED.missing, uncertain = EXCLUDED.uncertain,
     employer_support = EXCLUDED.employer_support, employer_support_evidence = EXCLUDED.employer_support_evidence,
     employer_support_conflict = EXCLUDED.employer_support_conflict,
     overseas_accepted = EXCLUDED.overseas_accepted, overseas_applicants_evidence = EXCLUDED.overseas_applicants_evidence
@@ -72,7 +78,7 @@ const UPSERT = `INSERT INTO js_matches (candidate_id, job_id, score, reasons, mi
 
 function upsertParams(candidateId, job, r) {
   return [candidateId, job.id, r.score, JSON.stringify(r.reasons), JSON.stringify(r.missing), JSON.stringify(r.uncertain),
-    r.employerSupport.label, r.employerSupport.evidence, r.employerSupport.conflict === true, r.overseas.accepted, r.overseas.evidence];
+    r.employerSupport.label, r.employerSupport.evidence, r.employerSupport.conflict === true, r.overseas.accepted, r.overseas.evidence, r.band];
 }
 
 /**
@@ -103,6 +109,9 @@ async function matchCandidate(candidateId, opts = {}) {
     }
     const professions = (settings.allowed_professions || []).map(normalize).filter(Boolean);
     const withApp = new Set((await client.query("SELECT job_id FROM js_applications WHERE candidate_id = $1", [candidateId])).rows.map((r) => r.job_id));
+    // A staff accept/reject outlives a score change: such matches are kept (and refreshed) instead of pruned, so a rejected match never
+    // reappears as pending.
+    const decided = new Set((await client.query("SELECT job_id FROM js_matches WHERE candidate_id = $1 AND decision <> 'pending'", [candidateId])).rows.map((r) => r.job_id));
     const confirmationFor = await loadConfirmations(client);
 
     const stored = [];
@@ -114,7 +123,9 @@ async function matchCandidate(candidateId, opts = {}) {
           ORDER BY j.id LIMIT ${MAX_JOBS}`,
         [opts.now || new Date()]
       )).rows;
-      for (const job of jobs) {
+      for (const listed of jobs) {
+        let job = listed;
+        if (job.classification === null && job.classified_by === null) job = (await classification.computeAndStore(client, job.id, { now: opts.now })).job || job;
         const jc = country(job.country);
         if (!jc || !allowed.includes(jc)) continue;
         if (professions.length) {
@@ -123,19 +134,19 @@ async function matchCandidate(candidateId, opts = {}) {
         }
         keep.add(job.id);
         const r = scoreMatch(profile, prefs, job, { confirmation: confirmationFor(job), now: opts.now });
-        if (r.score < threshold && !withApp.has(job.id)) {
+        if (r.score < threshold && !withApp.has(job.id) && !decided.has(job.id)) {
           // Fell below the threshold after a profile/job change: remove the stale match.
           await client.query("DELETE FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [candidateId, job.id]);
           continue;
         }
         // Every run rewrites score AND labels (support, conflict, overseas), even when the score is unchanged.
         const row = (await client.query(UPSERT, upsertParams(candidateId, job, r))).rows[0];
-        stored.push(present(row, { overseas: r.overseas, breakdown: r.breakdown }));
+        stored.push(present(row, { overseas: r.overseas, breakdown: r.breakdown, vetoes: r.vetoes }));
       }
     }
     // Matches for jobs that are no longer open/in scope are dropped unless an application exists.
     await client.query(
-      `DELETE FROM js_matches m WHERE m.candidate_id = $1 AND NOT (m.job_id = ANY($2::int[]))
+      `DELETE FROM js_matches m WHERE m.candidate_id = $1 AND NOT (m.job_id = ANY($2::int[])) AND m.decision = 'pending'
          AND NOT EXISTS (SELECT 1 FROM js_applications a WHERE a.candidate_id = m.candidate_id AND a.job_id = m.job_id)`,
       [candidateId, [...keep]]
     );
@@ -169,6 +180,17 @@ async function lockForRelabel(client, jobIds, extraCandidateIds = []) {
  */
 async function relabelJobs(client, jobIds, opts = {}) {
   if (!jobIds.length) return 0;
+  // The job classification depends on the same confirmations as the labels: recompute it for every affected job, matched or not.
+  await classification.recomputeMany(client, jobIds, { now: opts.now });
+  return rescoreMatches(client, jobIds, opts);
+}
+
+/**
+ * Re-scores the EXISTING matches on the given jobs (score, band, labels, reasons) without touching decisions or creating / deleting
+ * rows. relabelJobs = recompute classification + this; the staff classification path calls it on its own after a (re)classification.
+ */
+async function rescoreMatches(client, jobIds, opts = {}) {
+  if (!jobIds.length) return 0;
   const locked = opts.candidateIds || (await lockForRelabel(client, jobIds));
   if (!locked.length) return 0;
   const rows = (await client.query(
@@ -192,7 +214,7 @@ async function relabelJobs(client, jobIds, opts = {}) {
     await client.query(
       `UPDATE js_matches SET score = $3, reasons = $4::jsonb, missing = $5::jsonb, uncertain = $6::jsonb,
          employer_support = $7, employer_support_evidence = $8, employer_support_conflict = $9,
-         overseas_accepted = $10, overseas_applicants_evidence = $11
+         overseas_accepted = $10, overseas_applicants_evidence = $11, band = $12
        WHERE candidate_id = $1 AND job_id = $2`,
       upsertParams(cid, job, r)
     );
@@ -200,4 +222,9 @@ async function relabelJobs(client, jobIds, opts = {}) {
   return rows.length;
 }
 
-module.exports = { matchCandidate, relabelJobs, lockForRelabel, minScore };
+/** rescoreMatches in its own transaction. */
+async function rescoreMatchesStandalone(jobIds, opts = {}) {
+  return inTx((client) => rescoreMatches(client, jobIds, opts));
+}
+
+module.exports = { rescoreMatchesStandalone, matchCandidate, relabelJobs, rescoreMatches, lockForRelabel, minScore };

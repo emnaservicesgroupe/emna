@@ -1,8 +1,17 @@
-# VITA deployment for one VPS (Task 20): Postgres + the app + Caddy (automatic HTTPS).
-#   cd deploy/hostinger && ./setup.sh          (first time: creates .env with generated secrets)
-#   docker compose up -d --build               (later starts / after editing .env)
-# Only Caddy publishes ports (80/443). The app (5000) and the database (5432) are reachable only inside the
-# Docker networks; the database network has no internet access at all.
+# VITA deployment for one VPS (Task 20): Postgres + the app + (optionally) Caddy for automatic HTTPS.
+#   cd deploy/hostinger && ./setup.sh                  (first time: creates .env with generated secrets)
+#   cd deploy/hostinger && ./setup.sh --behind-nginx   (a web server such as nginx already uses ports 80/443)
+#   docker compose up -d --build                       (later starts / after editing .env)
+# Two supported modes, chosen by setup.sh and recorded in ./.env:
+#   Caddy mode (default): .env has COMPOSE_PROFILES=caddy, so the "caddy" service below starts and is the ONLY
+#     service that publishes ports (80/443). The app (5000) and the database (5432) are reachable only inside
+#     the Docker networks; the database network has no internet access at all.
+#   nginx mode: .env has COMPOSE_FILE=docker-compose.yml:docker-compose.nginx.yml and no caddy profile. Caddy
+#     does not start; docker-compose.nginx.yml publishes the app ONLY on the host loopback
+#     (127.0.0.1:${VITA_APP_PORT:-8083}) for the existing nginx to proxy to. The database never publishes a port.
+# The project name is fixed by .env (COMPOSE_PROJECT_NAME=vita): containers are vita-db-1 / vita-app-1,
+# the network vita_backend / vita_frontend and the volumes vita_db-data / vita_app-storage, so nothing here
+# can collide with (or touch) other Docker projects on the same server.
 # Variables like ${DB_USER} are read from ./.env (the same file the app reads); the Postgres superuser lives in
 # ./.env.db (db container only). Nothing secret is in this file.
 name: vita
@@ -72,6 +81,9 @@ services:
 
   caddy:
     image: caddy:2
+    # Optional: only started when the "caddy" profile is active (COMPOSE_PROFILES=caddy in .env, written by
+    # setup.sh in the default mode). In nginx mode the profile is off and nothing listens on 80/443.
+    profiles: ["caddy"]
     restart: unless-stopped
     ports:
       - "80:80"

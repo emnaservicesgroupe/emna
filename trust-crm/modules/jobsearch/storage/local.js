@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const KEY_RE = /^[0-9]+-[a-f0-9]{64}\.(pdf|docx|png|jpg)$/;
+const KEY_RE = /^[0-9]+-[a-f0-9]{64}\.(pdf|docx|png|jpg|xlsx)$/;
 
 function baseDir() {
   return path.resolve(process.env.STORAGE_DIR || path.join(__dirname, "..", "..", "..", ".storage"));

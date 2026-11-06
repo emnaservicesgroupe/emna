@@ -101,7 +101,7 @@ the meaning, the default, whether the value is a secret, and whether production 
 | `JOBBANK_CA_FEED_URL` | Authorized Job Bank feed URL (https, public host) | unset → `requires_setup` | treat as secret if it carries a key | to use Job Bank |
 | `PARTNER_FEED_URLS` | Approved partner feed URLs, comma separated | unset → `requires_setup` | same | to use partner feeds |
 | `JOBSEARCH_USER_AGENT` | User-Agent sent to feeds | `VITA-JobSearch/1.0 …` | no | recommended (with a contact address) |
-| `MATCH_MIN_SCORE` | Matches below this score are not stored | `40` | no | no |
+| `MATCH_MIN_SCORE` | Matches below this score are not stored (stored matches under 50, or with an essential veto that forces it, are band `not_recommended` and are never auto-proposed; see DECISIONS 24) | `40` | no | no |
 
 ### Scheduler and workers
 
@@ -305,6 +305,100 @@ code: ✓ = the role holds the permission.
 | Employer | — | — | — | — | — | nothing (portal role: own organisation only via `/employer/*`) |
 | Agency | — | — | — | — | — | nothing (portal role: own organisation only via `/agency/*`) |
 <!-- permission-matrix:end -->
+
+### Accounting permissions
+
+Who can do what in the accounting module (Stage 4). Checked against `middleware/role.js` by
+`tests/fin-schema.test.js`. ✓ = the role holds the permission. Candidates read their own invoices through
+ownership checks only (`GET /finance/me`), never through a staff permission.
+
+<!-- finance-permission-matrix:start -->
+| Role | finance:read | finance:write | finance:void | finance:refund | finance:export |
+|---|---|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Admin | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Manager | ✓ | — | — | — | ✓ |
+| Receptionist | — | — | — | — | — |
+| Accountant | ✓ | ✓ | ✓ | ✓ | ✓ |
+| HR | — | — | — | — | — |
+| Agent | — | — | — | — | — |
+| Candidate | — | — | — | — | — |
+| Employer | — | — | — | — | — |
+| Agency | — | — | — | — | — |
+<!-- finance-permission-matrix:end -->
+
+### Attendance and HR permissions
+
+Who can do what in the HR module (Stage 5). Checked against `middleware/role.js` by `tests/hr-schema.test.js`.
+✓ = the role holds the permission. Every active staff role (SuperAdmin, Admin, Manager, Receptionist, Accountant,
+HR, Agent) can clock in/out, see its own attendance and balances and request leave or corrections: that
+self-service needs no permission, only an active staff account (`requireStaff`, `middleware/staff.js`).
+Candidate, Employer and Agency are refused everywhere. **hr:approve** for Manager is further limited in service
+code to the manager's direct reports (never their own requests); HR, Admin and SuperAdmin approve anyone else's.
+
+<!-- hr-permission-matrix:start -->
+| Role | hr:read | hr:write | hr:approve |
+|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ |
+| Admin | ✓ | ✓ | ✓ |
+| Manager | — | — | ✓ |
+| Receptionist | — | — | — |
+| Accountant | — | — | — |
+| HR | ✓ | ✓ | ✓ |
+| Agent | — | — | — |
+| Candidate | — | — | — |
+| Employer | — | — | — |
+| Agency | — | — | — |
+<!-- hr-permission-matrix:end -->
+
+### Messaging permissions (Stage 6)
+
+Who may use VITA messaging at all. Candidate, Employer and Agency users hold no permission: they are authorised by
+ownership (their own conversation / their organisation's thread) and reach only `/chat/*`. HR and Accountant hold
+none either; they still reach `/chat` and can read and write in the internal `staff` rooms they were explicitly added
+to as a participant (service rule, not a permission) - nothing else: no candidate / employer / agency conversation,
+no moderation. Staff see candidate / organisation conversations only for people they may serve
+(assigned staff, Admin, Manager).
+
+<!-- chat-permission-matrix:start -->
+| Role | chat:read | chat:write | chat:moderate |
+|---|---|---|---|
+| SuperAdmin | ✓ | ✓ | ✓ |
+| Admin | ✓ | ✓ | ✓ |
+| Manager | ✓ | ✓ | ✓ |
+| Receptionist | ✓ | ✓ | — |
+| Accountant | — | — | — |
+| HR | — | — | — |
+| Agent | ✓ | ✓ | — |
+| Candidate | — | — | — |
+| Employer | — | — | — |
+| Agency | — | — | — |
+<!-- chat-permission-matrix:end -->
+
+### MCP assistant access (`mcp:use`)
+
+Who may create personal access tokens (PAT) for the read-only MCP server (stage 7, `/mcp-tokens`). Only Admin, Manager and
+SuperAdmin hold it; everybody else, and every Candidate / Employer / Agency account, is refused. A PAT works **only** on `/mcp`:
+every other route answers `401` to a `vita_pat_...` bearer, and the token endpoints themselves need a normal login. Tokens are
+personal, shown once, hashed at rest, expire (default 30 days, max 90), max 5 active per user, and stop working the moment the
+owner is deactivated or loses `mcp:use`. `MCP_ENABLED` (default off) switches the `/mcp` server itself; token management works either way.
+
+<!-- mcp-permission-matrix:start -->
+| Role | mcp:use |
+|---|---|
+| SuperAdmin | ✓ |
+| Admin | ✓ |
+| Manager | ✓ |
+| Receptionist | — |
+| Accountant | — |
+| HR | — |
+| Agent | — |
+| Candidate | — |
+| Employer | — |
+| Agency | — |
+<!-- mcp-permission-matrix:end -->
+
+`chat:moderate` (Admin, Manager, SuperAdmin) hides / unhides a message with a reason and closes / reopens a conversation.
 
 What each permission allows (always limited to the candidates the user may see):
 

@@ -14,6 +14,32 @@ function date(v) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+const MAX_FIELD = 400; // the store applies the tighter per-field caps; this only bounds what a hostile feed can make us hold
+
+/** Free-text pay: a string as given, or a schema.org baseSalary object rendered as "CAD 40000-50000 YEAR". */
+function salaryOf(it) {
+  const direct = str(it.salary) || str(it.salaryText) || str(it.compensation) || str(it.pay);
+  if (direct) return direct.slice(0, MAX_FIELD);
+  const b = it.baseSalary;
+  if (b && typeof b === "object") {
+    const v = b.value && typeof b.value === "object" ? b.value : b;
+    const lo = str(v.minValue) || str(v.value);
+    const hi = str(v.maxValue);
+    if (lo || hi) return [str(b.currency), lo && hi && lo !== hi ? `${lo}-${hi}` : lo || hi, str(v.unitText)].filter(Boolean).join(" ").slice(0, MAX_FIELD);
+  }
+  return null;
+}
+
+/** 'YYYY-MM-DD' of a feed closing date (a calendar day, or an ISO timestamp), else null. */
+function dayOf(v) {
+  const s = str(v);
+  if (!s) return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(s.trim()) ? new Date(`${s.trim()}T00:00:00Z`) : new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  const day = d.toISOString().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s.trim()) && day !== s.trim() ? null : day;
+}
+
 function fromJsonItem(it, defaults) {
   if (!it || typeof it !== "object") return null;
   const title = str(it.title) || str(it.jobTitle);
@@ -32,6 +58,10 @@ function fromJsonItem(it, defaults) {
     closingAt: date(it.closingAt || it.closing || it.validThrough || it.expires),
     description: str(it.description) || str(it.summary) || "",
     language: str(it.language) || defaults.language || null,
+    salaryText: salaryOf(it),
+    employmentType: (str(it.employmentType) || str(it.jobType) || str(it.employment_type) || "").slice(0, MAX_FIELD) || null,
+    requiredExperienceText: (str(it.experienceRequirements) || str(it.requiredExperience) || str(it.experience) || "").slice(0, MAX_FIELD) || null,
+    closingDate: dayOf(it.closingDate || it.closing_date || it.closingAt || it.closing || it.validThrough || it.expires),
   };
 }
 
@@ -45,7 +75,7 @@ function parseRss(text, defaults) {
   const items = text.match(/<item[\s>][\s\S]*?<\/item>/gi) || [];
   return items.slice(0, MAX_ITEMS).map((b) => {
     const link = tag(b, "link");
-    return fromJsonItem({ id: tag(b, "guid") || link, title: tag(b, "title"), url: link, employer: tag(b, "author") || tag(b, "company"), location: tag(b, "location"), publishedAt: tag(b, "pubDate"), description: tag(b, "description") }, defaults);
+    return fromJsonItem({ id: tag(b, "guid") || link, title: tag(b, "title"), url: link, employer: tag(b, "author") || tag(b, "company"), location: tag(b, "location"), publishedAt: tag(b, "pubDate"), description: tag(b, "description"), salary: tag(b, "salary"), employmentType: tag(b, "employmentType") || tag(b, "jobType"), experience: tag(b, "experience"), closingDate: tag(b, "closingDate") }, defaults);
   }).filter(Boolean);
 }
 

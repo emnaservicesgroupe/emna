@@ -22,6 +22,8 @@ const applicationService = require("./applicationService");
 const submitter = require("./submitter");
 const matcher = require("./replyMatcher");
 const draftService = require("./draftService");
+const suppression = require("./suppression");
+const guard = require("./guard");
 const S = require("./inboxShared");
 
 const { httpErr, oneLine } = S;
@@ -217,6 +219,69 @@ async function openReviewTask(client, row, reason) {
 }
 
 /**
+ * An opt-out / unsubscribe reply (stage 8 task 4), inside the ingest transaction with the application locked.
+ * Only for a message matched with HIGH confidence (reference/token + sender at the employer's verified domain, no DKIM/DMARC failure),
+ * never for an auto-reply or a bounce: the sender address (plus-tag removed) goes on the do-not-contact list, the employer becomes
+ * 'opted_out' (a 'blocked' employer stays blocked), one 'opt_out_received' staff task is opened for the responsible staff member, and
+ * everything is audited. NOTHING is cancelled, deleted or acknowledged: the guard simply refuses every later send, and an
+ * administrator can undo the suppression (DELETE /jobsearch/suppressions/:id).
+ */
+async function handleOptOut(client, { app, row, res, responsible, cls }) {
+  const norm = suppression.normaliseAddress(res.sender);
+  const employerId = (await client.query("SELECT employer_id FROM js_jobs WHERE id = $1", [app.job_id])).rows[0]?.employer_id || null;
+  const out = { suppressionId: null, created: false, employerId, taskId: null };
+  if (norm) {
+    const added = await suppression.addSuppression(client, {
+      kind: "email",
+      value: norm.base,
+      reason: `Opt-out request received by e-mail (message #${row.id})`,
+      source: "reply_opt_out",
+      employerId,
+      messageId: row.id,
+      actorLabel: SYSTEM_ACTOR,
+      candidateId: app.candidate_id,
+      applicationId: app.id,
+    });
+    out.suppressionId = added.row.id;
+    out.created = added.created;
+  }
+  if (employerId) {
+    const emp = (await client.query("SELECT status, domain FROM js_employers WHERE id = $1 FOR UPDATE", [employerId])).rows[0];
+    if (emp && !["opted_out", "blocked"].includes(emp.status)) {
+      await client.query("UPDATE js_employers SET status = 'opted_out' WHERE id = $1", [employerId]);
+      await S.auditEvent(client, SYSTEM_ACTOR, "employer.opt_out", app.candidate_id, app.id, { employerId, from: emp.status, messageId: row.id, suppressionId: out.suppressionId });
+    }
+    // Scope (review round 1): when the sender writes from the employer's own verified domain (not a free-mail or public-suffix domain), the
+    // whole domain opts out - a domain suppression, and every employer row that shares the domain becomes opted_out. A reply from any other
+    // domain (or an address-only match) stays a single-address opt-out.
+    const empDomain = emp && emp.domain ? guard.normalizeDomain(emp.domain) : null;
+    if (norm && empDomain && empDomain === norm.domain && !guard.isFreeMail(empDomain) && !suppression.isPublicSuffix(empDomain)) {
+      const dom = await suppression.addSuppression(client, {
+        kind: "domain", value: empDomain, reason: `Opt-out request received by e-mail from the employer's domain (message #${row.id})`, source: "reply_opt_out",
+        employerId, messageId: row.id, actorLabel: SYSTEM_ACTOR, candidateId: app.candidate_id, applicationId: app.id,
+      });
+      out.domainSuppressionId = dom.row.id;
+      const sharing = (await client.query("SELECT id, status, domain FROM js_employers WHERE domain IS NOT NULL AND lower(domain) LIKE $1 ORDER BY id FOR UPDATE", [`%${empDomain}%`])).rows
+        .filter((e) => guard.normalizeDomain(e.domain) === empDomain && !["opted_out", "blocked"].includes(e.status));
+      for (const e of sharing) {
+        await client.query("UPDATE js_employers SET status = 'opted_out' WHERE id = $1", [e.id]);
+        await S.auditEvent(client, SYSTEM_ACTOR, "employer.opt_out", app.candidate_id, app.id, { employerId: e.id, from: e.status, messageId: row.id, domain: empDomain, scope: "domain" });
+      }
+    }
+  }
+  const task = (await client.query(
+    `INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES ($1,'opt_out_received',$2,$3,$4)
+     ON CONFLICT (message_id, reason) WHERE message_id IS NOT NULL DO NOTHING RETURNING id`,
+    [app.id, `message:${row.id}: the employer asked not to be contacted again. The sender address was added to the do-not-contact list and the employer marked opted out. Review it; an administrator can undo it.`, responsible, row.id]
+  )).rows[0];
+  out.taskId = task ? task.id : null;
+  await S.timeline(client, app.id, SYSTEM_ACTOR, "opt_out_received", { messageId: row.id });
+  await S.auditEvent(client, SYSTEM_ACTOR, "message.opt_out_received", app.candidate_id, app.id, { messageId: row.id, suppressionId: out.suppressionId, employerId, taskId: out.taskId, evidence: (cls.evidence || []).filter((e) => e.category === "opt_out").map((e) => e.phrase).slice(0, 3) });
+  await S.staffEvent(client, app.candidate_id, responsible, "staff.opt_out_received", { applicationId: app.id, messageId: row.id, taskId: out.taskId });
+  return out;
+}
+
+/**
  * Plausible DSN (replyMatcher.isPlausibleBounce, auth not failed): never attached, NEVER changes a
  * submission or application status, NEVER writes the candidate timeline or candidate events. A hard
  * bounce (5.x.x / Action: failed) whose referenced Message-ID belongs to exactly one submission opens
@@ -226,7 +291,7 @@ async function openReviewTask(client, row, reason) {
 async function ingestBounce(client, m, cls, auth) {
   const ids = bounceIds(m);
   const subs = ids.length
-    ? (await client.query("SELECT id, application_id, status FROM js_submissions WHERE provider_message_id = ANY($1::text[]) OR evidence->>'messageIdPlanned' = ANY($1::text[]) ORDER BY id DESC", [ids])).rows
+    ? (await client.query("SELECT id, application_id, status, recipient FROM js_submissions WHERE provider_message_id = ANY($1::text[]) OR evidence->>'messageIdPlanned' = ANY($1::text[]) ORDER BY id DESC", [ids])).rows
     : [];
   const apps = [...new Set(subs.map((x) => x.application_id))];
   const st = matcher.bounceStatus(m.text);
@@ -243,6 +308,15 @@ async function ingestBounce(client, m, cls, auth) {
     ? existing.id
     : (await client.query("INSERT INTO js_tasks (application_id, reason, detail, assigned_to, message_id) VALUES ($1,'verify_delivery',$2,$3,$4) RETURNING id", [app.id, detail, responsible, row.id])).rows[0].id;
   await S.auditEvent(client, SYSTEM_ACTOR, "submission.bounce_reported", app.candidate_id, app.id, { submissionId: sub.id, messageId: row.id, code: st.code, submissionStatus: sub.status, taskId });
+  // A permanent failure (5.x.x / Action: failed) of the address we sent to: never send to it again until an administrator lifts it.
+  // Soft bounces (4.x.x) never suppress. The employer status is NOT changed (a dead mailbox is not an opt-out).
+  if (sub.recipient && st.hard) {
+    const norm = suppression.normaliseAddress(sub.recipient);
+    if (norm) {
+      const employerId = (await client.query("SELECT employer_id FROM js_jobs WHERE id = (SELECT job_id FROM js_applications WHERE id = $1)", [app.id])).rows[0]?.employer_id || null;
+      await suppression.addSuppression(client, { kind: "email", value: norm.address, reason: `Permanent delivery failure ${st.code} (DSN message #${row.id})`, source: "bounce", employerId, messageId: row.id, actorLabel: SYSTEM_ACTOR, candidateId: app.candidate_id, applicationId: app.id });
+    }
+  }
   await S.staffEvent(client, app.candidate_id, responsible, "staff.delivery_bounce", { applicationId: app.id, submissionId: sub.id, messageId: row.id, taskId });
   return { row, res, taskId, bounce: { submissionId: sub.id, applicationId: app.id } };
 }
@@ -276,6 +350,7 @@ async function ingest(mail) {
       await S.auditEvent(client, SYSTEM_ACTOR, "message.received", app.candidate_id, app.id, { messageId: row.id, reason: res.reason, sender: res.sender, authenticated: res.authenticated, autoReply, classification: cls.category, instructionLike: cls.instructionLike, attachmentsDropped: m.attachments.filter((a) => a.dropped).length });
       await S.staffEvent(client, app.candidate_id, responsible, "staff.reply_received", { applicationId: app.id, messageId: row.id, classification: cls.category, proposedStatus: cls.proposedStatus });
       await S.candidateEvent(client, app.candidate_id, "application.update", { applicationId: app.id, message: "You have an update" });
+      if (cls.category === "opt_out" && !autoReply && !bounceLike) await handleOptOut(client, { app, row, res, responsible, cls });
       return { row, app, res };
     }
     return { row, res, taskId: await openReviewTask(client, row, res.reason) };

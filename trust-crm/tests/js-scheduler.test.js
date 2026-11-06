@@ -192,6 +192,38 @@ test("search_only: tick searches + matches, ZERO applications, ZERO mails", asyn
   assert.deepEqual(fixture._state.searchCalls[0].keywords, ["Electrician"]);
 });
 
+test("stage 8 task 5: the scheduler never proposes a not_recommended or rejected match, and with require_match_acceptance only accepted ones", async () => {
+  const w = await world();
+  const emp = await employer(w, { confirmed: true });
+  fixture._set({ jobs: [feedJob(emp)] });
+  const c = await candidate(w, { mode: "prepare_for_approval" });
+  const t0 = T0();
+  // 1. first tick: the match is stored. Flag it not_recommended BEFORE the orchestrate step can use it (second tick).
+  await q("INSERT INTO js_module_state (key, value) VALUES ('match_settings', '{\"require_match_acceptance\": true}'::jsonb)");
+  const s1 = await tick(t0);
+  assert.deepEqual(s1.errors, []);
+  assert.equal(s1.applicationsCreated, 0, "acceptance required: a pending match creates nothing");
+  const m = (await q("SELECT * FROM js_matches WHERE candidate_id=$1", [c.id])).rows[0];
+  assert.ok(m && m.band, "the stored match has a band");
+  // The later ticks must only ORCHESTRATE the stored match: a scheduled search would re-score it (the band is recomputed on every match
+  // run) and which tick runs a search depends on the wall-clock minute/hour the suite starts at. Pause the source so the forced band holds.
+  await q("UPDATE js_sources SET paused = true");
+  // 2. accepted but not_recommended: still not proposed
+  await q("UPDATE js_matches SET decision='accepted', band='not_recommended' WHERE id=$1", [m.id]);
+  const s2 = await tick(new Date(t0.getTime() + HOUR));
+  assert.equal(s2.applicationsCreated, 0, "not_recommended is never auto-proposed");
+  // 3. rejected: never proposed, even with the setting off
+  await q("DELETE FROM js_module_state WHERE key='match_settings'");
+  await q("UPDATE js_matches SET decision='rejected', band='good' WHERE id=$1", [m.id]);
+  const s3 = await tick(new Date(t0.getTime() + 2 * HOUR));
+  assert.equal(s3.applicationsCreated, 0, "a rejected match is not proposed");
+  // 4. back to pending + good: proposed as before
+  await q("UPDATE js_matches SET decision='pending' WHERE id=$1", [m.id]);
+  const s4 = await tick(new Date(t0.getTime() + 3 * HOUR));
+  assert.equal(s4.applicationsCreated, 1);
+  assert.deepEqual(s4.errors, []);
+});
+
 test("prepare_for_approval: application ready_for_review (linked candidate/job/employer/staff, audited system:scheduler), ZERO mails; second tick no duplicates", async () => {
   const w = await world();
   const emp = await employer(w, { confirmed: true });

@@ -1,5 +1,7 @@
 // Matches (mounted at /jobsearch):
 //   GET  /candidates/:id/matches     ?page&pageSize   candidate own / staff assigned / admin all, else 404
+//   POST /matches/:id/accept|reject  {note?} jobsearch:approve (Manager/Admin) in scope; Agent 403; idempotent; re-decision audited
+//   GET  /match-settings             staff; PUT /match-settings  admin only: {require_match_acceptance: boolean}
 //   POST /employer-confirmations     admin only (jobsearch:write); job-scoped (jobId/applicationId) or employer-wide (employerId); evidence note required
 //   DELETE /employer-confirmations/:id  admin only; revokes (labels revert immediately)
 const express = require("express");
@@ -9,7 +11,10 @@ const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/er
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { authorize } = require("../modules/jobsearch/profileService");
 const { isAdmin } = require("../modules/jobsearch/scope");
-const { NOTICE } = require("../modules/jobsearch/matching");
+const { NOTICE, BAND_LABELS } = require("../modules/jobsearch/matching");
+const classification = require("../modules/jobsearch/classification");
+const matchDecision = require("../modules/jobsearch/matchDecision");
+const settingsService = require("../modules/jobsearch/settingsService");
 const { sanitizeUntrusted } = require("../modules/jobsearch/matching/sanitize");
 const { relabelJobs, lockForRelabel } = require("../modules/jobsearch/matchService");
 const { logAudit } = require("../utils/audit");
@@ -28,31 +33,59 @@ router.get("/candidates/:id/matches", verifyToken, asyncHandler(async (req, res)
   if (page > 10000) throw new HttpError(400, "page must be at most 10000");
   const total = (await db().query("SELECT count(*)::int AS n FROM js_matches m JOIN js_jobs j ON j.id = m.job_id WHERE m.candidate_id = $1 AND j.status = 'open'", [id])).rows[0].n;
   const rows = (await db().query(
-    `SELECT m.id, m.job_id, m.score, m.reasons, m.missing, m.uncertain, m.employer_support, m.employer_support_evidence, m.employer_support_conflict, m.overseas_accepted, m.overseas_applicants_evidence, m.created_at,
-            j.title, j.location, j.country, j.url, e.name AS employer
+    `SELECT m.id, m.job_id, m.score, m.band, m.decision, m.decision_by, m.decided_at, m.decision_note, m.reasons, m.missing, m.uncertain, m.employer_support, m.employer_support_evidence, m.employer_support_conflict, m.overseas_accepted, m.overseas_applicants_evidence, m.created_at,
+            j.title, j.location, j.country, j.url, e.name AS employer,
+            j.classification, j.classification_evidence, j.classified_at, j.classified_by, j.salary_text, j.employment_type, j.required_experience_text,
+            to_char(j.closing_date, 'YYYY-MM-DD') AS closing_date
        FROM js_matches m JOIN js_jobs j ON j.id = m.job_id LEFT JOIN js_employers e ON e.id = j.employer_id
       WHERE m.candidate_id = $1 AND j.status = 'open'
       ORDER BY m.score DESC, m.id ASC LIMIT $2 OFFSET $3`,
     [id, pageSize, (page - 1) * pageSize]
   )).rows;
+  const staff = req.user.role !== "Candidate";
   res.json({
     notice: NOTICE,
+    classificationNotice: classification.NOTICE,
     matches: rows.map((r) => ({
       id: r.id,
       jobId: r.job_id,
       score: r.score,
+      band: r.band,
+      bandLabel: r.band ? BAND_LABELS[r.band] : null,
+      // The staff decision and its note are never shown to the candidate here (they see a state only through an existing application).
+      ...(staff ? { decision: r.decision, decisionBy: r.decision_by, decidedAt: r.decided_at, decisionNote: r.decision_note } : {}),
       reasons: r.reasons,
       missing: r.missing,
       uncertain: r.uncertain,
       employerSupport: { label: r.employer_support, evidence: r.employer_support_evidence, ...(r.employer_support_conflict ? { conflict: true } : {}), notice: supportNotice(r.employer_support) },
       overseas: { accepted: r.overseas_accepted, evidence: r.overseas_applicants_evidence },
       firstSeen: r.created_at,
-      job: { title: r.title, employer: r.employer, location: r.location, country: r.country, url: r.url },
+      job: {
+        title: r.title, employer: r.employer, location: r.location, country: r.country, url: r.url,
+        salaryText: r.salary_text, employmentType: r.employment_type, requiredExperienceText: r.required_experience_text, closingDate: r.closing_date,
+        ...classification.presentClassification(r, { staff }),
+      },
     })),
     page,
     pageSize,
     total,
   });
+}));
+
+for (const [verb, decision] of [["accept", "accepted"], ["reject", "rejected"]]) {
+  router.post(`/matches/:id/${verb}`, verifyToken, asyncHandler(async (req, res) => {
+    res.json(await matchDecision.decide({ matchId: req.params.id, actor: req.user, decision, note: body(req).note }));
+  }));
+}
+
+router.get("/match-settings", verifyToken, asyncHandler(async (req, res) => {
+  const perms = PERMISSIONS[req.user && req.user.role] || [];
+  if (req.user.role === "Candidate" || !(perms.includes("*") || perms.includes("jobsearch:read"))) throw new HttpError(403, "Access denied");
+  res.json(await settingsService.getMatchSettings());
+}));
+
+router.put("/match-settings", verifyToken, asyncHandler(async (req, res) => {
+  res.json(await settingsService.updateMatchSettings(req.body, req.user));
 }));
 
 router.post("/employer-confirmations", verifyToken, asyncHandler(async (req, res) => {

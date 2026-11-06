@@ -59,7 +59,7 @@ const HANDOFF_REASONS = new Set(guard.HANDOFF_REASONS);
 // Handoffs that mean "this posting cannot be completed by e-mail" (everything but a generic staff review).
 const CHANNEL_HANDOFFS = new Set(guard.HANDOFF_REASONS.filter((r) => r !== "staff_review"));
 // Refusals at queue time that leave a note on the application timeline.
-const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES]);
+const NOTE_CODES = new Set([...CANCEL_CODES, ...HOLD_CODES, "job_closed", ...DUP_CODES, "recipient_suppressed", "employer_opted_out", "outreach_basis_not_permitted", "job_classification_blocked", "work_authorization_required", "match_rejected", "match_not_accepted"]);
 const EVIDENCE_KINDS = ["delivery_receipt", "employer_acknowledgement", "manual_confirmation"];
 const MIN_NOTE = 10;
 // Internal capability for system evidence (Task 13 receipt / reply ingestion). Never passed by routes.
@@ -375,7 +375,7 @@ async function prepareSend(client, job, applicationId, submissionId, deps) {
 
   // The exact package the guard just re-validated (approved rows), loaded by storage key and re-hashed.
   const rows = (await client.query(
-    `SELECT d.*, f.storage_key AS cv_key, doc.file_path AS doc_path FROM js_application_documents d
+    `SELECT d.*, f.storage_key AS cv_key, f.kind AS cv_kind, f.canonical_name AS cv_canonical_name, f.format AS cv_format, doc.file_path AS doc_path FROM js_application_documents d
        LEFT JOIN js_cv_files f ON f.id = d.cv_file_id LEFT JOIN documents doc ON doc.id = d.document_id
       WHERE d.application_id = $1 AND d.removed_at IS NULL AND d.approved_at IS NOT NULL ORDER BY d.id`,
     [app.id]
@@ -388,6 +388,8 @@ async function prepareSend(client, job, applicationId, submissionId, deps) {
     sha256: r.sha256,
     docType: r.doc_type,
     sensitive: r.sensitive,
+    // a Canadian CV goes out under its canonical name (<reference>-CV-V<n>[-FR].<pdf|docx>), not the generic CV-<Name>-v<n> one
+    canonicalName: r.cv_kind === "canadian" ? r.cv_canonical_name : null,
     // a CRM document is loaded only from a storage key owned by this candidate (Task 19 M-1)
     storageKey: r.cv_file_id ? r.cv_key : documentPolicy.ownedStorageKey(String(r.doc_path || ""), app.candidate_id),
   }));
@@ -530,6 +532,18 @@ async function handleSubmit(job, deps = {}) {
       return plan.done;
     }
     if (typeof deps.onIntentPersisted === "function") await deps.onIntentPersisted({ applicationId, submissionId });
+    // Last look (review round 1): on a FRESH connection, outside the intent transaction's snapshot, so a suppression, opt-out, match
+    // rejection or reclassification committed a moment ago is honoured. The intent is recorded but nothing has been sent: block it.
+    if (typeof deps.beforeProviderCall === "function") await deps.beforeProviderCall({ applicationId, submissionId, recipient: plan.send.recipient });
+    const fin = await guard.finalCheck(applicationId, { recipient: plan.send.recipient });
+    if (!fin.ok) {
+      const blocked = await inTx(async (c) => {
+        const st = await lockSubmission(c, applicationId, submissionId);
+        return st ? blockSubmission(c, st, { code: fin.code, detail: `${fin.detail} (final check before the provider call)`, notes: [] }) : { status: "noop", reason: "no_submission" };
+      }, conn);
+      await auditLog(SYSTEM_ACTOR, `jobsearch.submission.${blocked.status}`, submissionId, { applicationId, status: blocked.status, reason: blocked.reason || null });
+      return blocked;
+    }
     // Provider call: outside any transaction; at most once for this submission row.
     const res = await emailChannel.send(plan.send.app, plan.send.mail, plan.send.recipient, { mailSend: deps.mailSend });
     const out = await inTx((c) => recordResult(c, applicationId, submissionId, plan.send, res), conn);

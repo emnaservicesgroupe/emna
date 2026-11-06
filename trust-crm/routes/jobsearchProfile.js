@@ -3,12 +3,16 @@
 //   GET  /candidates/:id/profile
 //   PUT  /candidates/:id/profile/confirm
 //   GET  /files/:key?u=&exp=&sig=         signed download, re-authorized on every request
+//   GET  /candidates/:id/extras           staff only (scope): reference + Canada profile fields
+//   PATCH /candidates/:id/extras          staff only (jobsearch:write + candidates:write), audited
+//   GET  /me/extras, PATCH /me/extras     candidate, own record; may edit only city, whatsapp, relocation_ready
 const express = require("express");
 const multer = require("multer");
 const { verifyToken } = require("../middleware/auth");
 const { HttpError } = require("../modules/jobsearch/httpError");
 const { asyncHandler, jobsearchErrorHandler } = require("../modules/jobsearch/errorHandler");
 const service = require("../modules/jobsearch/profileService");
+const extras = require("../modules/jobsearch/candidateExtras");
 
 const router = express.Router();
 
@@ -113,6 +117,47 @@ router.get(
       "Cache-Control": "private, no-store",
     });
     return res.send(file.buf);
+  })
+);
+
+const extrasBody = (req) => (req.body && typeof req.body === "object" ? req.body : null);
+const staffOnly = (req) => {
+  if (req.user.role === "Candidate") throw new HttpError(403, "Staff access required");
+};
+
+router.get(
+  "/candidates/:id/extras",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    staffOnly(req);
+    return res.set("Cache-Control", "private, no-store").json(await extras.getExtras(req.user, req.params.id));
+  })
+);
+
+router.patch(
+  "/candidates/:id/extras",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    staffOnly(req);
+    return res.set("Cache-Control", "private, no-store").json(await extras.updateExtras(req.user, req.params.id, extrasBody(req)));
+  })
+);
+
+router.get(
+  "/me/extras",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const id = await extras.ownCandidateId(req.user);
+    return res.set("Cache-Control", "private, no-store").json(await extras.getExtras(req.user, id));
+  })
+);
+
+router.patch(
+  "/me/extras",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const id = await extras.ownCandidateId(req.user);
+    return res.set("Cache-Control", "private, no-store").json(await extras.updateExtras(req.user, id, extrasBody(req)));
   })
 );
 

@@ -113,11 +113,16 @@ async function activeConsent(candidateId, scopeKey, client) {
  * includeReady) and their pending submit queue items. Runs on `client` (caller's
  * transaction) or opens its own. Returns the number of cancelled applications.
  */
-async function cancelQueuedForCandidate(candidateId, reason, client, { includeReady = false, actor = "system" } = {}) {
-  if (!client) return inTx((c) => cancelQueuedForCandidate(candidateId, reason, c, { includeReady, actor }));
+async function cancelQueuedForCandidate(candidateId, reason, client, { includeReady = false, actor = "system", onlyApplicationIds = null } = {}) {
+  if (!client) return inTx((c) => cancelQueuedForCandidate(candidateId, reason, c, { includeReady, actor, onlyApplicationIds }));
   await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [candidateId]);
   const statuses = includeReady ? ["queued", "approved", "ready_for_review"] : ["queued", "approved"];
-  const apps = await client.query("SELECT id, status FROM js_applications WHERE candidate_id = $1 AND status = ANY($2) ORDER BY id FOR UPDATE", [candidateId, statuses]);
+  // onlyApplicationIds (array): restrict to those applications (e.g. only the ones using one withdrawn CV version).
+  const only = Array.isArray(onlyApplicationIds) ? onlyApplicationIds : null;
+  const apps = await client.query(
+    "SELECT id, status FROM js_applications WHERE candidate_id = $1 AND status = ANY($2) AND ($3::int[] IS NULL OR id = ANY($3::int[])) ORDER BY id FOR UPDATE",
+    [candidateId, statuses, only]
+  );
   const ids = apps.rows.map((a) => a.id);
   if (ids.length > 0) {
     await client.query("UPDATE js_applications SET status = 'cancelled', updated_at = now() WHERE id = ANY($1)", [ids]);
@@ -136,8 +141,8 @@ async function cancelQueuedForCandidate(candidateId, reason, client, { includeRe
     `UPDATE js_queue SET status = 'cancelled', last_error = $3
      WHERE kind = ANY($4::text[]) AND status = 'pending' AND locked_at IS NULL
        AND ( COALESCE(payload->>'applicationId', payload->>'application_id') = ANY($1::text[])
-          OR COALESCE(payload->>'candidateId', payload->>'candidate_id') = $2 )`,
-    [ids.map(String), String(candidateId), reason, CANCELLABLE_QUEUE_KINDS]
+          OR ($5::boolean = false AND COALESCE(payload->>'candidateId', payload->>'candidate_id') = $2) )`,
+    [ids.map(String), String(candidateId), reason, CANCELLABLE_QUEUE_KINDS, only !== null]
   );
   return ids.length;
 }

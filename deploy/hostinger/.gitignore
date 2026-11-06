@@ -6,3 +6,5 @@
 .env.db.tmp.*
 # Database dumps and uploaded files (personal data).
 backups/
+# Written by nginx-config.sh (nginx server blocks with your domain/port filled in; no secrets)
+nginx-vita.generated*

@@ -21,6 +21,9 @@ try {
   console.log("Job-search scheduler not started:", err.message);
 }
 
+// HR: HR_TIMEZONE and the schedule timezones are checked against the database's zone list; problems are logged, never fatal.
+require("./modules/hr/common").checkTimezoneConfig(db).catch((err) => console.log("HR timezone check skipped:", err.message));
+
 const PORT = process.env.PORT || 5000;
 
 const server = app.listen(PORT, () => {
@@ -34,6 +37,8 @@ const shutdown = createShutdown({
     () => jobSearch && jobSearch.stopJobSearchScheduler(),
     () => alertTask && typeof alertTask.stop === "function" && alertTask.stop(),
     () => require("./modules/jobsearch/eventsHub").shutdown(),
+    () => require("./modules/chat/hub").shutdown(),
+    () => require("./routes/mcp").shutdown(),
   ],
   isIdle: () => !jobSearch || typeof jobSearch.isIdle !== "function" || jobSearch.isIdle(),
   closeDb: () => db.end(),

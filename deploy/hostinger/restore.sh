@@ -6,18 +6,19 @@
 #
 # How (safe even when the current database has tables newer than the backup):
 #   1. verify the checksums, ask you to type RESTORE, take a backup of the CURRENT state (unless --no-backup);
-#   2. stop app + caddy; restore the dump into a NEW temporary database owned by the application role
+#   2. stop app (+ caddy in Caddy mode); restore the dump into a NEW temporary database owned by the application role
 #      (one transaction, stops at the first error) - the current database is untouched until this succeeds;
 #   3. swap: current database -> vita_pre_restore_<time>, temporary -> the real name; drop the old one;
 #   4. replace the uploaded files: the archive is validated before step 2, extracted into a temporary folder,
 #      and only then swapped in (the current files are never deleted first);
-#   5. ALWAYS (success or failure) start app + caddy again; the app re-applies newer migrations on start.
+#   5. ALWAYS (success or failure) start app (+ caddy) again; the app re-applies newer migrations on start.
 # Test your backups: restore one on a spare VPS (or a fresh install) from time to time.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=lib.sh
+. ./lib.sh
+vita_init
 
 TAKE_BACKUP=ask
 if [ "${1:-}" = "--no-backup" ]; then
@@ -44,10 +45,6 @@ if printf '%s\n' "$LISTING" | grep -q -E '(^|/)\.\.(/|$)'; then
 fi
 SRC_ABS="$(cd "$SRC" && pwd)"
 
-command -v docker > /dev/null 2>&1 || die "docker is not installed"
-DOCKER=(docker)
-docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
-compose() { "${DOCKER[@]}" compose "$@"; }
 
 get_env() { grep -E "^$2=" "$1" 2> /dev/null | tail -n 1 | cut -d= -f2- || true; }
 DB_USER="$(get_env .env DB_USER)"
@@ -60,7 +57,8 @@ STAMP="$(date -u +%Y%m%d%H%M%S)"
 TMP_DB="${DB_NAME}_restore_tmp"
 OLD_DB="${DB_NAME}_pre_restore_${STAMP}"
 
-printf 'This REPLACES the current VITA database and uploaded files with the backup in:\n  %s\n' "$SRC_ABS"
+guard_project
+printf '\nThis REPLACES the database and uploaded files of the project above with the backup in:\n  %s\n' "$SRC_ABS"
 [ -t 0 ] || die "run this in an interactive terminal (it asks for confirmation)"
 IFS= read -r -p "Type RESTORE to continue: " answer
 [ "$answer" = "RESTORE" ] || die "cancelled"
@@ -71,6 +69,10 @@ if [ "$TAKE_BACKUP" = "ask" ]; then
     *) ./backup.sh ;;
   esac
 fi
+
+# the proxy container that must be stopped with the app (Caddy mode only; none in nginx mode)
+EDGE=()
+if has_caddy; then EDGE=(caddy); fi
 
 psql_on() {
   local db="$1"
@@ -83,8 +85,8 @@ psql_super() { psql_on postgres "$@"; }
 restart_stack() {
   local rc=$?
   psql_super -c "DROP DATABASE IF EXISTS \"${TMP_DB}\" WITH (FORCE)" > /dev/null 2>&1 || true
-  printf 'Starting app and caddy again...\n'
-  compose up -d app caddy > /dev/null 2>&1 || compose up -d app caddy || true
+  printf 'Starting app%s again...\n' "${EDGE[*]:+ and ${EDGE[*]}}"
+  compose up -d app "${EDGE[@]}" > /dev/null 2>&1 || compose up -d app "${EDGE[@]}" || true
   if [ "$rc" -eq 0 ]; then
     printf 'Restore finished. Check: ./status.sh\n'
   else
@@ -98,7 +100,7 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 trap restart_stack EXIT
-compose stop app caddy
+compose stop app "${EDGE[@]}"
 
 # 2. restore into a fresh database owned by the application role
 printf 'Restoring the database into a temporary database...\n'

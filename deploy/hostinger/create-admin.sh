@@ -7,19 +7,16 @@
 # The password is typed hidden (read -s), is never echoed, never written to disk and never put on a command
 # line (where `ps` could show it): name, e-mail and password go through standard input into a small node
 # script inside the app container, which posts them to the app on 127.0.0.1 (not over the internet).
-# This is the ONLY way to reach the bootstrap: Caddy answers 404 for it and, in production, the app refuses
+# This is the ONLY way to reach the bootstrap: Caddy / nginx answer 404 for it and, in production, the app refuses
 # every caller that is not on its own loopback interface or that carries proxy headers.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=lib.sh
+. ./lib.sh
+vita_init
 
 [ -t 0 ] || die "run this in an interactive terminal (it asks for the password)"
-command -v docker > /dev/null 2>&1 || die "docker is not installed (see SETUP-HOSTINGER.md)"
-DOCKER=(docker)
-docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
-compose() { "${DOCKER[@]}" compose "$@"; }
 
 [ -n "$(compose ps -q app 2> /dev/null || true)" ] || die "the app is not running: ./setup.sh (or docker compose up -d)"
 
@@ -81,6 +78,6 @@ case "$rc" in
     SITE="$(grep -E '^SITE_ADDRESS=' .env 2> /dev/null | tail -n 1 | cut -d= -f2- || true)"
     printf '\nDone. Sign in at https://%s/vita/admin.html with this e-mail and password.\n' "${SITE:-<your-site>}"
     ;;
-  3) die "an account already exists, so bootstrap is disabled. Sign in with the existing SuperAdmin (or, on a demo-only install, wipe it first: docker compose down -v - this deletes ALL data)." ;;
+  3) die "an account already exists, so bootstrap is disabled. Sign in with the existing SuperAdmin (or, on a demo-only install, wipe it first: ./wipe-data.sh - this deletes ALL data)." ;;
   *) die "the account was not created (see the message above)" ;;
 esac

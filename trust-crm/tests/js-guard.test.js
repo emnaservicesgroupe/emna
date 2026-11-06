@@ -1088,3 +1088,141 @@ test("Task 18 duplicate window uses the DB clock (earlier of the injected and DB
   // injected now = real now - 100 days -> window starts 190 days ago in DB time -> still a duplicate)
   assert.equal((await check(bApp, { now: new Date(Date.now() - 100 * 86400000) })).code, "duplicate");
 });
+
+// ---------------------------------------------------------------- review round 1: classification and match decision re-checks
+
+const classificationModule = require("../modules/jobsearch/classification");
+const matchDecision = require("../modules/jobsearch/matchDecision");
+const settingsService = require("../modules/jobsearch/settingsService");
+const submitterModule = require("../modules/jobsearch/submitter");
+const SUB_DEPS = { recheck: OPEN, mailSend: async () => ({ providerMessageId: "<ok@test>" }) };
+
+const setClass = (jobId, cls) => q("UPDATE js_jobs SET classification=$2, classified_by=$3 WHERE id=$1", [jobId, cls, adminId]);
+const setMatch = (matchId, decision) => q("UPDATE js_matches SET decision=$2 WHERE id=$1", [matchId, decision]);
+const withAcceptance = async (fn) => {
+  await settingsService.updateMatchSettings({ require_match_acceptance: true }, { id: adminId, role: "Admin" });
+  try {
+    return await fn();
+  } finally {
+    await settingsService.updateMatchSettings({ require_match_acceptance: false }, { id: adminId, role: "Admin" });
+  }
+};
+
+test("review re-check: the guard refuses a blocked classification, a rejected match and (when required) an unaccepted match", async () => {
+  for (const cls of ["prospective_no_vacancy", "closed_unsuitable"]) {
+    const w = await world();
+    await setClass(w.jobId, cls);
+    const r = await check(w.appId);
+    assert.equal(r.ok, false, cls);
+    assert.equal(r.code, "job_classification_blocked");
+  }
+  const wa = await world();
+  await setClass(wa.jobId, "work_authorization_required");
+  assert.equal((await check(wa.appId)).code, "work_authorization_required");
+  await q("UPDATE candidates SET work_authorization_status='pr' WHERE id=$1", [wa.candidateId]);
+  assert.equal((await check(wa.appId)).ok, true, "a permit / PR / citizen status lifts work_authorization_required");
+  await q("UPDATE candidates SET work_authorization_status='student' WHERE id=$1", [wa.candidateId]).catch(() => {});
+
+  const wm = await world();
+  await setMatch(wm.matchId, "rejected");
+  assert.equal((await check(wm.appId)).code, "match_rejected");
+  await setMatch(wm.matchId, "pending");
+  assert.equal((await check(wm.appId)).ok, true, "pending is fine while acceptance is not required");
+  await withAcceptance(async () => {
+    assert.equal((await check(wm.appId)).code, "match_not_accepted");
+    await setMatch(wm.matchId, "accepted");
+    assert.equal((await check(wm.appId)).ok, true);
+    await q("DELETE FROM js_matches WHERE id=$1", [wm.matchId]);
+    assert.equal((await check(wm.appId)).code, "match_not_accepted", "no match row at all is not an acceptance");
+  });
+  assert.ok(guard.GUARD_CODES.includes("job_classification_blocked") && guard.GUARD_CODES.includes("match_rejected") && guard.GUARD_CODES.includes("match_not_accepted") && guard.GUARD_CODES.includes("work_authorization_required"));
+});
+
+test("review re-check: approval and queueing refuse after the classification or the match decision changed", async () => {
+  const w = await world({ stopAt: "ready" });
+  await setClass(w.jobId, "closed_unsuitable");
+  await assert.rejects(applicationService.approveApplication({ id: w.appId, actor: w.manager, reason: "ok" }), /Cannot approve: job_classification_blocked/);
+  assert.equal(await status(w.appId), "ready_for_review");
+  assert.ok((await q("SELECT 1 FROM js_timeline WHERE application_id=$1 AND event='approval_blocked'", [w.appId])).rowCount >= 1);
+  await setClass(w.jobId, null);
+  await setMatch(w.matchId, "rejected");
+  await assert.rejects(applicationService.approveApplication({ id: w.appId, actor: w.manager, reason: "ok" }), /match_rejected/);
+  await setMatch(w.matchId, "pending");
+  await applicationService.approveApplication({ id: w.appId, actor: w.manager, reason: "ok" });
+  // approved, then the match is rejected directly in SQL (a path that bypasses the cancel): queueing refuses
+  await setMatch(w.matchId, "rejected");
+  const r = await submitterModule.queueSubmission(w.appId, w.manager, SUB_DEPS);
+  assert.equal(r.queued, false);
+  assert.equal(r.reason, "match_rejected");
+  // auto-approval eligibility names the same reasons
+  const wa = await world({ auto: true, stopAt: "ready" });
+  await setClass(wa.jobId, "prospective_no_vacancy");
+  const el = await applicationService.autoApproveEligibility(wa.appId);
+  assert.equal(el.allowed, false);
+  assert.ok(el.reasons.includes("job_classification_blocked"));
+});
+
+test("review re-check: a queued item is blocked at send time (retry path), and the final check right before the provider call honours a late change", async () => {
+  const w = await world();
+  const q1 = await submitterModule.queueSubmission(w.appId, w.manager, SUB_DEPS);
+  assert.equal(q1.queued, true, JSON.stringify(q1));
+  const item = (await q("SELECT * FROM js_queue WHERE kind='submit' AND payload->>'submissionId'=$1", [String(q1.submissionId)])).rows[0];
+  await setMatch(w.matchId, "rejected");
+  let called = 0;
+  const out = await submitterModule.handleSubmit(item, { ...SUB_DEPS, mailSend: async () => { called += 1; return { providerMessageId: "x" }; } });
+  assert.equal(out.status, "blocked", JSON.stringify(out));
+  assert.equal(out.code, "match_rejected");
+  assert.equal(called, 0);
+
+  // the change lands AFTER the intent transaction took its snapshot: only the final check can catch it
+  const w2 = await world();
+  const q2 = await submitterModule.queueSubmission(w2.appId, w2.manager, SUB_DEPS);
+  const item2 = (await q("SELECT * FROM js_queue WHERE kind='submit' AND payload->>'submissionId'=$1", [String(q2.submissionId)])).rows[0];
+  const out2 = await submitterModule.handleSubmit(item2, {
+    ...SUB_DEPS,
+    mailSend: async () => { called += 1; return { providerMessageId: "x" }; },
+    beforeProviderCall: async () => { await setClass(w2.jobId, "closed_unsuitable"); },
+  });
+  assert.equal(out2.status, "blocked", JSON.stringify(out2));
+  assert.equal(out2.code, "job_classification_blocked");
+  assert.equal(called, 0, "the provider was never called");
+  assert.equal((await q("SELECT status FROM js_submissions WHERE id=$1", [q2.submissionId])).rows[0].status, "failed");
+});
+
+test("review re-check: staff classifying a job into a blocked class, or rejecting a match, cancels approved / queued applications and never sent ones", async () => {
+  const a = await world();
+  const b = await world();
+  const c = await world();
+  // b: sent (moved onto a's job), c: queued (moved onto a's job)
+  await q("UPDATE js_applications SET job_id=$2, status='sent' WHERE id=$1", [b.appId, a.jobId]);
+  await q("UPDATE js_applications SET job_id=$2 WHERE id=$1", [c.appId, a.jobId]);
+  const qd = await submitterModule.queueSubmission(c.appId, c.manager, SUB_DEPS);
+  assert.equal(qd.queued, true, JSON.stringify(qd));
+  const cls = await classificationModule.setStaffClassification({ jobId: a.jobId, user: a.manager, classification: "closed_unsuitable", note: "Employer closed the search" });
+  assert.equal(cls.classification, "closed_unsuitable");
+  assert.equal(await status(a.appId), "cancelled");
+  assert.equal(await status(c.appId), "cancelled");
+  assert.equal(await status(b.appId), "sent", "a sent application is never touched");
+  assert.equal((await q("SELECT status FROM js_submissions WHERE id=$1", [qd.submissionId])).rows[0].status, "failed");
+  const tl = (await q("SELECT detail FROM js_timeline WHERE application_id=$1 AND event='cancelled'", [a.appId])).rows;
+  assert.equal(tl.length, 1);
+  assert.match(tl[0].detail.reason, /job_classified_closed_unsuitable/);
+  assert.ok((await q("SELECT 1 FROM js_audit_events WHERE action='job.classification_cancel_applications' AND candidate_id=$1", [a.candidateId])).rowCount === 1);
+
+  // work_authorization_required spares a candidate with a PR
+  const d = await world();
+  const e = await world();
+  await q("UPDATE js_applications SET job_id=$2 WHERE id=$1", [e.appId, d.jobId]);
+  await q("UPDATE candidates SET work_authorization_status='pr' WHERE id=$1", [e.candidateId]);
+  await classificationModule.setStaffClassification({ jobId: d.jobId, user: d.manager, classification: "work_authorization_required" });
+  assert.equal(await status(d.appId), "cancelled");
+  assert.equal(await status(e.appId), "approved");
+
+  // match rejection
+  const f = await world();
+  const rej = await matchDecision.decide({ matchId: f.matchId, actor: f.manager, decision: "rejected", note: "not suitable" });
+  assert.equal(rej.decision, "rejected");
+  assert.equal(await status(f.appId), "cancelled");
+  assert.ok((await q("SELECT 1 FROM js_audit_events WHERE action='match.cancel_applications' AND candidate_id=$1", [f.candidateId])).rowCount === 1);
+  assert.ok((await q("SELECT 1 FROM js_timeline WHERE application_id=$1 AND event='cancelled' AND detail->>'reason'='match_rejected'", [f.appId])).rowCount === 1);
+});

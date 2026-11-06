@@ -6,7 +6,9 @@
   var V = window.VITA;
   var t = V.t, tc = V.tc, h = V.h, $ = V.$;
 
-  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"];
+  var STAFF_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent", "Accountant", "HR"]; // every staff role may sign in; the HR tab is for all of them
+  var JOBSEARCH_ROLES = ["SuperAdmin", "Admin", "Manager", "Receptionist", "Agent"]; // jobsearch:read (the Accountant and HR roles use their own tabs; every staff role also sees the HR tab)
+  var JOBSEARCH_TABS = ["dashboard", "applications", "review", "interviews", "sources", "settings", "reports", "directory"];
   var PERMS = {
     SuperAdmin: ["read", "write", "approve", "admin"],
     Admin: ["read", "write", "approve", "admin"],
@@ -49,6 +51,7 @@
   function role() { return S.session ? S.session.role : null; }
   function can(p) { return (PERMS[role()] || []).indexOf(p) >= 0; }
   function isAdmin() { return role() === "Admin" || role() === "SuperAdmin"; }
+  function hasJobsearch() { return JOBSEARCH_ROLES.indexOf(role()) >= 0; }
   function canSeeHealth() { return ["Admin", "SuperAdmin", "Manager"].indexOf(role()) >= 0; }
   function candidateName(id) {
     var c = S.dash && S.dash.candidates.find(function (x) { return x.candidateId === id; });
@@ -88,21 +91,39 @@
 
   // ================================================================ extension API (crm-*.js)
   // Extra tabs/panels live in their own scripts (crm-leads.js, crm-sitejobs.js, crm-candidate.js), loaded after this file.
-  // registerTab(name, {init, load, visible}) wires #tab-<name>/#panel-<name>; onCandidate(fn) runs when the dashboard
+  // registerTab(name, {init, load, visible, onStart, onStop}) wires #tab-<name>/#panel-<name> (onStart / onStop: sign-in / sign-out); onCandidate(fn) runs when the dashboard
   // opens a candidate card, so CRM code can add its section without this file knowing about it.
   var EXT = {};
   var candidateListeners = [];
+  // Canada service layer (canada-*.js): extra cards after a built-in tab's loader, extra sections in the application drawer and an extra button per employer row.
+  var tabLoadListeners = {};
+  var drawerListeners = [];
+  var employerRowListeners = [];
   window.VITA_ADMIN = {
     role: role,
     registerTab: function (name, def) { EXT[name] = def; },
     onCandidate: function (fn) { candidateListeners.push(fn); },
+    onTabLoad: function (name, fn) { (tabLoadListeners[name] = tabLoadListeners[name] || []).push(fn); },
+    onDrawer: function (fn) { drawerListeners.push(fn); },
+    onEmployerRow: function (fn) { employerRowListeners.push(fn); },
     selectTab: function (name, focusPanel) { selectTab(name, focusPanel); },
-    errorBox: errorBox, kv: kv, table: table, fillSelect: fillSelect, option: option,
+    errorBox: errorBox, kv: kv, table: table, fillSelect: fillSelect, option: option, qs: qs,
   };
 
   // ================================================================ login / session
+  /** Runs def[name]() of every extension tab; onStart only for tabs the signed-in role may use. A failing hook never blocks the console. */
+  function extHook(name) {
+    Object.keys(EXT).forEach(function (tab) {
+      var def = EXT[tab];
+      if (typeof def[name] !== "function") return;
+      if (name === "onStart" && def.visible && !def.visible()) return;
+      try { def[name](); } catch (e) { /* reported by the tab itself */ }
+    });
+  }
+
   function showLogin() {
     if (S.events) { S.events.stop(); S.events = null; }
+    extHook("onStop");
     S.session = null;
     $("#app-view").hidden = true;
     $("#logout").hidden = true;
@@ -165,7 +186,10 @@
         $("#logout").hidden = false;
         renderWho();
         setupTabs();
-        S.events = V.connectEvents({
+        applyRoleTabs();
+        extHook("onStart"); // extension tabs with a session-long job (the Messages stream and its unread badge)
+        // The live stream needs jobsearch:read; an Accountant / HR user works in their own tabs and has no stream.
+        if (hasJobsearch()) S.events = V.connectEvents({
           onEvent: function () { refreshSoon(); },
           onStatus: V.liveIndicator($("#live-status")),
           refetch: function () { refreshCurrent(); },
@@ -182,12 +206,14 @@
   function setupTabs() {
     if (tabsReady) return;
     tabsReady = true;
-    var buttons = V.$all("#tabs [role=tab]");
-    buttons.forEach(function (b, i) {
+    V.$all("#tabs [role=tab]").forEach(function (b) {
       b.addEventListener("click", function () { selectTab(b.getAttribute("data-tab"), true); });
       b.addEventListener("keydown", function (e) {
         var rtl = document.documentElement.dir === "rtl";
         var next = null;
+        var buttons = V.$all("#tabs [role=tab]").filter(function (x) { return !x.hidden; }); // hidden (role-gated) tabs are skipped
+        var i = buttons.indexOf(b);
+        if (i < 0) return;
         if (e.key === (rtl ? "ArrowLeft" : "ArrowRight")) next = buttons[(i + 1) % buttons.length];
         else if (e.key === (rtl ? "ArrowRight" : "ArrowLeft")) next = buttons[(i - 1 + buttons.length) % buttons.length];
         else if (e.key === "Home") next = buttons[0];
@@ -199,12 +225,7 @@
         }
       });
     });
-    // role-dependent tabs
-    $("#tab-health").hidden = !canSeeHealth();
-    $("#tab-scheduler").hidden = !isAdmin();
     Object.keys(EXT).forEach(function (name) {
-      var tab = $("#tab-" + name);
-      if (tab && EXT[name].visible) tab.hidden = !EXT[name].visible();
       if (EXT[name].init) EXT[name].init();
     });
     initDashboard();
@@ -219,6 +240,27 @@
     initDirectory();
     initDrawer();
     window.addEventListener("hashchange", routeFromHash);
+  }
+
+  /** Shows only the tabs the signed-in role may use (re-run at every sign-in, so a role change on the same page is honoured). */
+  function applyRoleTabs() {
+    JOBSEARCH_TABS.forEach(function (name) { $("#tab-" + name).hidden = !hasJobsearch(); });
+    if (hasJobsearch()) {
+      $("#tab-health").hidden = !canSeeHealth();
+      $("#tab-scheduler").hidden = !isAdmin();
+    } else {
+      $("#tab-health").hidden = true;
+      $("#tab-scheduler").hidden = true;
+    }
+    Object.keys(EXT).forEach(function (name) {
+      var tab = $("#tab-" + name);
+      if (tab && EXT[name].visible) tab.hidden = !EXT[name].visible();
+    });
+    var current = $("#tab-" + S.tab);
+    if (!current || current.hidden) {
+      var first = V.$all("#tabs [role=tab]").filter(function (x) { return !x.hidden; })[0];
+      if (first) S.tab = first.getAttribute("data-tab");
+    }
   }
 
   function selectTab(name, focusPanel) {
@@ -261,6 +303,7 @@
     var loaders = { dashboard: loadDashboard, applications: loadApplications, review: loadReview, interviews: loadInterviews, sources: loadSources, settings: loadSettings, reports: function () {}, health: loadHealth, scheduler: loadScheduler, directory: loadDirectory };
     Object.keys(EXT).forEach(function (name) { if (EXT[name].load) loaders[name] = EXT[name].load; });
     (loaders[S.tab] || function () {})();
+    (tabLoadListeners[S.tab] || []).forEach(function (fn) { try { fn(); } catch (e) { /* an extension failure must not break the console */ } });
     if (S.drawerAppId) renderDrawer(S.drawerAppId, true);
   }
 
@@ -682,6 +725,11 @@
       matchSec.appendChild(V.scoreBlock(m));
     } else matchSec.appendChild(h("p", { class: "muted", text: t("drawer.noMatch") }));
     out.push(matchSec);
+    // ---- Canada service layer: classification, match decision, outreach checks and employer history (canada-*.js)
+    var drawerCtx = { lastPackage: S.lastPackage && S.lastPackage.id === a.id ? S.lastPackage.pkg : null, refresh: function () { renderDrawer(a.id, true); } };
+    drawerListeners.forEach(function (fn) {
+      try { out.push(fn(d, drawerCtx)); } catch (e) { /* an extension failure must not break the drawer */ }
+    });
 
     // ---- auto approval
     if (d.autoApproval) {
@@ -772,6 +820,17 @@
     return h("div", { class: "field" }, b, reason && !enabled ? h("span", { class: "hint", id: id, text: reason }) : null);
   }
 
+  /**
+   * The server refuses an approval with 409 "Cannot approve: <codes> (...)" when the recipient is on the do-not-contact list, the employer opted out
+   * or the outreach basis is not permitted. Shown as a localized sentence instead of the raw codes.
+   */
+  function outreachRefusal(err) {
+    var m = err && err.status === 409 && /^Cannot approve: ([a-z_, ]+) \(/.exec(String(err.message || ""));
+    if (!m) return err;
+    var reasons = m[1].split(/,\s*/).map(function (c) { return V.has("canada.outreach." + c) ? t("canada.outreach." + c) : String(c).replace(/_/g, " "); }).join(" · ");
+    return new V.ApiError(409, t("canada.outreach.refused", { reasons: reasons }), "outreach_blocked", err.body);
+  }
+
   function actionsBlock(d, recipient) {
     var a = d.application;
     var blocked = (a.packageBlocked || []).length > 0;
@@ -799,13 +858,28 @@
     var row = h("div", { class: "btn-row" });
     var canPrep = can("write") && PREPARABLE.indexOf(a.status) >= 0;
     row.appendChild(actionButton(t("action.prepare"), canPrep, !can("write") ? t("why.noPermission") : t("why.status", { status: tc("status", a.status) }), "secondary", function (b) {
-      V.busy(b, function () { return V.api("POST", "/jobsearch/applications/" + a.id + "/prepare", { body: {} }).then(function () { after(t("action.prepared")); }); }).catch(function () {});
+      V.busy(b, function () {
+        return V.api("POST", "/jobsearch/applications/" + a.id + "/prepare", { body: {} }).then(function (r) {
+          S.lastPackage = r && r.pkg ? { id: a.id, pkg: r.pkg } : null; // outreach_blockers + employer_history of the package (shown in the drawer)
+          after(t("action.prepared"));
+        });
+      }).catch(function () {});
     }));
     var approveWhy = !can("approve") ? t("why.approverOnly") : a.status !== "ready_for_review" ? t("why.status", { status: tc("status", a.status) }) : blocked ? t("why.blocked") : null;
     row.appendChild(actionButton(t("action.approve"), !approveWhy, approveWhy, "", function (b) {
       V.confirmDialog(t("action.approveConfirm") + " " + recipientText, t("action.approve")).then(function (ok) {
         if (!ok) return;
-        V.busy(b, function () { return V.api("POST", "/jobsearch/applications/" + a.id + "/approve", { body: reason.value.trim() ? { reason: reason.value.trim() } : {} }).then(function () { after(t("action.approved")); }); }).catch(function () {});
+        V.busy(b, function () {
+          return V.api("POST", "/jobsearch/applications/" + a.id + "/approve", { body: reason.value.trim() ? { reason: reason.value.trim() } : {} }).catch(function (e) { throw outreachRefusal(e); }).then(function (r) {
+            // the do-not-contact list, an opted-out employer and the outreach basis refuse approval with 200 + blockedBy
+            if (r && Array.isArray(r.blockedBy) && r.blockedBy.length) {
+              V.toast(t("canada.outreach.refused", { reasons: r.blockedBy.map(function (c) { return V.has("canada.outreach." + c) ? t("canada.outreach." + c) : String(c).replace(/_/g, " "); }).join(" · ") }), "bad");
+              renderDrawer(a.id, true);
+              return;
+            }
+            after(t("action.approved"));
+          });
+        }).catch(function () {});
       });
     }));
     var queueWhy = !can("approve") ? t("why.approverOnly") : a.status !== "approved" ? t("why.status", { status: tc("status", a.status) }) : null;
@@ -1518,6 +1592,9 @@
           b.addEventListener("click", function () { V.setContent(actions, employerForm(e)); });
           actions.appendChild(b);
         }
+        employerRowListeners.forEach(function (fn) {
+          try { var extra = fn(e); if (extra) actions.appendChild(extra); } catch (err) { /* an extension failure must not break the list */ }
+        });
         cells.push(actions);
         return h("tr", null, cells);
       });

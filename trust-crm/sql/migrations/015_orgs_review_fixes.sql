@@ -32,9 +32,11 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-     WHERE conname = 'users_role_check' AND conrelid = to_regclass('users')
-       AND pg_get_constraintdef(oid) LIKE '%Employer%' AND pg_get_constraintdef(oid) LIKE '%Agency%'
+    -- OFFSET 0 keeps the planner from calling pg_get_constraintdef on other schemas' constraints
+    -- (parallel test schemas can be dropped mid-scan, which raises "could not open relation with OID").
+    SELECT 1 FROM (SELECT oid FROM pg_constraint
+                    WHERE conname = 'users_role_check' AND conrelid = to_regclass('users') OFFSET 0) s
+     WHERE pg_get_constraintdef(s.oid) LIKE '%Employer%' AND pg_get_constraintdef(s.oid) LIKE '%Agency%'
   ) THEN
     ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
     ALTER TABLE users ADD CONSTRAINT users_role_check

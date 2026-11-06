@@ -15,8 +15,9 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=lib.sh
+. ./lib.sh
+vita_init
 
 N="${1:-10}"
 [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -ge 1 ] && [ "$N" -le 200 ] || die "usage: ./show-sandbox-mail.sh [1-200]"
@@ -27,12 +28,9 @@ DB_NAME="$(get_env DB_NAME)"
 [[ "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]] || die "DB_USER in .env is missing or unusual"
 [[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || die "DB_NAME in .env is missing or unusual"
 
-command -v docker > /dev/null 2>&1 || die "docker is not installed"
-DOCKER=(docker)
-docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
 
 printf 'WARNING: bodies contain sign-in codes and personal data - admin use only, do not share.\n\n' >&2
-"${DOCKER[@]}" compose exec -T -e PGOPTIONS="-c default_transaction_read_only=on" db \
+compose exec -T -e PGOPTIONS="-c default_transaction_read_only=on" db \
   psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -v n="$N" -P pager=off -x <<'SQL'
 SELECT id, created_at, to_addr AS "to", subject, left(body, 2000) AS body
   FROM js_sandbox_mail

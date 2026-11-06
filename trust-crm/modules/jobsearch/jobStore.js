@@ -5,7 +5,7 @@ const { HttpError } = require("./httpError");
 
 const db = () => require("../../db");
 const FUZZY_DAYS = 21;
-const MAX = { title: 300, employer: 300, location: 300, country: 100, url: 2000, description: 20000 };
+const MAX = { title: 300, employer: 300, location: 300, country: 100, url: 2000, description: 20000, salaryText: 200, employmentType: 100, requiredExperienceText: 300 };
 
 // ---------- sanitising ----------
 function sanitizeText(input, max = MAX.description) {
@@ -81,9 +81,24 @@ function toDate(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** 'YYYY-MM-DD' for a real calendar day, else null. */
+function calendarDay(v) {
+  if (typeof v !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v.trim());
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]) ? m[0] : null;
+}
+
 function cleanRaw(raw) {
   const url = raw.url && canonicalUrl(raw.url) ? String(raw.url).trim().slice(0, MAX.url) : null;
+  const closingAt = toDate(raw.closingAt);
+  const optional = (v, max) => (typeof v === "string" && v.trim() ? oneLine(v, max) || null : null);
   return {
+    salaryText: optional(raw.salaryText, MAX.salaryText),
+    employmentType: optional(raw.employmentType, MAX.employmentType),
+    requiredExperienceText: optional(raw.requiredExperienceText, MAX.requiredExperienceText),
+    closingDate: calendarDay(raw.closingDate) || (closingAt ? closingAt.toISOString().slice(0, 10) : null),
     sourceJobId: oneLine(raw.sourceJobId, 500),
     url,
     title: oneLine(raw.title, MAX.title),
@@ -91,7 +106,7 @@ function cleanRaw(raw) {
     location: oneLine(raw.location, MAX.location),
     country: oneLine(raw.country, MAX.country),
     publishedAt: toDate(raw.publishedAt),
-    closingAt: toDate(raw.closingAt),
+    closingAt,
     description: sanitizeText(raw.description, MAX.description),
   };
 }
@@ -164,16 +179,19 @@ async function upsertJob(raw, sourceId, opts = {}) {
            employer_id = COALESCE(employer_id, $3), url = COALESCE(url, $4), location = COALESCE(NULLIF(location,''), $5),
            country = COALESCE(NULLIF(country,''), $6), published_at = COALESCE(published_at, $7),
            closing_at = COALESCE($8, closing_at), description_text = COALESCE(NULLIF(description_text,''), $9),
-           status = CASE WHEN COALESCE($8, closing_at) < $2 THEN 'expired' ELSE 'open' END
+           status = CASE WHEN COALESCE($8, closing_at) < $2 THEN 'expired' ELSE 'open' END,
+           salary_text = COALESCE($10, salary_text), employment_type = COALESCE($11, employment_type),
+           required_experience_text = COALESCE($12, required_experience_text), closing_date = COALESCE($13::date, closing_date)
          WHERE id = $1`,
-        [jobId, now, employerId, r.url, r.location || null, r.country || null, r.publishedAt, r.closingAt, r.description || null]
+        [jobId, now, employerId, r.url, r.location || null, r.country || null, r.publishedAt, r.closingAt, r.description || null, r.salaryText, r.employmentType, r.requiredExperienceText, r.closingDate]
       );
     } else {
       const status = r.closingAt && r.closingAt < now ? "expired" : "open";
       const ins = await client.query(
-        `INSERT INTO js_jobs (url, source_primary, employer_id, title, location, country, published_at, last_checked_at, closing_at, status, dedupe_key, description_text, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$8) RETURNING id`,
-        [r.url, src.rows[0].key, employerId, r.title, r.location || null, r.country || null, r.publishedAt, now, r.closingAt, status, key, r.description || null]
+        `INSERT INTO js_jobs (url, source_primary, employer_id, title, location, country, published_at, last_checked_at, closing_at, status, dedupe_key, description_text, created_at,
+                              salary_text, employment_type, required_experience_text, closing_date)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$8,$13,$14,$15,$16::date) RETURNING id`,
+        [r.url, src.rows[0].key, employerId, r.title, r.location || null, r.country || null, r.publishedAt, now, r.closingAt, status, key, r.description || null, r.salaryText, r.employmentType, r.requiredExperienceText, r.closingDate]
       );
       jobId = ins.rows[0].id;
       created = true;
@@ -183,6 +201,8 @@ async function upsertJob(raw, sourceId, opts = {}) {
        ON CONFLICT (source_id, source_job_id) DO UPDATE SET seen_at = EXCLUDED.seen_at, url = COALESCE(EXCLUDED.url, js_job_sightings.url)`,
       [jobId, sourceId, r.sourceJobId, r.url, now]
     );
+    // The vacancy classification follows the signals just stored (status, ad text, label, source); a staff classification is never touched.
+    await require("./classification").computeAndStore(client, jobId, { now });
     const job = (await client.query("SELECT * FROM js_jobs WHERE id = $1", [jobId])).rows[0];
     await client.query("COMMIT");
     return { job, created };
@@ -270,6 +290,7 @@ async function recheckJobDetailed(jobId, opts = {}) {
     if (closing) await db().query("UPDATE js_jobs SET closing_at = $2 WHERE id = $1", [jobId, closing]);
   }
   await db().query("UPDATE js_jobs SET status = $2, last_checked_at = $3 WHERE id = $1", [jobId, status, now]);
+  await require("./classification").recomputeStandalone(jobId, { now });
   return { status, verified, reason };
 }
 
@@ -284,13 +305,26 @@ async function importManual(input, user, opts = {}) {
   for (const f of ["publishedAt", "closingAt"]) {
     if (input[f] && !toDate(input[f])) throw new HttpError(400, `${f} is not a valid date`);
   }
+  const detail = {};
+  for (const [f, max] of [["salaryText", MAX.salaryText], ["employmentType", MAX.employmentType], ["requiredExperienceText", MAX.requiredExperienceText]]) {
+    const v = input[f];
+    if (v === undefined || v === null || v === "") continue;
+    if (typeof v !== "string") throw new HttpError(400, `${f} must be a string`);
+    const one = oneLine(v, max + 1);
+    if (one.length > max) throw new HttpError(400, `${f} must be at most ${max} characters`);
+    detail[f] = one || undefined;
+  }
+  if (input.closingDate !== undefined && input.closingDate !== null && input.closingDate !== "") {
+    if (!calendarDay(input.closingDate)) throw new HttpError(400, "closingDate must be a valid date (YYYY-MM-DD)");
+    detail.closingDate = calendarDay(input.closingDate);
+  }
   const { ensureSources } = require("./searchRunner");
   await ensureSources();
   const src = await db().query("SELECT id FROM js_sources WHERE key = 'manual_import'");
   const sourceJobId = `manual-${crypto.createHash("sha1").update(`${canonicalUrl(input.url) || ""}|${normalizeEmployer(employerName)}|${normalize(title)}|${normalizeCity(input.location)}`).digest("hex")}`;
-  const out = await upsertJob({ sourceJobId, url: input.url || null, title, employerName, location: input.location, country: input.country, publishedAt: input.publishedAt, closingAt: input.closingAt, description: input.description }, src.rows[0].id, opts);
+  const out = await upsertJob({ sourceJobId, url: input.url || null, title, employerName, location: input.location, country: input.country, publishedAt: input.publishedAt, closingAt: input.closingAt, description: input.description, ...detail }, src.rows[0].id, opts);
   await db().query("INSERT INTO js_audit_events (actor, action, detail) VALUES ($1,'job.manual_import',$2::jsonb)", [`user:${user.id}`, JSON.stringify({ jobId: out.job.id, created: out.created })]);
   return out;
 }
 
-module.exports = { upsertJob, recheckJob, recheckJobDetailed, importManual, sanitizeText, normalize, normalizeEmployer, normalizeCity, isoYearWeek, canonicalUrl, dedupeKey };
+module.exports = { calendarDay, upsertJob, recheckJob, recheckJobDetailed, importManual, sanitizeText, normalize, normalizeEmployer, normalizeCity, isoYearWeek, canonicalUrl, dedupeKey };

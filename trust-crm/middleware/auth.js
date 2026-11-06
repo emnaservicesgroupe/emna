@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const db = require("../db");
+const { isPatBearer } = require("../modules/mcp/auth");
 
 const VERSIONED_ROLES = new Set(["Candidate", "Employer", "Agency"]);
 const ORG_ROLES = { Employer: ["employer", "crm_employers"], Agency: ["agency", "crm_agencies"] };
@@ -9,6 +10,11 @@ exports.verifyToken = async (req, res, next) => {
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
 
   if (!token) {
+    return res.status(401).json({ error: "Access denied" });
+  }
+
+  // A personal access token (MCP) is never a session: refuse it before any JWT parsing. Only /mcp accepts one.
+  if (isPatBearer(authHeader)) {
     return res.status(401).json({ error: "Access denied" });
   }
 
@@ -66,7 +72,7 @@ const PORTAL_JOBSEARCH_OK = new Set(["GET /auth/me", "POST /auth/otp/request", "
 exports.rejectPortalTokens = (req, res, next) => {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : header;
-  if (!token) return next();
+  if (!token || isPatBearer(header)) return next(); // a PAT is never parsed as a JWT; the route's verifyToken answers 401
   let verified;
   try {
     verified = jwt.verify(token, process.env.JWT_SECRET);

@@ -21,9 +21,49 @@
   }
   /** A stream only counts as healthy (attempt counter reset) after it stayed open this long or delivered an event. */
   var STABLE_STREAM_MS = 10000;
+  var MAX_SSE_BUFFER = 1000000;
+
+  /**
+   * Incremental parser for a text/event-stream body. push(text) accepts any chunking (a frame may arrive in pieces);
+   * onFrame({id, data}) runs once per complete frame (blank-line terminated) that carries an `id:` or `data:` field:
+   * id is the raw string or null, data the joined data lines or null. Comment lines (":..."), `retry:` and unknown
+   * fields never produce a frame of their own. A frame that never terminates is dropped once it exceeds ~1 MB.
+   * Pure, so it is unit-tested from Node; connectEvents (below) is the only stream client used by the pages.
+   */
+  function createSseParser(onFrame) {
+    var buf = "";
+    function parse(raw) {
+      var data = [];
+      var id = null;
+      raw.split(/\r?\n/).forEach(function (line) {
+        if (!line || line.charAt(0) === ":") return;
+        var i = line.indexOf(":");
+        var field = i < 0 ? line : line.slice(0, i);
+        var value = i < 0 ? "" : line.slice(i + 1);
+        if (value.charAt(0) === " ") value = value.slice(1);
+        if (field === "data") data.push(value);
+        else if (field === "id") id = value;
+      });
+      if (id === null && !data.length) return;
+      if (typeof onFrame !== "function") return;
+      try { onFrame({ id: id, data: data.length ? data.join("\n") : null }); } catch (e) { /* a failing listener must not stop the stream */ }
+    }
+    return {
+      push: function (chunk) {
+        buf += String(chunk);
+        var m;
+        while ((m = /\r?\n\r?\n/.exec(buf))) {
+          var raw = buf.slice(0, m.index);
+          buf = buf.slice(m.index + m[0].length);
+          parse(raw);
+        }
+        if (buf.length > MAX_SSE_BUFFER) buf = "";
+      },
+    };
+  }
 
   if (typeof window === "undefined") {
-    if (typeof module !== "undefined" && module.exports) module.exports = { backoffDelay: backoffDelay, STABLE_STREAM_MS: STABLE_STREAM_MS };
+    if (typeof module !== "undefined" && module.exports) module.exports = { backoffDelay: backoffDelay, STABLE_STREAM_MS: STABLE_STREAM_MS, createSseParser: createSseParser };
     return;
   }
 
@@ -314,8 +354,9 @@
   }
 
   function assertPath(path) {
-    // Staff console + candidate portal (/jobsearch, /auth, /crm) and the employer / agency portals (/employer, /agency).
-    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path))) throw new Error("API path not allowed");
+    // Staff console + candidate portal (/jobsearch, /auth, /crm), the employer / agency portals (/employer, /agency) and
+    // accounting (/finance/, plus the candidate name lookup /candidates/all used by the Accounting tab).
+    if (typeof path !== "string" || !(/^\/(jobsearch|auth|crm)\//.test(path) || /^\/(employer|agency)\//.test(path) || /^\/finance\//.test(path) || /^\/hr\//.test(path) || /^\/chat\//.test(path) || /^\/mcp-tokens(?:[\/?]|$)/.test(path) || /^\/candidates\/all(?:\?|$)/.test(path))) throw new Error("API path not allowed");
   }
 
   /** JSON API call. opts: body, noAuth, raw (return Response), headers. */
@@ -371,20 +412,27 @@
     });
   }
 
-  /** Authenticated download (e.g. CSV export) through a Blob; the token never goes into a URL. */
-  function download(path, fallbackName) {
+  /**
+   * Authenticated download (e.g. CSV export) through a Blob; the token never goes into a URL.
+   * opts.open: show the document in a new tab instead of saving it (print pages); opts.rewrite(text) may adjust the
+   * fetched HTML first (the stylesheet link of a blob: page). Resolves {name, size, rows, truncated}; `truncated` is
+   * also true when the server cut a CSV at its row cap (X-Row-Limit-Hit).
+   */
+  function download(path, fallbackName, opts) {
+    var o = opts || {};
     return api("GET", path, { raw: true }).then(function (res) {
       var cd = res.headers.get("Content-Disposition") || "";
       var m = /filename="([A-Za-z0-9._-]{1,120})"/.exec(cd);
       var name = m ? m[1] : fallbackName || "download";
-      var meta = { rows: res.headers.get("X-Export-Rows"), truncated: res.headers.get("X-Export-Truncated") === "true" };
-      return res.blob().then(function (blob) {
+      var meta = { rows: res.headers.get("X-Export-Rows"), truncated: res.headers.get("X-Export-Truncated") === "true" || res.headers.get("X-Row-Limit-Hit") === "true" };
+      var body = o.open ? res.text().then(function (text) { return new Blob([o.rewrite ? o.rewrite(text) : text], { type: "text/html;charset=utf-8" }); }) : res.blob();
+      return body.then(function (blob) {
         var url = URL.createObjectURL(blob);
-        var a = h("a", { href: url, attrs: { download: name } });
+        var a = o.open ? h("a", { href: url, attrs: { target: "_blank", rel: "noopener noreferrer" } }) : h("a", { href: url, attrs: { download: name } });
         document.body.appendChild(a);
         a.click();
         a.remove();
-        window.setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+        window.setTimeout(function () { URL.revokeObjectURL(url); }, o.open ? 120000 : 10000);
         return { name: name, size: blob.size, rows: meta.rows, truncated: meta.truncated };
       });
     });
@@ -463,7 +511,8 @@
 
   // ---------------------------------------------------------------- realtime (SSE over fetch)
   /**
-   * Streams /jobsearch/events with the Authorization header (EventSource cannot send headers).
+   * Streams an event endpoint (default /jobsearch/events; o.path selects another allow-listed one, e.g. /chat/events)
+   * with the Authorization header (the browser's built-in event-source object cannot send headers).
    * - refetch() runs on every (re)connect, every `periodicMs`, and when the tab becomes visible,
    *   so state is correct even if events were missed.
    * - Reconnects with exponential backoff + jitter (1s .. 30s); Last-Event-ID resumes the stream.
@@ -477,28 +526,20 @@
     var timer = null;
     var lastId = null;
     var periodicMs = o.periodicMs || 60000;
+    var path = o.path || "/jobsearch/events";
+    assertPath(path);
     var status = function (s) { if (o.onStatus) safe(o.onStatus, s); };
     var refetch = function () { if (o.refetch) safe(o.refetch); };
 
-    function frame(raw) {
-      var data = [];
-      var id = null;
-      raw.split(/\r?\n/).forEach(function (line) {
-        if (!line || line.charAt(0) === ":") return;
-        var i = line.indexOf(":");
-        var field = i < 0 ? line : line.slice(0, i);
-        var value = i < 0 ? "" : line.slice(i + 1);
-        if (value.charAt(0) === " ") value = value.slice(1);
-        if (field === "data") data.push(value);
-        else if (field === "id") id = value;
-      });
-      if (id && /^\d{1,18}$/.test(id)) lastId = id;
-      if (!data.length) return;
+    function onFrame(f) {
+      if (f.id && /^\d{1,18}$/.test(f.id)) lastId = f.id;
+      if (f.data === null) return;
       var ev;
-      try { ev = JSON.parse(data.join("\n")); } catch (e) { return; }
+      try { ev = JSON.parse(f.data); } catch (e) { return; }
       attempt = 0;
       if (o.onEvent) safe(o.onEvent, ev);
     }
+    var parser = null;
 
     function schedule() {
       if (stopped) return;
@@ -516,7 +557,7 @@
       controller = new AbortController();
       var headers = { Accept: "text/event-stream", Authorization: "Bearer " + tok };
       if (lastId) headers["Last-Event-ID"] = lastId;
-      fetch("/jobsearch/events", { headers: headers, signal: controller.signal, cache: "no-store", credentials: "same-origin" })
+      fetch(path, { headers: headers, signal: controller.signal, cache: "no-store", credentials: "same-origin" })
         .then(function (res) {
           if (res.status === 401) {
             stopped = true;
@@ -533,17 +574,11 @@
           refetch();
           var reader = res.body.getReader();
           var decoder = new TextDecoder();
-          var buf = "";
+          parser = createSseParser(onFrame); // a fresh buffer per connection: a half frame of the old stream is never glued to the new one
           var pump = function () {
             return reader.read().then(function (r) {
               if (r.done) throw new Error("stream closed");
-              buf += decoder.decode(r.value, { stream: true });
-              var m;
-              while ((m = /\r?\n\r?\n/.exec(buf))) {
-                frame(buf.slice(0, m.index));
-                buf = buf.slice(m.index + m[0].length);
-              }
-              if (buf.length > 1000000) buf = "";
+              parser.push(decoder.decode(r.value, { stream: true }));
               return pump();
             });
           };

@@ -10,8 +10,11 @@ const { candidateScopeSql, isAdmin } = require("./scope");
 const consentService = require("./consentService");
 const coverLetter = require("./coverLetter");
 const documentPolicy = require("./documentPolicy");
-const { country, NOTICE } = require("./matching");
+const { country, NOTICE, BAND_LABELS } = require("./matching");
+const classification = require("./classification");
+const settingsService = require("./settingsService");
 const { normalize } = require("./jobStore");
+const employerHistoryModule = require("./employerHistory");
 const { PERMISSIONS } = require("../../middleware/role");
 const { logAudit } = require("../../utils/audit");
 
@@ -275,7 +278,9 @@ async function createFromMatch({ matchId, actor, [SCHEDULER_GRANT]: schedulerGra
   if (!system && !canUse(actor, "jobsearch:write")) throw new HttpError(404, "Not found");
   let m;
   if (system) {
-    m = (await db().query("SELECT m.candidate_id, m.job_id FROM js_matches m JOIN candidates c ON c.id = m.candidate_id WHERE m.id = $1 AND c.is_deleted = false", [mid])).rows[0];
+    m = (await db().query("SELECT m.candidate_id, m.job_id, m.band FROM js_matches m JOIN candidates c ON c.id = m.candidate_id WHERE m.id = $1 AND c.is_deleted = false", [mid])).rows[0];
+    // A match flagged not_recommended (score under 50 or an essential veto) is never proposed automatically; a person may still open it.
+    if (m && m.band === "not_recommended") throw new HttpError(409, "The match is not recommended; it is not proposed automatically", "match_not_recommended");
   } else {
     const { clause, params } = candidateScopeSql(actor, "c", 1);
     m = (await db().query(
@@ -316,6 +321,36 @@ async function createFromMatch({ matchId, actor, [SCHEDULER_GRANT]: schedulerGra
 
 // ---------------------------------------------------------------- preparation
 
+// Candidate work_authorization_status values (migration 025) that hold a permit, PR or citizenship.
+const AUTHORIZED_STATUSES = ["work_permit_open", "work_permit_employer_specific", "pr", "citizen"];
+
+/**
+ * closed_unsuitable and prospective_no_vacancy block preparation (prospective outreach stays blocked until a lawyer approves its CASL
+ * basis); work_authorization_required blocks it unless the candidate's recorded status is a permit / PR /
+ * citizen state (then it is allowed and noted in the package). Returns the package note, or null. A classification is a review aid
+ * read from an advertisement; it never grants eligibility.
+ */
+async function classificationGate(client, app, job) {
+  if (job.classification === "closed_unsuitable") throw new HttpError(409, "The job is closed or unsuitable; the application cannot be prepared", "job_closed_unsuitable");
+  if (job.classification === "prospective_no_vacancy") {
+    throw new HttpError(409, "The posting is a prospective one with no stated vacancy; outreach without a vacancy is not permitted", "no_vacancy_outreach_not_permitted");
+  }
+  if (job.classification !== "work_authorization_required") return null;
+  const status = (await client.query("SELECT work_authorization_status FROM candidates WHERE id = $1", [app.candidate_id])).rows[0]?.work_authorization_status || null;
+  if (!AUTHORIZED_STATUSES.includes(status)) {
+    throw new HttpError(409, "The job requires work authorization and the candidate's recorded status does not show a permit, permanent residence or citizenship", "work_authorization_required");
+  }
+  return `job_requires_work_authorization:candidate_status_${status}`;
+}
+
+/** When the module setting require_match_acceptance is on, the match must have been accepted by an approver. */
+async function acceptanceGate(client, app) {
+  const { require_match_acceptance: required } = await settingsService.getMatchSettings(client);
+  if (!required) return;
+  const m = (await client.query("SELECT decision FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [app.candidate_id, app.job_id])).rows[0];
+  if (!m || m.decision !== "accepted") throw new HttpError(409, "The match must be accepted by a manager before the application is prepared", "match_not_accepted");
+}
+
 /**
  * matched/failed/needs_staff/ready_for_review -> preparing -> ready_for_review (only when nothing is
  * blocked). Builds the cover letter from the CONFIRMED profile and stores the exact package.
@@ -339,6 +374,9 @@ async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT
     const prefs = (await client.query("SELECT needs_work_auth_support FROM js_preferences WHERE candidate_id = $1", [app.candidate_id])).rows[0];
     const blockers = await sendBlockers(client, app.candidate_id, "prepare");
     if (blockers.length) throw new HttpError(409, `Cannot prepare: ${blockers.join(", ")}`);
+    // Stage 8 task 5: vacancy classification and (optionally) staff acceptance of the match gate preparation.
+    const classNote = await classificationGate(client, app, job);
+    await acceptanceGate(client, app);
 
     if (app.status !== "preparing") app = await transition(app.id, "preparing", actor, { client, reason: app.status === "ready_for_review" ? "re_preparation_requested" : "preparation_started" });
 
@@ -346,7 +384,7 @@ async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT
     const letter = coverLetter.generateDetailed(profile.confirmed, { title: job.title, employer: job.employer_name }, jobLanguage, { needsWorkAuthSupport: Boolean(prefs && prefs.needs_work_auth_support === true) });
     const req = requested === undefined ? app.package_requested || [] : requested;
     const pkg = await documentPolicy.buildPackage({ application: app, requested: req, jobLanguage, client });
-    const notes = [...pkg.notes, ...letter.omitted.map((f) => `omitted_sensitive_or_unverifiable:${f}`)];
+    const notes = [...pkg.notes, ...letter.omitted.map((f) => `omitted_sensitive_or_unverifiable:${f}`), ...(classNote ? [classNote] : [])];
 
     await client.query("UPDATE js_application_documents SET removed_at = now(), removed_reason = 'superseded' WHERE application_id = $1 AND removed_at IS NULL", [app.id]);
     for (const d of pkg.included) {
@@ -373,9 +411,14 @@ async function prepareApplication({ id, actor, documents, lang, [SCHEDULER_GRANT
     };
     await timeline(client, app.id, actor, "package_built", summary);
     await audit(client, actor, "application.prepare", app.candidate_id, app.id, summary);
+    // Stage 8 task 4: staff see a suppressed recipient / opted-out employer / non-permitted outreach basis NOW, not at send time,
+    // and the contact history of this employer (counts and last date, scoped to the caller) before they draft.
+    const outreachBlockers = await require("./guard").outreachBlockers(client, app.id);
+    for (const b of outreachBlockers) await timeline(client, app.id, actor, "outreach_blocked", { code: b.code, stage: "prepare" });
+    const employerHistory = await employerHistoryModule.summaryFor(client, actor, job.employer_id, app.id);
     if (!pkg.blocked.length) app = await transition(app.id, "ready_for_review", actor, { client, reason: "package_complete" });
     await event(client, app.candidate_id, "application.prepared", { applicationId: app.id, status: app.status, blocked: pkg.blocked.length });
-    return { app, pkg: { included: pkg.included, blocked: pkg.blocked, notes }, letter: letter.text };
+    return { app, pkg: { included: pkg.included, blocked: pkg.blocked, notes, outreach_blockers: outreachBlockers.map((b) => ({ code: b.code, detail: b.detail })), employer_history: employerHistory }, letter: letter.text };
   });
   await logAfter(actor, "jobsearch.application.prepare", result.app.id, { status: result.app.status, blocked: result.pkg.blocked.length });
   // Candidates see which documents/versions are in their package, never hashes (same rule as getApplication).
@@ -400,12 +443,28 @@ async function approveApplication({ id, actor, reason }) {
     if (problems.length) throw new HttpError(409, `The package is no longer valid: ${documentPolicy.formatProblems(problems)}`);
     const job = (await client.query("SELECT status FROM js_jobs WHERE id = $1", [locked.job_id])).rows[0];
     if (!job || job.status !== "open") throw new HttpError(409, "The job is no longer open");
+    // The do-not-contact list is absolute (stage 8 task 4): a suppressed recipient / opted-out employer / non-permitted outreach
+    // basis cannot be approved. The refusal leaves a timeline note (this transaction commits it; the 409 follows).
+    const outreachBlockers = await require("./guard").outreachBlockers(client, locked.id);
+    if (outreachBlockers.length) {
+      for (const b of outreachBlockers) await timeline(client, locked.id, actor, "outreach_blocked", { code: b.code, stage: "approve" });
+      await audit(client, actor, "application.approve_refused", locked.candidate_id, locked.id, { blockers: outreachBlockers });
+      return { blockedBy: outreachBlockers.map((b) => b.code) };
+    }
+    // Review round 1: the classification and the match decision are checked again at approval (staff may have changed them since preparation).
+    const reviewBlockers = await require("./guard").reviewBlockers(client, locked.id);
+    if (reviewBlockers.length) {
+      for (const b of reviewBlockers) await timeline(client, locked.id, actor, "approval_blocked", { code: b.code, stage: "approve" });
+      await audit(client, actor, "application.approve_refused", locked.candidate_id, locked.id, { blockers: reviewBlockers });
+      return { blockedBy: reviewBlockers.map((b) => b.code) };
+    }
     const row = await transition(locked.id, "approved", actor, { client, reason: why, detail: { approvedBy: actor.id } });
     await client.query("UPDATE js_application_documents SET approved_by = $2, approved_at = now() WHERE application_id = $1 AND removed_at IS NULL", [locked.id, actor.id]);
     await audit(client, actor, "application.approve", locked.candidate_id, locked.id, { reason: why });
     await event(client, locked.candidate_id, "application.approved", { applicationId: locked.id });
     return row;
   });
+  if (app.blockedBy) throw new HttpError(409, `Cannot approve: ${app.blockedBy.join(", ")} (do-not-contact list, outreach basis, vacancy classification or match decision)`);
   await logAfter(actor, "jobsearch.application.approve", app.id, { reason: why });
   return { application: present(app) };
 }
@@ -655,6 +714,10 @@ async function autoApproveEligibility(application, opts = {}) {
     }
     if (match.overseas_accepted !== true) reasons.push("overseas_acceptance_not_confirmed");
   }
+  // Do-not-contact list, employer opt-out and outreach basis (stage 8 task 4): checked here so auto-approval never happens,
+  // and again by the guard at send time with its own codes.
+  reasons.push(...(await require("./guard").outreachBlockers(c, app.id)).map((b) => b.code));
+  reasons.push(...(await require("./guard").reviewBlockers(c, app.id)).map((b) => b.code));
   const uniq = [...new Set(reasons)];
   return { allowed: uniq.length === 0, reasons: uniq };
 }
@@ -699,7 +762,7 @@ async function approveCvVersion({ user, cvFileId, language, note }) {
   if (!lang) throw new HttpError(400, "language must be a 2-letter code such as en, fr or ar");
   const { clause, params } = candidateScopeSql(user, "c", 1);
   const cv = (await db().query(
-    `SELECT f.id, f.candidate_id, f.scan_status FROM js_cv_files f JOIN candidates c ON c.id = f.candidate_id
+    `SELECT f.id, f.candidate_id, f.scan_status, f.kind FROM js_cv_files f JOIN candidates c ON c.id = f.candidate_id
       WHERE f.id = $1 AND c.is_deleted = false AND ${clause}`,
     [id, ...params]
   )).rows[0];
@@ -712,6 +775,7 @@ async function approveCvVersion({ user, cvFileId, language, note }) {
     if (!why || why.length < 10) throw new HttpError(400, "note is required (at least 10 characters) when staff approve a CV version on the candidate's behalf");
   }
   if (cv.scan_status === "infected") throw new HttpError(409, "Infected files cannot be approved");
+  if (cv.kind === "canadian") throw new HttpError(409, "Canadian CV versions are approved by staff and authorised by the candidate through the Canadian CV endpoints");
   const row = await inTx(async (client) => {
     await client.query("SELECT id FROM candidates WHERE id = $1 FOR UPDATE", [cv.candidate_id]);
     const r = (await client.query("UPDATE js_cv_files SET approved = true, language = $2 WHERE id = $1 RETURNING id, candidate_id, version, language, approved, sha256", [id, lang])).rows[0];
@@ -866,7 +930,7 @@ function candidateTimelineDetail(detail, e = { detail }) {
 async function getApplication({ user, id }) {
   const app = await loadScoped(user, id);
   const c = db();
-  const job = (await c.query("SELECT id, title, country, location, url, status, source_primary, employer_id, closing_at FROM js_jobs WHERE id = $1", [app.job_id])).rows[0];
+  const job = (await c.query("SELECT id, title, country, location, url, status, source_primary, employer_id, closing_at, classification, classification_evidence, classified_at, classified_by, salary_text, employment_type, required_experience_text, to_char(closing_date, 'YYYY-MM-DD') AS closing_date FROM js_jobs WHERE id = $1", [app.job_id])).rows[0];
   const employer = job && job.employer_id ? (await c.query("SELECT id, name, domain FROM js_employers WHERE id = $1", [job.employer_id])).rows[0] : null;
   const match = (await c.query("SELECT * FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [app.candidate_id, app.job_id])).rows[0];
   const tl = (await c.query("SELECT id, actor, event, detail, created_at FROM js_timeline WHERE application_id = $1 ORDER BY id", [app.id])).rows;
@@ -878,12 +942,17 @@ async function getApplication({ user, id }) {
   const shares = (await c.query("SELECT * FROM js_sharing_authorizations WHERE application_id = $1 ORDER BY id", [app.id])).rows;
   const out = {
     application: { ...present(app), coverLetter: app.cover_letter_text },
-    job: job ? { id: job.id, title: job.title, country: job.country, location: job.location, url: job.url, status: job.status, source: job.source_primary, closingAt: job.closing_at } : null,
+    job: job ? { id: job.id, title: job.title, country: job.country, location: job.location, url: job.url, status: job.status, source: job.source_primary, closingAt: job.closing_at, closingDate: job.closing_date, salaryText: job.salary_text, employmentType: job.employment_type, requiredExperienceText: job.required_experience_text, ...classification.presentClassification(job, { staff: user.role !== "Candidate" }) } : null,
     employer: employer ? { id: employer.id, name: employer.name, domain: employer.domain } : null,
     match: match
       ? {
           id: match.id,
           score: match.score,
+          band: match.band,
+          bandLabel: match.band ? BAND_LABELS[match.band] : null,
+          // Once an application exists the candidate sees the state (pending / accepted / rejected), never the note or who decided.
+          decision: match.decision,
+          ...(user.role === "Candidate" ? {} : { decisionBy: match.decision_by, decidedAt: match.decided_at, decisionNote: match.decision_note }),
           reasons: match.reasons,
           missing: match.missing,
           uncertain: match.uncertain,

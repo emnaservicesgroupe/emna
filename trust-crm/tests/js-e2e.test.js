@@ -218,7 +218,10 @@ test("J1 full journey (prepare_for_approval): CV -> consent -> search/dedupe/mat
   const appB = await appFor(w, c.id, B.id);
   // (Task 18: unconditional) the residents-only job is still prepared for a human to decide - never approved by itself
   assert.ok(appB, "the residents-only match becomes an application");
-  assert.equal(appB.status, "ready_for_review", "a residents-only job is never approved without a human");
+  // Stage 8 task 5: the ad's "Canadian residents only" restriction classifies the job work_authorization_required, and this candidate has no
+  // recorded permit / PR / citizen status, so preparation is refused (409 work_authorization_required): the application waits as 'matched'.
+  assert.equal(B.classification, "work_authorization_required");
+  assert.equal(appB.status, "matched", "a residents-only job is not prepared for a candidate without a recorded work authorization, and never approved without a human");
   assert.equal((await E.appMails(w)).length, 0, "ZERO application mails before a human approves");
   assert.equal(await w.count("SELECT count(*) AS n FROM js_submissions"), 0);
 
@@ -1081,6 +1084,9 @@ test("J8 disclaimer over HTTP + candidate-facing API responses carry no staff-on
   for (const e of st.events) leaks.push(...E.staffOnlyKeys(e.data, `sse:${e.data.kind}`));
 
   // (Task 18) every candidate-callable WRITE endpoint's response too (POST/PUT/DELETE), not only GETs
+  // Stage 8 task 5: "fx-north-1" says "Canadian residents only" (work_authorization_required); staff record that this candidate holds an open work
+  // permit so that preparation is allowed, and the candidate-facing prepare response is still checked for staff-only keys.
+  await w.q("UPDATE candidates SET work_authorization_status = 'work_permit_open' WHERE id = $1", [A.id]);
   const appB = await appFor(w, A.id, (await jobBySource(w, "fx-north-1")).id);
   const mB = await w.one("SELECT id FROM js_matches WHERE candidate_id = $1 AND job_id = $2", [A.id, appB.job_id]);
   const passport = (await w.one("INSERT INTO documents (candidate_id, doc_type, file_path) VALUES ($1, 'passport', '/crm/passport-j8.pdf') RETURNING id", [A.id])).id;

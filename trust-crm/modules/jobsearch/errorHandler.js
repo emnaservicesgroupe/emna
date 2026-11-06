@@ -10,7 +10,7 @@ function asyncHandler(fn) {
 // eslint-disable-next-line no-unused-vars
 function jobsearchErrorHandler(err, _req, res, _next) {
   if (err instanceof HttpError) {
-    return res.status(err.status).json({ error: err.message });
+    return res.status(err.status).json(err.code ? { error: err.message, code: err.code } : { error: err.message });
   }
   // Log only the error name/message and code: never request bodies (they may hold OTPs).
   console.error("jobsearch error:", err && err.name, err && err.code, err && err.message);

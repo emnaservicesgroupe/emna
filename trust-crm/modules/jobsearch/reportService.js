@@ -232,14 +232,14 @@ async function dashboard({ user, query = {} }) {
 
   const total = emptyCounts();
   for (const x of per.values()) for (const k of Object.keys(total)) total[k] += x[k];
-  const names = await c.query(`SELECT c.id, c.full_name FROM candidates c WHERE ${w}${cf} ORDER BY c.id LIMIT ${CANDIDATE_LIST_LIMIT}`, p);
+  const names = await c.query(`SELECT c.id, c.full_name, c.reference FROM candidates c WHERE ${w}${cf} ORDER BY c.id LIMIT ${CANDIDATE_LIST_LIMIT}`, p);
   const totals = shape(total, isCand);
   if (unscopedCount !== null) totals.unassigned_open_tasks = unscopedCount;
   return {
     scope: scopeName(user),
     candidateId: candidateId || null,
     totals,
-    candidates: names.rows.map((r) => ({ candidateId: r.id, name: r.full_name, counts: shape(per.get(r.id) || emptyCounts(), isCand) })),
+    candidates: names.rows.map((r) => ({ candidateId: r.id, reference: r.reference, name: r.full_name, counts: shape(per.get(r.id) || emptyCounts(), isCand) })),
     attention,
   };
 }
@@ -322,7 +322,11 @@ function filterSql(f, p, { statusCol = "a.status" } = {}) {
   return where;
 }
 
-async function report({ user, query = {} }) {
+/**
+ * `tz` (optional, a validated timezone name; default 'UTC') only decides where the groupBy=period buckets (day / week / month) start.
+ * Which events are counted never depends on it.
+ */
+async function report({ user, query = {}, tz = "UTC" }) {
   requireStaffReader(user);
   const { groupBy, period, from, to, f } = parseReportQuery(user, query);
   const p = [];
@@ -336,7 +340,8 @@ async function report({ user, query = {} }) {
   let labelExpr;
   if (groupBy === "period") {
     p.push(period);
-    keyExpr = `to_char(date_trunc($${p.length}::text, ev.at AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+    p.push(tz);
+    keyExpr = `to_char(date_trunc($${p.length - 1}::text, ev.at AT TIME ZONE $${p.length}::text), 'YYYY-MM-DD')`;
     labelExpr = "NULL::text";
   } else {
     keyExpr = DIMENSIONS[groupBy].key;

@@ -14,18 +14,15 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
-
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=lib.sh
+. ./lib.sh
+vita_init
 
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 RETENTION="${RETENTION:-14}"
 [[ "$RETENTION" =~ ^[0-9]+$ ]] && [ "$RETENTION" -ge 1 ] || die "RETENTION must be a number >= 1"
 [ -f .env ] || die ".env not found (run ./setup.sh first)"
 
-command -v docker > /dev/null 2>&1 || die "docker is not installed"
-DOCKER=(docker)
-docker info > /dev/null 2>&1 || DOCKER=(sudo docker)
-compose() { "${DOCKER[@]}" compose "$@"; }
 
 get_env() { grep -E "^$2=" "$1" 2> /dev/null | tail -n 1 | cut -d= -f2- || true; }
 DB_NAME="$(get_env .env DB_NAME)"
@@ -49,7 +46,7 @@ DONE=0
 on_exit() { if [ "$DONE" -ne 1 ] && [ -n "${DEST:-}" ] && [ -d "$DEST" ]; then rm -rf -- "$DEST"; printf 'Backup FAILED; removed the incomplete %s\n' "$DEST" >&2; fi; }
 trap on_exit EXIT
 
-printf 'Backing up to %s\n' "$DEST"
+printf 'Backing up project %s to %s\n' "$PROJECT" "$DEST"
 # pg_dump runs inside the db container; the dump streams to this host (no password needed: local socket).
 compose exec -T db pg_dump -U "$PG_SUPER" -d "$DB_NAME" -Fc --no-owner > "$DEST/db.dump.partial"
 mv "$DEST/db.dump.partial" "$DEST/db.dump"
